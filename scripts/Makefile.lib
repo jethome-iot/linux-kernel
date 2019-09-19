@@ -93,6 +93,9 @@ base-dtb-y := $(filter %.dtb, $(call real-search, $(multi-dtb-y), .dtb, -dtbs))
 
 always-y			+= $(dtb-y)
 
+# Overlay targets
+extra-y                                += $(dtbo-y) $(scr-y) $(dtbotxt-y)
+
 # Add subdir path
 
 ifneq ($(obj),.)
