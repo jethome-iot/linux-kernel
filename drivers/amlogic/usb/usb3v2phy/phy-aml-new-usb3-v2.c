@@ -596,8 +596,13 @@ static int amlogic_new_usb3_v2_probe(struct platform_device *pdev)
 	if (prop)
 		portnum = of_read_ulong(prop, 1);
 
-	if (!portnum)
-		dev_err(&pdev->dev, "This phy has no usb port\n");
+	//if (!portnum)
+	//	dev_err(&pdev->dev, "This phy has no usb port\n");
+
+	prop = of_get_property(dev->of_node, "version", NULL);
+
+	//if (!phy_version)
+	//	dev_err(&pdev->dev, "This is normal phy\n");
 
 	tsi_pci = of_find_node_by_type(NULL, "pci");
 	if (tsi_pci) {
@@ -672,8 +677,8 @@ static int amlogic_new_usb3_v2_probe(struct platform_device *pdev)
 		}
 	}
 
-	dev_info(&pdev->dev, "USB3 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
-			(unsigned long)phy_mem->start, (unsigned long)phy_base);
+	//dev_info(&pdev->dev, "USB3 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
+	//		(unsigned long)phy_mem->start, (unsigned long)phy_base);
 
 	phy->dev		= dev;
 	phy->regs		= phy_base;

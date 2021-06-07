@@ -59,7 +59,7 @@ int register_amlogic_afbc_dec_fun_v1(AMLOGIC_FBC_vframe_decoder_fun_t fn)
 		pr_err("error!!,AMLOGIC_FBC dec have register\n");
 		return -1;
 	}
-	pr_err("register_amlogic_afbc_dec_fun\n");
+	//pr_err("register_amlogic_afbc_dec_fun\n");
 	g_decoder_fun = fn;
 	return 0;
 }
@@ -87,7 +87,7 @@ EXPORT_SYMBOL(unregister_amlogic_afbc_dec_fun_v1);
 int unregister_amlogic_afbc_enc_fun_v1(void)
 {
 	g_encoder_fun = NULL;
-	pr_err("unregister_amlogic_afbc_dec_fun\n");
+	//pr_err("unregister_amlogic_afbc_dec_fun\n");
 	return 0;
 }
 EXPORT_SYMBOL(unregister_amlogic_afbc_enc_fun_v1);

@@ -131,7 +131,7 @@ static void usb_set_calibration_trim
 	u8 cali_en;
 
 	if (!phy->usb_phy_trim_reg) {
-		dev_err(phy->dev, "Not usb-phy-trim-reg\n");
+		//dev_err(phy->dev, "Not usb-phy-trim-reg\n");
 		return;
 	}
 
@@ -152,7 +152,7 @@ static void usb_set_calibration_trim
 
 	writel(value, reg + 0x10);
 
-	dev_info(phy->dev, "phy trim value= 0x%08x\n", value);
+	//dev_info(phy->dev, "phy trim value= 0x%08x\n", value);
 }
 
 static void set_trim_initvalue
@@ -374,7 +374,7 @@ static int amlogic_new_usb2_probe(struct platform_device *pdev)
 		portnum = of_read_ulong(prop, 1);
 
 	if (!portnum) {
-		dev_err(&pdev->dev, "This phy has no usb port\n");
+		//dev_err(&pdev->dev, "This phy has no usb port\n");
 		return -ENOMEM;
 	}
 
@@ -519,8 +519,8 @@ static int amlogic_new_usb2_probe(struct platform_device *pdev)
 	if (retval < 0)
 		pll_disconnect_enhance = 0;
 
-	dev_info(&pdev->dev, "USB2 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
-			(unsigned long)phy_mem->start, (unsigned long)phy_base);
+	//dev_info(&pdev->dev, "USB2 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
+	//		(unsigned long)phy_mem->start, (unsigned long)phy_base);
 
 	phy->dev		= dev;
 	phy->regs		= phy_base;

@@ -268,7 +268,7 @@ static int snd_iomap_probe(struct platform_device *pdev)
 
 		i++;
 	}
-	pr_info("amlogic %s probe done\n", DEV_NAME);
+	//pr_info("amlogic %s probe done\n", DEV_NAME);
 
 	return ret;
 }

@@ -195,7 +195,7 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 	if (!name)
 		return;
 
-	pr_info("Machine model: %s\n", name);
+	//pr_info("Machine model: %s\n", name);
 	dump_stack_set_arch_desc("%s (DT)", name);
 }
 

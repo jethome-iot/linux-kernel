@@ -709,7 +709,7 @@ static struct platform_driver bt_driver = {
 
 static int __init bt_init(void)
 {
-	pr_info("amlogic rfkill init\n");
+	//pr_info("amlogic rfkill init\n");
 
 	return platform_driver_register(&bt_driver);
 }

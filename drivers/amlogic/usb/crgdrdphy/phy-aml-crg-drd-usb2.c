@@ -437,7 +437,7 @@ static int amlogic_crg_drd_usb2_probe(struct platform_device *pdev)
 		portnum = of_read_ulong(prop, 1);
 
 	if (!portnum) {
-		dev_err(&pdev->dev, "This phy has no usb port\n");
+		//dev_err(&pdev->dev, "This phy has no usb port\n");
 		return -ENOMEM;
 	}
 
@@ -595,8 +595,8 @@ static int amlogic_crg_drd_usb2_probe(struct platform_device *pdev)
 	if (retval < 0)
 		pll_disconnect_enhance = 0;
 
-	dev_info(&pdev->dev, "USB2 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
-			(unsigned long)phy_mem->start, (unsigned long)phy_base);
+	//dev_info(&pdev->dev, "USB2 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
+	//		(unsigned long)phy_mem->start, (unsigned long)phy_base);
 
 	phy->dev		= dev;
 	phy->regs		= phy_base;

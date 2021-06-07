@@ -1344,8 +1344,8 @@ static int check_version(const struct load_info *info,
 	return 1;
 
 bad_version:
-	pr_warn("%s: disagrees about version of symbol %s\n",
-	       info->name, symname);
+	//pr_warn("%s: disagrees about version of symbol %s\n",
+	//       info->name, symname);
 #ifdef CONFIG_AMLOGIC_MODIFY
 	return 1;
 #else
@@ -4131,7 +4131,7 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	/* Get rid of temporary copy. */
 	free_copy(info);
 
-	pr_info("load module: %s\n", mod->name);
+	//pr_info("load module: %s\n", mod->name);
 	/* Done! */
 	trace_module_load(mod);
 

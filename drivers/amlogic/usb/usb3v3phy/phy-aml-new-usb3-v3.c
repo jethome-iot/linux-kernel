@@ -532,8 +532,8 @@ static int amlogic_new_usb3_v3_probe(struct platform_device *pdev)
 	if (prop)
 		portnum = of_read_ulong(prop, 1);
 
-	if (!portnum)
-		dev_err(&pdev->dev, "This phy has no usb port\n");
+	//if (!portnum)
+	//	dev_err(&pdev->dev, "This phy has no usb port\n");
 
 	phy_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	phy_base = devm_ioremap_resource(dev, phy_mem);
@@ -601,8 +601,8 @@ static int amlogic_new_usb3_v3_probe(struct platform_device *pdev)
 	if (!phy)
 		return -ENOMEM;
 
-	dev_info(&pdev->dev, "USB3 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
-		 (unsigned long)phy_mem->start, (unsigned long)phy_base);
+	//dev_info(&pdev->dev, "USB3 phy probe:phy_mem:0x%lx, iomap phy_base:0x%lx\n",
+	//	 (unsigned long)phy_mem->start, (unsigned long)phy_base);
 
 	phy->dev		= dev;
 	phy->regs		= phy_base;
