@@ -1316,6 +1316,26 @@ DEVICE_ATTR(sleep_status, S_IRUGO | S_IWUSR, sleepstatus_show,
 	    sleepstatus_store);
 
 #endif /* CONFIG_USB_DWC_OTG_LPM_ENABLE */
+extern void set_usb_mode(int);
+static int sw_mode = 0; //0:HOST mode 1:DEVICE mode
+
+static ssize_t usb_sw_mode_show(struct device *_dev, struct device_attribute *attr, char *buf)
+{
+    return sprintf(buf, "sw_mode=%d [%s]\n", sw_mode, sw_mode?"DEVICE mode":"HOST mode");
+}
+
+static ssize_t usb_sw_mode_store(struct device *_dev, struct device_attribute *attr, const char *buf,
+			       size_t count)
+{  
+    sw_mode = simple_strtoul(buf, NULL, 10);
+    set_usb_mode(sw_mode);
+    return count;
+}
+
+DEVICE_ATTR(usb_sw_mode, S_IRUGO | S_IWUSR, usb_sw_mode_show,
+		   usb_sw_mode_store);
+
+
 
 /**
  * Global Debug Level Mask.
@@ -1362,7 +1382,6 @@ DEVICE_ATTR(debuglevel, S_IRUGO | S_IWUSR, dbg_level_show,
  */
 void dwc_otg_attr_create(struct platform_device *pdev)
 {
-#ifndef CONFIG_AMLOGIC_USB
 	int error;
 	error = device_create_file(&pdev->dev, &dev_attr_regoffset);
 	error = device_create_file(&pdev->dev, &dev_attr_regvalue);
@@ -1390,6 +1409,7 @@ void dwc_otg_attr_create(struct platform_device *pdev)
 	error = device_create_file(&pdev->dev, &dev_attr_enumspeed);
 	error = device_create_file(&pdev->dev, &dev_attr_hptxfsiz);
 	error = device_create_file(&pdev->dev, &dev_attr_hprt0);
+	error = device_create_file(&pdev->dev, &dev_attr_usb_sw_mode);
 	error = device_create_file(&pdev->dev, &dev_attr_debuglevel);
 	error = device_create_file(&pdev->dev, &dev_attr_version);
 	error = device_create_file(&pdev->dev, &dev_attr_remote_wakeup);
@@ -1411,7 +1431,6 @@ void dwc_otg_attr_create(struct platform_device *pdev)
 	error = device_create_file(&pdev->dev, &dev_attr_peri_otg_disable);
 	error = device_create_file(&pdev->dev, &dev_attr_peri_power);
 	error = device_create_file(&pdev->dev, &dev_attr_peri_sleepm);
-#endif
 }
 
 /**
@@ -1419,7 +1438,6 @@ void dwc_otg_attr_create(struct platform_device *pdev)
  */
 void dwc_otg_attr_remove(struct platform_device *pdev)
 {
-#ifndef CONFIG_AMLOGIC_USB
 	device_remove_file(&pdev->dev, &dev_attr_regoffset);
 	device_remove_file(&pdev->dev, &dev_attr_regvalue);
 	device_remove_file(&pdev->dev, &dev_attr_mode);
@@ -1446,6 +1464,7 @@ void dwc_otg_attr_remove(struct platform_device *pdev)
 	device_remove_file(&pdev->dev, &dev_attr_enumspeed);
 	device_remove_file(&pdev->dev, &dev_attr_hptxfsiz);
 	device_remove_file(&pdev->dev, &dev_attr_hprt0);
+	device_remove_file(&pdev->dev, &dev_attr_usb_sw_mode);
 	device_remove_file(&pdev->dev, &dev_attr_remote_wakeup);
 	device_remove_file(&pdev->dev, &dev_attr_rem_wakeup_pwrdn);
 	device_remove_file(&pdev->dev, &dev_attr_disconnect_us);
@@ -1465,5 +1484,4 @@ void dwc_otg_attr_remove(struct platform_device *pdev)
 	device_remove_file(&pdev->dev, &dev_attr_peri_otg_disable);
 	device_remove_file(&pdev->dev, &dev_attr_peri_power);
 	device_remove_file(&pdev->dev, &dev_attr_peri_sleepm);
-#endif
 }
