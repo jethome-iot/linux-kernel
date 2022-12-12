@@ -1992,11 +1992,11 @@
 		pwm_channel1_conf {
 			pwms = <&pwm_ef 0 30541 0>;
 			duty-cycle = <15270>;
-			times = <7>;
+			times = <40>;
 		};
 		pwm_channel2_conf {
-			pwms = <&pwm_ef 2 30500 0>;
-			duty-cycle = <15250>;
+			pwms = <&pwm_ef 2 30600 0>;
+			duty-cycle = <15300>;
 			times = <10>;
 		};
 	};
