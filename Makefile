@@ -1406,11 +1406,7 @@ dtbs_check: export CHECK_DTBS=1
 dtbs_check: dtbs
 
 dtbs_install:
-ifdef CONFIG_AMLOGIC_MODIFY
-	$(Q)$(MAKE) $(dtbinst)=$(dtstree)/amlogic
-else
 	$(Q)$(MAKE) $(dtbinst)=$(dtstree)
-endif
 
 ifdef CONFIG_OF_EARLY_FLATTREE
 all: dtbs
