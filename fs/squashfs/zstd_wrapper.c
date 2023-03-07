@@ -65,7 +65,8 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 	struct workspace *wksp = strm;
 	zstd_dstream *stream;
 	size_t total_out = 0;
-	size_t zstd_err;
+	size_t zstd_err = 0;
+	int error = 0;
 	int k = 0;
 	zstd_in_buffer in_buf = { NULL, 0, 0 };
 	zstd_out_buffer out_buf = { NULL, 0, 0 };
@@ -80,6 +81,11 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 	out_buf.size = PAGE_SIZE;
 	out_buf.dst = squashfs_first_page(output);
 
+	if (IS_ERR(out_buf.dst)) {
+		error = PTR_ERR(out_buf.dst);
+		goto out;
+	}
+
 	do {
 		if (in_buf.pos == in_buf.size && k < b) {
 			int avail = min(length, msblk->devblksize - offset);
@@ -93,11 +99,15 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 
 		if (out_buf.pos == out_buf.size) {
 			out_buf.dst = squashfs_next_page(output);
-			if (out_buf.dst == NULL) {
+			if (IS_ERR(out_buf.dst)) {
+				error = PTR_ERR(out_buf.dst);
+				break;
+			} else if (!out_buf.dst) {
 				/* Shouldn't run out of pages
 				 * before stream is done.
 				 */
 				squashfs_finish_page(output);
+				error = -EIO;
 				goto out;
 			}
 			out_buf.pos = 0;
@@ -127,6 +137,9 @@ static int zstd_uncompress(struct squashfs_sb_info *msblk, void *strm,
 	}
 
 	if (k < b)
+		goto out;
+
+	if (error)
 		goto out;
 
 	return (int)total_out;
