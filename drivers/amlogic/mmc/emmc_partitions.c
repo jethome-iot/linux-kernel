@@ -702,6 +702,7 @@ static int mmc_read_partition_tbl(struct mmc_card *card,
 	int blk_size = 1 << bit; /* size of a block */
 	char *buf, *dst;
 
+	return -1;
 	buf = kmalloc(blk_size, GFP_KERNEL);
 	if (!buf) {
 		/*	pr_info("malloc failed for buffer!\n");*/
