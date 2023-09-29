@@ -32,6 +32,10 @@
 #define PRCM_CPU_PWROFF_REG			0x100
 #define PRCM_CPU_PWR_CLAMP_REG(cpu)		(((cpu) * 4) + 0x140)
 
+#define SUN8I_R528_C0_CPUX_CFG			(volatile void __iomem *)0x09010000
+#define SUN8I_R528_C0_RST_CTRL			0x00
+#define SUN8I_R528_C0_CTRL_REG0			(0x0010)
+
 static void __iomem *cpucfg_membase;
 static void __iomem *prcm_membase;
 
@@ -197,22 +201,55 @@ static int sun8i_t113_smp_boot_secondary(unsigned int cpu,
 				    struct task_struct *idle)
 {
     	u32 reg;
-    	void __iomem *cpucfg_membase = ioremap(0x09010000, 0x10);
+    	//void __iomem *cpucfg_membase = ioremap(0x09010000, 0x10);
     	void __iomem *cpuexec_membase[] = {ioremap(0x070005C4, 0x10),ioremap(0x070005C8, 0x10)};
 
 	if (cpu != 1)
 	    return 0;
+	
 
 	spin_lock(&cpu_lock);
 
 	/* Set CPU boot address */
+	writel(__pa_symbol(secondary_startup),
+	       cpuexec_membase[cpu]);
+
+
+
+	/* Set CPU boot address */
 	//writel(__pa_symbol(secondary_startup),	cpuexec_membase[cpu]);
 
-	/* Deassert the CPU core reset */
-	reg = readl(cpucfg_membase);
-	/* default 10011111111110000000100000001 */
+	//          3322 2222 2222 1111 1111 1100 0000 0000
+	//          1098 7654 3210 9876 5432 1098 7654 3210
+	/* default  0001 0011 1111 1111 0000 0001 0000 0001 */
+	//          |||| |||| |||| |||| |||| |||| |||| ||||
+	//	    |||| |||| |||| |||| |||| |||| |||| |||| |||+-- 0: cpu0 reset, 1: cpu0 release reset
+	//	    |||| |||| |||| |||| |||| |||| |||| |||| ||+--- 0: cpu1 reset, 1: cpu1 release reset
+	//	    |||| |||| |||| |||| |||| |||| |||| |||| |+---- not used
+	//	    |||| |||| |||| |||| |||| |||| |||| |||| +----- not used
+	//	    |||| |||| |||| |||| |||| |||| |||| ++++------- not used
+	//          |||| |||| |||| |||| |||| |||+----------------- 0: Assert, 1: De-assert Cluster L2 Cache Reset
+	//          |||| |||| |||| |||| ++++ +++------------------ not used
+	//          |||| |||| |||| ++++--------------------------- DBG_RST 0: Assert, 1: De-assert Cluster Debug Reset
+	//	    |||| |||| ++++-------------------------------- ETM_RST Cluster ETM Reset Assert
+	//	    |||| |||+------------------------------------- SOC_DBG_RST Cluster SoC Debug Reset
+	//	    |||| ||+-------------------------------------- MBIST_RST, CPUBIST Reset, is for test
+	//	    |||| ++--------------------------------------- not used
+	//	    ++++------------------------------------------ not used
+	/* Assert reset on target CPU */
+	reg = readl(SUN8I_R528_C0_CPUX_CFG + SUN8I_R528_C0_RST_CTRL);
+	writel(reg & ~BIT(cpu), SUN8I_R528_C0_CPUX_CFG + SUN8I_R528_C0_RST_CTRL);
+
+	/* Invalidate L1 cache */
+	reg = readl(SUN8I_R528_C0_CPUX_CFG + SUN8I_R528_C0_CTRL_REG0);
+	writel(reg & ~BIT(cpu), SUN8I_R528_C0_CPUX_CFG + SUN8I_R528_C0_CTRL_REG0);
+
+	/* De-Assert reset on target CPU */
+	//reg = readl(SUN8I_R528_C0_CPUX_CFG + SUN8I_R528_C0_RST_CTRL);
+	//writel(reg | BIT(cpu), SUN8I_R528_C0_CPUX_CFG + SUN8I_R528_C0_RST_CTRL);
+
 	//writel(reg | BIT(cpu), cpucfg_membase);
-	printk("!!!!+++++++++++++++++++++ cpuexec_membase[cpu] = %x cpu = %u\n", cpuexec_membase[cpu], cpu);
+	printk("!!!!+++++++++++++++++++++ cpuexec_membase[cpu] = %x cpu = %u\n", (unsigned int)cpuexec_membase[cpu], cpu);
 
 	spin_unlock(&cpu_lock);
 
