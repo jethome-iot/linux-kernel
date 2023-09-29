@@ -18,7 +18,7 @@
 	compatible = "jethome,jxd-cpu-a1c1", "allwinner,sun8i-t113s";
 
 	cpus {
-		enable-method = "allwinner,sun8iw20p1";
+		/*enable-method = "allwinner,sun8iw20p1";*/
 		#address-cells = <1>;
 		#size-cells = <0>;
 
@@ -48,7 +48,7 @@
 
 	chosen {
 		stdout-path = "serial3:115200n8";
-		bootargs = "mem=128M cma=48M console=ttyS3,115200 earlyprintk=sunxi-uart,0x2500c00 rootfstype=squashfs rootwait";
+		bootargs = "mem=128M cma=48M console=ttyS3,115200 earlyprintk=sunxi-uart,0x2500c00 rootfstype=squashfs rootwait";/* root=/dev/mtdblock3"; rootfstype=squashfs rootwait";*/
 	};
 
 	leds {
@@ -210,4 +210,43 @@
 &usbphy {
 	usb1_vbus-supply = <&reg_vcc5v>;
 	status = "okay";
+};
+
+&spi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi0_pins>;
+	status = "okay";
+
+        flash@0 {
+                compatible = "spi-nand";
+                reg = <0>;
+
+                partitions {
+                        compatible = "fixed-partitions";
+                        #address-cells = <1>;
+                        #size-cells = <1>;
+
+                        partition@0 {
+                                label = "awboot";
+                                reg = <0x0 0x20000>;
+				read-only;
+                        };
+
+                        partition@40000 {
+                                label = "dtb";
+                                reg = <0x40000 0x40000>;
+                        };
+
+                        partition@80000 {
+                                label = "kernel";
+                                reg = <0x80000 0x800000>;
+                        };
+
+                        partition@880000 {
+				label = "ubi";
+                                reg = <0x880000 0x75c0000>;
+                        };
+                };
+        };
+
 };
