@@ -81,6 +81,16 @@
 		vin-supply = <&reg_vcc5v>;
 	};
 
+	vccq_1v8: regulator-vccq_1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "VCCQ_1V8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&reg_3v3>;
+		regulator-always-on;
+	};
+
+
 	/* SY8008 DC/DC regulator on the board, also supplying VDD-SYS */
 	reg_vcc_core: regulator-core {
 		compatible = "regulator-fixed";
@@ -183,6 +193,7 @@
 	pinctrl-0 = <&mmc0_pins>;
 	pinctrl-names = "default";
 	vmmc-supply = <&reg_3v3>;
+	vqmmc-supply = <&vccq_1v8>;
 	/* for sd-card: cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>;*/
 	disable-wp;
 	bus-width = <4>;
@@ -190,8 +201,9 @@
 	max-frequency = <150000000>;
 	mmc-ddr-1_8v;
 	mmc-ddr-3_3v;
+	mmc-hs200-1_8v; /* new */
 	no-sd;
-	no-sdio;
+	/*no-sdio;*/
 	/delete-property/ no-mmc;
 	/delete-property/ cap-sd-highspeed;
 	status = "okay";
