@@ -167,7 +167,7 @@
 };
 
 /* WiFi module */
-&mmc1 {
+&mmc1 { /* 4021000 */
 	pinctrl-0 = <&mmc1_pins>;
 	pinctrl-names = "default";
 	vmmc-supply = <&reg_3v3>;
@@ -187,13 +187,14 @@
 
 
 /* eMMC module */
-&mmc0 {
+&mmc0 { /* 4020000 */
 	compatible = "allwinner,sun20i-d1-emmc",
 		     "allwinner,sun50i-a100-emmc";
 	pinctrl-0 = <&mmc0_pins>;
 	pinctrl-names = "default";
 	vmmc-supply = <&reg_3v3>;
 	vqmmc-supply = <&vccq_1v8>;
+	mmc-pwrseq = <&emmc_pwrseq>;
 	/* for sd-card: cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>;*/
 	disable-wp;
 	bus-width = <4>;
