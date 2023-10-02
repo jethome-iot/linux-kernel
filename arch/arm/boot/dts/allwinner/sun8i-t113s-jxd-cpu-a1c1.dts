@@ -5,13 +5,13 @@
  */
 
 #include <dt-bindings/interrupt-controller/irq.h>
-//#include <dt-bindings/gpio/gpio.h>
-//#include <dt-bindings/leds/common.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
 
 /dts-v1/;
 
 #include "sun8i-t113s.dtsi"
-#include "sunxi-d1s-t113-mangopi-mq-r.dtsi"
+//#include "sunxi-d1s-t113-mangopi-mq-r.dtsi"
 
 / {
 	model = "JetHub JXD CPU-A1C1";
@@ -48,7 +48,7 @@
 
 	chosen {
 		stdout-path = "serial3:115200n8";
-		bootargs = "mem=128M cma=48M console=ttyS3,115200 earlyprintk=sunxi-uart,0x2500c00 rootfstype=squashfs rootwait";/* root=/dev/mtdblock3"; rootfstype=squashfs rootwait";*/
+		bootargs = "mem=128M cma=48M console=ttyS3,115200 earlyprintk=sunxi-uart,0x2500c00 root=/dev/sda1 rootwait";/* root=/dev/mtdblock3"; rootfstype=squashfs rootwait  rootfstype=squashfs";*/
 	};
 
 	leds {
@@ -128,10 +128,35 @@
 	clock-frequency = <24000000>;
 };
 
+&ehci0 {
+	status = "okay";
+};
+
+&ohci0 {
+	status = "okay";
+};
+
 &ehci1 {
 	status = "okay";
 };
 
+&ohci1 {
+	status = "okay";
+};
+
+/* The USB-C socket has its CC pins pulled to GND, so is hardwired as a UFP. */
+&usb_otg {
+	dr_mode = "otg"; /* was peripheral from mango*/
+	status = "okay";
+};
+
+/* The USB-C socket has its CC pins pulled to GND, so is hardwired as a UFP. */
+&usbphy {
+	usb1_vbus-supply = <&reg_vcc5v>;
+	status = "okay";
+};
+
+/* WiFi module */
 &mmc1 {
 	pinctrl-0 = <&mmc1_pins>;
 	pinctrl-names = "default";
@@ -142,6 +167,7 @@
 	status = "okay";
 
 	rtl8723ds: wifi@1 {
+		compatible = "realtek,rtl8723ds";
 		reg = <1>;
 		interrupt-parent = <&pio>;
 		interrupts = <6 10 IRQ_TYPE_LEVEL_LOW>; /* PG10 = WL_WAKE_AP */
@@ -150,13 +176,14 @@
 };
 
 
+/* eMMC module */
 &mmc0 {
 	compatible = "allwinner,sun20i-d1-emmc",
 		     "allwinner,sun50i-a100-emmc";
 	pinctrl-0 = <&mmc0_pins>;
 	pinctrl-names = "default";
 	vmmc-supply = <&reg_3v3>;
-	/* cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>;*/
+	/* for sd-card: cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>;*/
 	disable-wp;
 	bus-width = <4>;
 	cap-mmc-highspeed;
@@ -170,10 +197,6 @@
 	status = "okay";
 };
 
-
-&ohci1 {
-	status = "okay";
-};
 
 &pio {
 	vcc-pb-supply = <&reg_3v3>;
@@ -189,6 +212,21 @@
 
 };
 
+&uart1 {
+	uart-has-rtscts;
+	pinctrl-0 = <&uart1_pg6_pins>, <&uart1_pg8_rts_cts_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	bluetooth {
+		compatible = "realtek,rtl8723ds-bt";
+		device-wake-gpios = <&pio 6 13 GPIO_ACTIVE_HIGH>; /* PG13 */
+		enable-gpios = <&pio 6 15 GPIO_ACTIVE_HIGH>; /* PG15 */
+		host-wake-gpios = <&pio 6 14 GPIO_ACTIVE_HIGH>; /* PG14 */
+	};
+};
+
+
 &uart3 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart3_pb_pins>;
@@ -198,17 +236,6 @@
 &uart0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart0_pe_pins>;
-	status = "okay";
-};
-
-/* The USB-C socket has its CC pins pulled to GND, so is hardwired as a UFP. */
-&usb_otg {
-	dr_mode = "otg"; /* was peripheral from mango*/
-	status = "okay";
-};
-
-&usbphy {
-	usb1_vbus-supply = <&reg_vcc5v>;
 	status = "okay";
 };
 
