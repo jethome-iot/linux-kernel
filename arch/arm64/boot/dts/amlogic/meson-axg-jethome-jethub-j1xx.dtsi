@@ -221,6 +221,15 @@
 		reg = <0x51>;
 		status = "okay";
 	};
+	pca9535: pca9535@21 {
+		compatible = "nxp,pca9535";
+		reg = <0x21>;
+		status = "okay";
+		gpio-controller;
+		interrupt-parent = <&gpio>;
+		interrupts = <GPIOA_2 IRQ_TYPE_EDGE_FALLING>;
+
+	}
 };
 
 /* Peripheral I2C bus (on motherboard) */
