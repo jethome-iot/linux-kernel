@@ -311,11 +311,13 @@
 	};
 
        at24c02: eeprom@54 {
-                compatible = "cypress,fm25"; //, "atmel,at25";
+                compatible = "atmel,24c64";
                 /* read-only;*/
                 reg = <0x54>;
-                /* pagesize = <16>; */
-                /* vcc-supply = <&reg_vcc3v3>;*/
+                pagesize = <0x20>;
+		label = "fram";
+		address-width = <0x10>;
+                vcc-supply = <&reg_3v3>;
         };
 
 };
