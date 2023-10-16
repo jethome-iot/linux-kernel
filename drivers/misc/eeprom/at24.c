@@ -82,6 +82,7 @@ struct at24_data {
 	u32 byte_len;
 	u16 page_size;
 	u8 flags;
+	bool is_fram;
 
 	struct nvmem_device *nvmem;
 	struct regulator *vcc_reg;
@@ -353,7 +354,8 @@ static ssize_t at24_regmap_read(struct at24_data *at24, char *buf,
 		if (!ret)
 			return count;
 
-		usleep_range(1000, 1500);
+		if (!at24->is_fram)
+			usleep_range(1000, 1500);
 	} while (time_before(read_time, timeout));
 
 	return -ETIMEDOUT;
@@ -409,7 +411,8 @@ static ssize_t at24_regmap_write(struct at24_data *at24, const char *buf,
 		if (!ret)
 			return count;
 
-		usleep_range(1000, 1500);
+		if (!at24->is_fram)
+			usleep_range(1000, 1500);
 	} while (time_before(write_time, timeout));
 
 	return -ETIMEDOUT;
@@ -594,12 +597,15 @@ static int at24_probe(struct i2c_client *client)
 	bool full_power;
 	struct regmap *regmap;
 	bool writable;
+	bool is_fram;
 	u8 test_byte;
 	int err;
 
 	i2c_fn_i2c = i2c_check_functionality(client->adapter, I2C_FUNC_I2C);
 	i2c_fn_block = i2c_check_functionality(client->adapter,
 					       I2C_FUNC_SMBUS_WRITE_I2C_BLOCK);
+
+	is_fram = fwnode_device_is_compatible(dev_fwnode(dev), "cypress,fm24");
 
 	cdata = at24_get_chip_data(dev);
 	if (IS_ERR(cdata))
@@ -685,6 +691,7 @@ static int at24_probe(struct i2c_client *client)
 	at24->byte_len = byte_len;
 	at24->page_size = page_size;
 	at24->flags = flags;
+	at24->is_fram = is_fram;
 	at24->read_post = cdata->read_post;
 	at24->bank_addr_shift = cdata->bank_addr_shift;
 	at24->num_addresses = num_addresses;
@@ -728,7 +735,7 @@ static int at24_probe(struct i2c_client *client)
 		nvmem_config.name = dev_name(dev);
 	}
 
-	nvmem_config.type = NVMEM_TYPE_EEPROM;
+	nvmem_config.type = is_fram ? NVMEM_TYPE_FRAM : NVMEM_TYPE_EEPROM;
 	nvmem_config.dev = dev;
 	nvmem_config.read_only = !writable;
 	nvmem_config.root_only = !(flags & AT24_FLAG_IRUGO);
@@ -783,11 +790,11 @@ static int at24_probe(struct i2c_client *client)
 	pm_runtime_idle(dev);
 
 	if (writable)
-		dev_info(dev, "%u byte %s EEPROM, writable, %u bytes/write\n",
-			 byte_len, client->name, at24->write_max);
+		dev_info(dev, "%u byte %s EEPROM, writable, %u bytes/write, is_fram: %u\n",
+			 byte_len, client->name, at24->write_max, is_fram);
 	else
-		dev_info(dev, "%u byte %s EEPROM, read-only\n",
-			 byte_len, client->name);
+		dev_info(dev, "%u byte %s EEPROM, is_fram: %u, read-only\n",
+			 byte_len, client->name, is_fram);
 
 	return 0;
 }
