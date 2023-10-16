@@ -48,7 +48,7 @@
 
 	chosen {
 		stdout-path = "serial3:115200n8";
-		bootargs = "mem=128M cma=48M console=ttyS3,115200 earlyprintk=sunxi-uart,0x2500c00 root=/dev/sda1 rootwait";/* root=/dev/mtdblock3"; rootfstype=squashfs rootwait  rootfstype=squashfs";*/
+		bootargs = "mem=128M cma=48M console=ttyS3,115200 earlyprintk=sunxi-uart,0x2500c00 root=/dev/mmcblk0p1 rootwait";/* root=/dev/mtdblock3"; rootfstype=squashfs rootwait  rootfstype=squashfs";*/
 	};
 
 	leds {
@@ -222,6 +222,12 @@
 		pins = "PE2", "PE3";
 		function = "uart0";
 	};
+	/omit-if-no-ref/
+	i2c2_pe0_pins: i2c2-pe0-pins {
+		pins = "PE12", "PE13";
+		function = "i2c2";
+	};
+
 
 };
 
@@ -287,6 +293,29 @@
                                 reg = <0x880000 0x75c0000>;
                         };
                 };
+        };
+
+};
+
+
+&i2c2 {
+	pinctrl-0 = <&i2c2_pe0_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	/* RTC */
+	pcf8563: rtc@51 {
+		compatible = "nxp,pcf8563";
+		reg = <0x51>;
+		status = "okay";
+	};
+
+       at24c02: eeprom@53 {
+                compatible = "nxp,se97b", "atmel,24c02";
+                /* read-only;*/
+                reg = <0x53>;
+                pagesize = <16>;
+                /* vcc-supply = <&reg_vcc3v3>;*/
         };
 
 };
