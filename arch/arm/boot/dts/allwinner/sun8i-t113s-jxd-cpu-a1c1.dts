@@ -302,6 +302,7 @@
 	pinctrl-0 = <&i2c2_pe0_pins>;
 	pinctrl-names = "default";
 	status = "okay";
+	clock-frequency = <400000>;
 
 	/* RTC */
 	pcf8563: rtc@51 {
@@ -311,7 +312,7 @@
 	};
 
        at24c02: eeprom@54 {
-                compatible = "atmel,24c64";
+                compatible = "cypress,fm24", "atmel,24c64";
                 /* read-only;*/
                 reg = <0x54>;
                 pagesize = <0x20>;
