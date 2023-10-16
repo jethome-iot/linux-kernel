@@ -311,7 +311,7 @@
 		status = "okay";
 	};
 
-       at24c02: eeprom@54 {
+       fm24cl64: eeprom@54 {
                 compatible = "cypress,fm24", "atmel,24c64";
                 /* read-only;*/
                 reg = <0x54>;
@@ -321,4 +321,8 @@
                 vcc-supply = <&reg_3v3>;
         };
 
+};
+
+&wdt {
+	status = "okay";
 };
