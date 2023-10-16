@@ -229,7 +229,7 @@
 		interrupt-parent = <&gpio>;
 		interrupts = <GPIOA_2 IRQ_TYPE_EDGE_FALLING>;
 
-	}
+	};
 };
 
 /* Peripheral I2C bus (on motherboard) */
