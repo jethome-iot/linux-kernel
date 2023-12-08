@@ -273,24 +273,41 @@
                         #size-cells = <1>;
 
                         partition@0 {
-                                label = "awboot";
-                                reg = <0x0 0x20000>;
+                                label = "spl";
+                                reg = <0x0 0x8000>;
 				read-only;
                         };
 
-                        partition@40000 {
+                        partition@8000 {
+                                label = "u-boot";
+                                reg = <0x8000 0x400000>;
+				read-only;
+                        };
+
+                        partition@400000 {
+                                label = "env";
+                                reg = <0x400000 0x402000>;
+				read-only;
+                        };
+
+                        partition@402000 {
                                 label = "dtb";
-                                reg = <0x40000 0x40000>;
+                                reg = <0x402000 0x412000>;
                         };
 
-                        partition@80000 {
-                                label = "kernel";
-                                reg = <0x80000 0x800000>;
-                        };
+			partition@500000 {
+				label = "kernela";
+				reg = <0x500000 0xF00000>;
+			};
 
-                        partition@880000 {
+			partition@F00000 {
+				label = "kernelb";
+				reg = <0xF00000 0x1900000>;
+			};
+
+			partition@1900000 {
 				label = "ubi";
-                                reg = <0x880000 0x75c0000>;
+                                reg = <0x412000 0x7FFFFFF>;
                         };
                 };
         };
