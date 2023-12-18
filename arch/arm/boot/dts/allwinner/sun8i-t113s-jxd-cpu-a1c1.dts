@@ -227,8 +227,32 @@
 		pins = "PE12", "PE13";
 		function = "i2c2";
 	};
+	/omit-if-no-ref/
+	rmii_pg_pins: rmii-pg-pins {
+		pins = "PG0", "PG1", "PG2", "PG3", "PG4",
+			"PG5", "PG12", "PG13", "PG14", "PG15";
+		function = "emac";
+	};
+};
 
 
+&emac {
+	pinctrl-0 = <&rmii_pg_pins>;
+	pinctrl-names = "default";
+	phy-handle = <&ext_rmii_phy>;
+	phy-mode = "rmii";
+	phy-supply = <&reg_3v3>;
+	status = "okay";
+};
+
+&mdio {
+	ext_rmii_phy: ethernet-phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <1>;
+		reset-gpios = <&pio 6 6 GPIO_ACTIVE_LOW>; /* PG6 */
+		interrupt-parent = <&pio>;
+		interrupts = <6 7 IRQ_TYPE_LEVEL_LOW>; /* PG7 = WL_WAKE_AP */
+	};
 };
 
 &uart1 {
