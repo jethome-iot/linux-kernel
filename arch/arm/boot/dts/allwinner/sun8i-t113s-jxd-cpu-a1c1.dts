@@ -260,13 +260,13 @@
 	pinctrl-0 = <&uart1_pg6_pins>, <&uart1_pg8_rts_cts_pins>;
 	pinctrl-names = "default";
 	status = "okay";
-
+/*
 	bluetooth {
 		compatible = "realtek,rtl8723ds-bt";
-		device-wake-gpios = <&pio 6 13 GPIO_ACTIVE_HIGH>; /* PG13 */
-		enable-gpios = <&pio 6 15 GPIO_ACTIVE_HIGH>; /* PG15 */
-		host-wake-gpios = <&pio 6 14 GPIO_ACTIVE_HIGH>; /* PG14 */
-	};
+		device-wake-gpios = <&pio 6 13 GPIO_ACTIVE_HIGH>; // PG13
+		enable-gpios = <&pio 6 15 GPIO_ACTIVE_HIGH>; // PG15
+		host-wake-gpios = <&pio 6 14 GPIO_ACTIVE_HIGH>; // PG14
+	};*/
 };
 
 
