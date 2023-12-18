@@ -350,7 +350,7 @@
 };
 
 &i2c1 {
-	pinctrl-0 = <&i2c2_pg0_pins>;
+	pinctrl-0 = <&i2c1_pg0_pins>;
 	pinctrl-names = "default";
 	status = "okay";
 	clock-frequency = <400000>;
