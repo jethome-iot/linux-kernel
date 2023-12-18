@@ -233,6 +233,12 @@
 			"PG5", "PG12", "PG13", "PG14", "PG15";
 		function = "emac";
 	};
+	/omit-if-no-ref/
+	uart1_pe10_pins: uart1-pe10-pins {
+		pins = "PE10", "PE11";
+		function = "uart1";
+	};
+
 };
 
 
@@ -257,7 +263,7 @@
 
 &uart1 {
 	uart-has-rtscts;
-	pinctrl-0 = <&uart1_pg6_pins>, <&uart1_pg8_rts_cts_pins>;
+	pinctrl-0 = <&uart1_pe10_pins>;
 	pinctrl-names = "default";
 	status = "okay";
 /*
