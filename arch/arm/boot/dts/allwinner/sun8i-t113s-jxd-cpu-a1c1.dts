@@ -43,7 +43,7 @@
 		serial3 = &uart3;
 		/*serial3 = "/soc/serial@2500c00";*/
 
-		ethernet0 = &rtl8723ds;
+		ethernet0 = &emac;
 	};
 
 	chosen {
