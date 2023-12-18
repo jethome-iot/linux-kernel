@@ -228,6 +228,11 @@
 		function = "i2c2";
 	};
 	/omit-if-no-ref/
+	i2c1_pg0_pins: i2c1-pg0-pins {
+		pins = "PG8", "PG9";
+		function = "i2c1";
+	};
+	/omit-if-no-ref/
 	rmii_pg_pins: rmii-pg-pins {
 		pins = "PG0", "PG1", "PG2", "PG3", "PG4",
 			"PG5", "PG12", "PG13", "PG14", "PG15";
@@ -257,7 +262,7 @@
 		reg = <1>;
 		reset-gpios = <&pio 6 6 GPIO_ACTIVE_HIGH>; /* PG6 */
 		//interrupt-parent = <&pio>;
-		//interrupts = <6 7 IRQ_TYPE_LEVEL_LOW>; /* PG7 = WL_WAKE_AP */
+		//interrupts = <6 7 IRQ_TYPE_LEVEL_LOW>; /* PG7 = Interrupt */
 	};
 };
 
@@ -344,9 +349,8 @@
 
 };
 
-
-&i2c2 {
-	pinctrl-0 = <&i2c2_pe0_pins>;
+&i2c1 {
+	pinctrl-0 = <&i2c2_pg0_pins>;
 	pinctrl-names = "default";
 	status = "okay";
 	clock-frequency = <400000>;
@@ -369,6 +373,14 @@
         };
 
 };
+
+&i2c2 {
+	pinctrl-0 = <&i2c2_pe0_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+	clock-frequency = <400000>;
+};
+
 
 &wdt {
 	status = "okay";
