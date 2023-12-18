@@ -213,6 +213,7 @@
 
 &pio {
 	vcc-pb-supply = <&reg_3v3>;
+	vcc-pc-supply = <&reg_3v3>; // TODO: fix
 	vcc-pd-supply = <&reg_3v3>;
 	vcc-pe-supply = <&reg_avdd2v8>;
 	vcc-pf-supply = <&reg_3v3>;
@@ -235,7 +236,7 @@
 	/omit-if-no-ref/
 	rmii_pg_pins: rmii-pg-pins {
 		pins = "PG0", "PG1", "PG2", "PG3", "PG4",
-			"PG5", "PG12", "PG13", "PG14", "PG15";
+			"PG5", "PG12", "PG13", "PG14", "PG15", "PG11";
 		function = "emac";
 	};
 	/omit-if-no-ref/
@@ -246,6 +247,27 @@
 
 };
 
+
+
+/* example from lichee
+
+&emac {
+	pinctrl-0 = <&rmii_pe_pins>;
+	pinctrl-names = "default";
+	phy-handle = <&ext_rmii_phy>;
+	phy-mode = "rmii";
+	phy-supply = <&reg_vcc_3v3>;
+	status = "okay";
+};
+
+&mdio {
+	ext_rmii_phy: ethernet-phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <1>;
+		reset-gpios = <&pio 4 16 GPIO_ACTIVE_LOW>; /* PE16 */
+	};
+};
+*/
 
 &emac {
 	pinctrl-0 = <&rmii_pg_pins>;
@@ -259,10 +281,10 @@
 &mdio {
 	ext_rmii_phy: ethernet-phy@1 {
 		compatible = "ethernet-phy-ieee802.3-c22";
-		reg = <1>;
-		reset-gpios = <&pio 6 6 GPIO_ACTIVE_HIGH>; /* PG6 */
-		//interrupt-parent = <&pio>;
-		//interrupts = <6 7 IRQ_TYPE_LEVEL_LOW>; /* PG7 = Interrupt */
+		reg = <0>;
+		reset-gpios = <&pio 6 6 GPIO_ACTIVE_LOW>; /* PG6 */
+		interrupt-parent = <&pio>;
+		interrupts = <6 7 IRQ_TYPE_LEVEL_LOW>; /* PG7 = Interrupt */
 	};
 };
 
