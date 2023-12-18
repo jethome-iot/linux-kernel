@@ -291,7 +291,7 @@
                 compatible = "spi-nand";
                 reg = <0>;
 
-                partitions {
+		partitions {
                         compatible = "fixed-partitions";
                         #address-cells = <1>;
                         #size-cells = <1>;
@@ -304,36 +304,36 @@
 
                         partition@8000 {
                                 label = "u-boot";
-                                reg = <0x8000 0x400000>;
+                                reg = <0x8000 0x3F8000>;
 				read-only;
                         };
 
                         partition@400000 {
                                 label = "env";
-                                reg = <0x400000 0x402000>;
+                                reg = <0x400000 0x2000>;
 				read-only;
                         };
 
                         partition@402000 {
                                 label = "dtb";
-                                reg = <0x402000 0x412000>;
+                                reg = <0x402000 0x10000>;
                         };
 
 			partition@500000 {
 				label = "kernela";
-				reg = <0x500000 0xF00000>;
+				reg = <0x500000 0xA00000>;
 			};
 
 			partition@F00000 {
 				label = "kernelb";
-				reg = <0xF00000 0x1900000>;
+				reg = <0xF00000 0xA00000>;
 			};
 
 			partition@1900000 {
-				label = "ubi";
-                                reg = <0x412000 0x7FFFFFF>;
+				label = "ubifs";
+                                reg = <0x1900000 0x6700000>;
                         };
-                };
+		};
         };
 
 };
