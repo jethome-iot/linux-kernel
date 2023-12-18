@@ -255,9 +255,9 @@
 	ext_rmii_phy: ethernet-phy@1 {
 		compatible = "ethernet-phy-ieee802.3-c22";
 		reg = <1>;
-		reset-gpios = <&pio 6 6 GPIO_ACTIVE_LOW>; /* PG6 */
-		interrupt-parent = <&pio>;
-		interrupts = <6 7 IRQ_TYPE_LEVEL_LOW>; /* PG7 = WL_WAKE_AP */
+		reset-gpios = <&pio 6 6 GPIO_ACTIVE_HIGH>; /* PG6 */
+		//interrupt-parent = <&pio>;
+		//interrupts = <6 7 IRQ_TYPE_LEVEL_LOW>; /* PG7 = WL_WAKE_AP */
 	};
 };
 
