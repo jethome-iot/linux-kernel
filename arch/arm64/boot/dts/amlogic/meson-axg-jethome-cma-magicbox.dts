@@ -16,7 +16,6 @@
 	aliases {
 		serial0 = &uart_AO;   /* Console */
 		serial2 = &uart_AO_B; /* External UART (Wireless Module) */
-		ethernet0 = &ethmac;
 	};
 
 	chosen {
@@ -335,13 +334,13 @@
 		"", "", "", "", "", // 21 - 25
 		/* GPIOA */
 		//0 538    1 539      2  540     	3 541
-		"LedRed", "LedBlue", "CPU2_T_DISABLE", "CPU1_OFF", // 26 - 30
+		"LedRed", "LedBlue", "CPU2_T_DISABLE", "CPU1_OFF", // 26 - 29
 		//4 542      543 544 545 546
-		"USB_LOCAL", "", "", "", "", // 31 - 35
+		"USB_LOCAL", "", "", "", "", // 30 - 34
 		//9 547     548     549     550     551     552     553     554     555     556     557
-		"USBHUB_RESET", "", "", "", "", // 36 - 40
-		"BT04_PWROFF", "BT04_WORK", "BT04_KEY", "BT04_RESET", "BT04_LINK", // 41 - 45
-		"", "", // 46 - 47
+		"USBHUB_RESET", "", "", "", "", // 35 - 39
+		"BT04_PWROFF", "BT04_WORK", "BT04_KEY", "BT04_RESET", "BT04_LINK", // 40 - 44
+		"", "", // 45 - 46
 		/* GPIOX */
 		"WIFI_D0", "WIFI_D1", "WIFI_D2", // 47 - 49
 		"WIFI_D3", "WIFI_CLK", "WIFI_CMD", "WIFI_WAKEHOST", "WIFI_PWR_EN", // 50 - 54
