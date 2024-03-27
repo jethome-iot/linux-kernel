@@ -336,7 +336,7 @@
 		//0 538    1 539      2  540     	3 541
 		"LedRed", "LedBlue", "CPU2_T_DISABLE", "CPU1_OFF", // 26 - 29
 		//4 542      543 544 545 546
-		"USB_LOCAL", "", "", "", "", // 30 - 34
+		"USB_LOCAL", "USB_TRANSIT_PWROFF", "", "", "", // 30 - 34
 		//9 547     548     549     550     551     552     553     554     555     556     557
 		"USBHUB_RESET", "", "", "", "", // 35 - 39
 		"BT04_PWROFF", "BT04_WORK", "BT04_KEY", "BT04_RESET", "BT04_LINK", // 40 - 44
