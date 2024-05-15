@@ -28,7 +28,7 @@ static char *socinfo_get_chipid(struct device *dev, struct meson_sm_firmware *fw
 	struct meson_sm_chip_id *id_buf;
 	int ret;
 
-	id_buf = devm_kzalloc(dev, sizeof(struct meson_sm_chip_id)+1, GFP_KERNEL);
+	id_buf = kzalloc(sizeof(struct meson_sm_chip_id)+1, GFP_KERNEL);
 	if (!id_buf)
 		return NULL;
 
@@ -93,21 +93,19 @@ static int meson_gx_socinfo_sm_probe(struct platform_device *pdev)
 
 	/* node should be a syscon */
 	regmap = syscon_node_to_regmap(pdev->dev.of_node);
-	if (IS_ERR(regmap)) {
-		dev_err(&pdev->dev, "failed to get regmap\n");
-		return -ENODEV;
-	}
+	if (IS_ERR(regmap))
+		return dev_err_probe(&pdev->dev, PTR_ERR (regmap), "failed to get regmap\n");
 
 	sm_np = of_parse_phandle(pdev->dev.of_node, "secure-monitor", 0);
 	if (!sm_np) {
 		dev_err(&pdev->dev, "no secure-monitor node found\n");
-		return -ENODEV;
+		return -EINVAL;
 	}
 
 	fw = meson_sm_get(sm_np);
 	of_node_put(sm_np);
 	if (!fw) {
-		dev_info(&pdev->dev, "secure-monitor device not ready, probe later\n");
+		dev_dbg(&pdev->dev, "secure-monitor device not ready, probe later\n");
 		return -EPROBE_DEFER;
 	}
 
@@ -143,7 +141,6 @@ static int meson_gx_socinfo_sm_probe(struct platform_device *pdev)
 	if (IS_ERR(soc_dev)) {
 		kfree(soc_dev_attr->revision);
 		kfree_const(soc_dev_attr->soc_id);
-		kfree(soc_dev_attr);
 		return PTR_ERR(soc_dev);
 	}
 
