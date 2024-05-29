@@ -25,51 +25,51 @@ static char *socinfo_get_chipid(struct device *dev, struct meson_sm_firmware *fw
 			       union meson_cpu_id *socinfo)
 {
 	char *buf;
-	struct meson_sm_chip_id *id_buf;
+	union meson_sm_chip_id *id_buf;
 	int ret;
 
-	id_buf = kzalloc(sizeof(struct meson_sm_chip_id)+1, GFP_KERNEL);
+	id_buf = kzalloc(sizeof(union meson_sm_chip_id)+1, GFP_KERNEL);
 	if (!id_buf)
 		return NULL;
 
-	ret = meson_sm_call_read(fw, id_buf, sizeof(struct meson_sm_chip_id), SM_GET_CHIP_ID,
+	ret = meson_sm_call_read(fw, id_buf, sizeof(union meson_sm_chip_id), SM_GET_CHIP_ID,
 				 2, 0, 0, 0, 0);
 	if (ret < 0) {
 		kfree(id_buf);
 		return NULL;
 	}
-	dev_info(dev, "got sm version call %i\n", id_buf->version);
+	dev_info(dev, "got sm version call %i\n", id_buf->raw.version);
 
-	if (id_buf->version != 2) {
+	if (id_buf->raw.version != 2) {
 
 		u8 tmp;
 		/**
 		 * Legacy 12-byte chip ID read out, transform data
 		 * to expected order format
 		 */
-		memmove((void *)&id_buf->serial, (void *)&id_buf->cpu_id, 12);
+		memmove((void *)&id_buf->v2.serial, (void *)&id_buf->raw.buf, 12);
 		for (int i = 0; i < 6; i++) {
-			tmp = id_buf->serial[i];
-			id_buf->serial[i] = id_buf->serial[11 - i];
-			id_buf->serial[11 - i] = tmp;
+			tmp = id_buf->v2.serial[i];
+			id_buf->v2.serial[i] = id_buf->v2.serial[11 - i];
+			id_buf->v2.serial[11 - i] = tmp;
 		}
-		id_buf->cpu_id.v2.major_id = socinfo->v1.major_id;
-		id_buf->cpu_id.v2.pack_id = socinfo->v1.pack_id;
-		id_buf->cpu_id.v2.chip_rev = socinfo->v1.chip_rev;
-		id_buf->cpu_id.v2.reserved = socinfo->v1.reserved;
-		id_buf->cpu_id.v2.layout_ver = socinfo->v1.layout_ver;
+		id_buf->v2.cpu_id.v2.major_id = socinfo->v1.major_id;
+		id_buf->v2.cpu_id.v2.pack_id = socinfo->v1.pack_id;
+		id_buf->v2.cpu_id.v2.chip_rev = socinfo->v1.chip_rev;
+		id_buf->v2.cpu_id.v2.reserved = socinfo->v1.reserved;
+		id_buf->v2.cpu_id.v2.layout_ver = socinfo->v1.layout_ver;
 	} else {
 		/**
 		 * rewrite socinfo from regmap with value from secure monitor call
 		 */
-		socinfo->v1.major_id = id_buf->cpu_id.v2.major_id;
-		socinfo->v1.pack_id = id_buf->cpu_id.v2.pack_id;
-		socinfo->v1.chip_rev = id_buf->cpu_id.v2.chip_rev;
-		socinfo->v1.reserved = id_buf->cpu_id.v2.reserved;
-		socinfo->v1.layout_ver = id_buf->cpu_id.v2.layout_ver;
+		socinfo->v1.major_id = id_buf->v2.cpu_id.v2.major_id;
+		socinfo->v1.pack_id = id_buf->v2.cpu_id.v2.pack_id;
+		socinfo->v1.chip_rev = id_buf->v2.cpu_id.v2.chip_rev;
+		socinfo->v1.reserved = id_buf->v2.cpu_id.v2.reserved;
+		socinfo->v1.layout_ver = id_buf->v2.cpu_id.v2.layout_ver;
 	}
 
-	buf = kasprintf(GFP_KERNEL, "%4phN%12phN", &(id_buf->cpu_id), &(id_buf->serial));
+	buf = devm_kasprintf(dev, GFP_KERNEL, "%4phN%12phN", &(id_buf->v2.cpu_id), &(id_buf->v2.serial));
 
 	kfree(id_buf);
 
