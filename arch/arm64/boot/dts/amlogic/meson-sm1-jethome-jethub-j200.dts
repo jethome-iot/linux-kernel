@@ -531,25 +531,11 @@
 	status = "okay";
 	pinctrl-0 = <&i2c1_sda_h6_pins>, <&i2c1_sck_h7_pins>;
 	pinctrl-names = "default";
-};
 
-
-/* I2C for lcd/etc */
-&i2c2 {
-	status = "okay";
-	pinctrl-0 = <&i2c2_sda_x_pins>, <&i2c2_sck_x_pins>;
-	pinctrl-names = "default";
-};
-
-/* I2C for CPU board */
-&i2c3 {
-	status = "okay";
-	pinctrl-0 = <&i2c3_sda_a_pins>, <&i2c3_sck_a_pins>;
-	pinctrl-names = "default";
-
-	u9: gpio@20 {
+	/* GPIO expander */
+	u9: gpio@22 {
 		compatible = "nxp,pca9535";
-		reg = <0x20>;
+		reg = <0x22>;
 		gpio-controller;
 		#gpio-cells = <2>;
 
@@ -561,6 +547,28 @@
 			"DIN_1", "DIN_2", "DIN_3",
 			"","","","","";
 	};
+
+	/* 1-wire */
+	w1: onewire@18 {
+        	compatible = "maxim,ds2484";
+        	reg = <0x18>;
+      	};
+
+};
+
+
+/* I2C for lcd/etc */
+&i2c2 {
+	status = "okay";
+	pinctrl-0 = <&i2c2_sda_x_pins>, <&i2c2_sck_x_pins>;
+	pinctrl-names = "default";
+};
+
+/* I2C_EE_M3: I2C for CPU board */
+&i2c3 {
+	status = "okay";
+	pinctrl-0 = <&i2c3_sda_a_pins>, <&i2c3_sck_a_pins>;
+	pinctrl-names = "default";
 
 	/* I2C for rtc */
 	rtc: rtc@51 {
@@ -608,6 +616,17 @@
 		label = "eeprompm";
 		address-width = <0x10>;
 		vcc-supply = <&vddao_3v3>;
+	};
+
+	/* temperature sensors */
+	temp1: tmp102@48 {
+		compatible = "ti,tmp102";
+		reg = <0x48>;
+	};
+
+	temp2: tmp102@49 {
+		compatible = "ti,tmp102";
+		reg = <0x49>;
 	};
 
 };
