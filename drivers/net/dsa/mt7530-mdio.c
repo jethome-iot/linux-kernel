@@ -11,6 +11,7 @@
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
 #include <net/dsa.h>
 
 #include "mt7530.h"
@@ -138,12 +139,103 @@ static const struct of_device_id mt7530_of_match[] = {
 MODULE_DEVICE_TABLE(of, mt7530_of_match);
 
 static int
+mt7530_correct_addr(int phy_addr)
+{
+	/* The corrected address is calculated as stated below:
+	 *  0 ~  6, 31 -> 31
+	 *  7 ~ 14     -> 7
+	 * 15 ~ 22     -> 15
+	 * 23 ~ 30     -> 23
+	 */
+	return (((phy_addr - MT7530_NUM_PORTS) & ~MT7530_NUM_PORTS) +
+		MT7530_NUM_PORTS) & (PHY_MAX_ADDR - 1);
+}
+
+static bool
+mt7530_is_invalid_addr(int phy_addr)
+{
+	/* Only MDIO bus addresses 7, 15, 23, and 31 are valid options,
+	 * which all have the least significant three bits set. Check
+	 * for this.
+	 */
+	return (phy_addr & MT7530_NUM_PORTS) != MT7530_NUM_PORTS;
+}
+
+struct remove_impossible_priv {
+	struct delayed_work remove_impossible_work;
+	struct mdio_device *mdiodev;
+};
+
+static void
+mt7530_remove_impossible(struct work_struct *work)
+{
+	struct remove_impossible_priv *priv = container_of(work, struct remove_impossible_priv,
+							   remove_impossible_work.work);
+	struct mdio_device *mdiodev = priv->mdiodev;
+
+	mdio_device_remove(mdiodev);
+	mdio_device_free(mdiodev);
+	kfree(priv);
+}
+
+static int
+mt7530_reregister(struct mdio_device *mdiodev)
+{
+	/* If the address in DT must be wrong, make a good guess about
+	 * the most likely intention, issue a warning, register a new
+	 * MDIO device at the correct address and schedule the removal
+	 * of the device having an impossible address.
+	 */
+	struct fwnode_handle *fwnode = dev_fwnode(&mdiodev->dev);
+	int corrected_addr = mt7530_correct_addr(mdiodev->addr);
+	struct remove_impossible_priv *rem_priv;
+	struct mdio_device *new_mdiodev;
+	int ret;
+
+	dev_warn(&mdiodev->dev, FW_WARN
+		 "impossible switch MDIO address in device tree, assuming %d\n",
+		 corrected_addr);
+
+	rem_priv = kmalloc(sizeof(*rem_priv), GFP_KERNEL);
+	if (!rem_priv)
+		return -ENOMEM;
+
+	new_mdiodev = mdio_device_create(mdiodev->bus, corrected_addr);
+	if (IS_ERR(new_mdiodev)) {
+		ret = PTR_ERR(new_mdiodev);
+		goto out_free_work;
+	}
+	device_set_node(&new_mdiodev->dev, fwnode);
+
+	ret = mdio_device_register(new_mdiodev);
+	if (WARN_ON(ret))
+		goto out_free_dev;
+
+	/* schedule impossible device for removal from mdio bus */
+	rem_priv->mdiodev = mdiodev;
+	INIT_DELAYED_WORK(&rem_priv->remove_impossible_work, mt7530_remove_impossible);
+	schedule_delayed_work(&rem_priv->remove_impossible_work, 0);
+
+	return -EFAULT;
+
+out_free_dev:
+	mdio_device_free(new_mdiodev);
+out_free_work:
+	kfree(rem_priv);
+	return ret;
+}
+
+static int
 mt7530_probe(struct mdio_device *mdiodev)
 {
 	static struct regmap_config *regmap_config;
 	struct mt7530_priv *priv;
 	struct device_node *dn;
 	int ret;
+
+	/* Check and if needed correct the MDIO address of the switch */
+	if (mt7530_is_invalid_addr(mdiodev->addr))
+		return mt7530_reregister(mdiodev);
 
 	dn = mdiodev->dev.of_node;
 
