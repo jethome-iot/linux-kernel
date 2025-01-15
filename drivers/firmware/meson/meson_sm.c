@@ -247,7 +247,7 @@ EXPORT_SYMBOL_GPL(meson_sm_get);
 static ssize_t serial_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
-	struct platform_device *pdev = to_platform_device(dev);
+	struct platform_device const *pdev = to_platform_device(dev);
 	struct meson_sm_firmware *fw;
 	uint8_t *id_buf;
 	int ret;
@@ -274,8 +274,43 @@ static ssize_t serial_show(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR_RO(serial);
 
+static ssize_t chipid_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
+{
+	struct platform_device const *pdev = to_platform_device(dev);
+	struct meson_sm_firmware *fw;
+	uint8_t *id_buf;
+	int ret;
+
+	fw = platform_get_drvdata(pdev);
+
+	id_buf = kmalloc(SM_CHIP_ID_LENGTH, GFP_KERNEL);
+	if (!id_buf)
+		return -ENOMEM;
+
+	ret = meson_sm_call_read(fw, id_buf, SM_CHIP_ID_LENGTH, SM_GET_CHIP_ID,
+				 2, 0, 0, 0, 0);
+	if (ret < 0)
+		goto chipid_exit;
+
+	if (((unsigned int *)id_buf)[0] != 2) {
+		ret = -ENOENT;
+		goto chipid_exit;
+	}
+
+	ret = sprintf(buf, "%16phN\n", &id_buf[SM_CHIP_ID_OFFSET]);
+
+chipid_exit:
+	kfree(id_buf);
+
+	return ret;
+}
+
+static DEVICE_ATTR_RO(chipid);
+
 static struct attribute *meson_sm_sysfs_attrs[] = {
 	&dev_attr_serial.attr,
+	&dev_attr_chipid.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(meson_sm_sysfs);
