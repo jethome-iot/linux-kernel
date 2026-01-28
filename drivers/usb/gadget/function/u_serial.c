@@ -24,7 +24,6 @@
 #include <linux/export.h>
 #include <linux/module.h>
 #include <linux/console.h>
-#include <linux/kstrtox.h>
 #include <linux/kthread.h>
 #include <linux/workqueue.h>
 #include <linux/kfifo.h>
@@ -734,12 +733,12 @@ exit:
 	spin_unlock_irq(&port->port_lock);
 }
 
-static ssize_t gs_write(struct tty_struct *tty, const u8 *buf, size_t count)
+static int gs_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
 
-	pr_vdebug("gs_write: ttyGS%d (%p) writing %zu bytes\n",
+	pr_vdebug("gs_write: ttyGS%d (%p) writing %d bytes\n",
 			port->port_num, tty, count);
 
 	spin_lock_irqsave(&port->port_lock, flags);
@@ -753,7 +752,7 @@ static ssize_t gs_write(struct tty_struct *tty, const u8 *buf, size_t count)
 	return count;
 }
 
-static int gs_put_char(struct tty_struct *tty, u8 ch)
+static int gs_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	struct gs_port	*port = tty->driver_data;
 	unsigned long	flags;
@@ -1081,7 +1080,7 @@ ssize_t gserial_set_console(unsigned char port_num, const char *page, size_t cou
 	bool enable;
 	int ret;
 
-	ret = kstrtobool(page, &enable);
+	ret = strtobool(page, &enable);
 	if (ret)
 		return ret;
 
@@ -1475,7 +1474,7 @@ void gserial_resume(struct gserial *gser)
 }
 EXPORT_SYMBOL_GPL(gserial_resume);
 
-static int __init userial_init(void)
+static int userial_init(void)
 {
 	struct tty_driver *driver;
 	unsigned			i;
@@ -1528,7 +1527,7 @@ fail:
 }
 module_init(userial_init);
 
-static void __exit userial_cleanup(void)
+static void userial_cleanup(void)
 {
 	tty_unregister_driver(gs_tty_driver);
 	tty_driver_kref_put(gs_tty_driver);

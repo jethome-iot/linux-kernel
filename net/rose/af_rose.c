@@ -109,7 +109,7 @@ char *rose2asc(char *buf, const rose_address *addr)
 /*
  *	Compare two ROSE addresses, 0 == equal.
  */
-int rosecmp(const rose_address *addr1, const rose_address *addr2)
+int rosecmp(rose_address *addr1, rose_address *addr2)
 {
 	int i;
 
@@ -123,8 +123,7 @@ int rosecmp(const rose_address *addr1, const rose_address *addr2)
 /*
  *	Compare two ROSE addresses for only mask digits, 0 == equal.
  */
-int rosecmpm(const rose_address *addr1, const rose_address *addr2,
-	     unsigned short mask)
+int rosecmpm(rose_address *addr1, rose_address *addr2, unsigned short mask)
 {
 	unsigned int i, j;
 
@@ -213,7 +212,7 @@ start:
 			rose_disconnect(sk, ENETUNREACH, ROSE_OUT_OF_ORDER, 0);
 			if (rose->neighbour)
 				rose->neighbour->use--;
-			netdev_put(rose->device, &rose->dev_tracker);
+			dev_put(rose->device);
 			rose->device = NULL;
 		}
 		spin_unlock_bh(&rose_list_lock);
@@ -609,7 +608,7 @@ static struct sock *rose_make_new(struct sock *osk)
 #endif
 
 	sk->sk_type     = osk->sk_type;
-	sk->sk_priority = READ_ONCE(osk->sk_priority);
+	sk->sk_priority = osk->sk_priority;
 	sk->sk_protocol = osk->sk_protocol;
 	sk->sk_rcvbuf   = osk->sk_rcvbuf;
 	sk->sk_sndbuf   = osk->sk_sndbuf;
@@ -628,7 +627,7 @@ static struct sock *rose_make_new(struct sock *osk)
 	rose->defer	= orose->defer;
 	rose->device	= orose->device;
 	if (rose->device)
-		netdev_hold(rose->device, &rose->dev_tracker, GFP_ATOMIC);
+		dev_hold(rose->device);
 	rose->qbitincl	= orose->qbitincl;
 
 	return sk;
@@ -683,7 +682,7 @@ static int rose_release(struct socket *sock)
 	}
 
 	spin_lock_bh(&rose_list_lock);
-	netdev_put(rose->device, &rose->dev_tracker);
+	dev_put(rose->device);
 	rose->device = NULL;
 	spin_unlock_bh(&rose_list_lock);
 	sock->sk = NULL;
@@ -737,7 +736,6 @@ static int rose_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 
 	rose->source_addr   = addr->srose_addr;
 	rose->device        = dev;
-	netdev_tracker_alloc(rose->device, &rose->dev_tracker, GFP_KERNEL);
 	rose->source_ndigis = addr->srose_ndigis;
 
 	if (addr_len == sizeof(struct full_sockaddr_rose)) {
@@ -839,8 +837,6 @@ static int rose_connect(struct socket *sock, struct sockaddr *uaddr, int addr_le
 		memcpy(&rose->source_addr, dev->dev_addr, ROSE_ADDR_LEN);
 		rose->source_call = user->call;
 		rose->device      = dev;
-		netdev_tracker_alloc(rose->device, &rose->dev_tracker,
-				     GFP_KERNEL);
 		ax25_uid_put(user);
 
 		rose_insert_socket(sk);		/* Finish the bind */
@@ -1064,9 +1060,6 @@ int rose_rx_call_request(struct sk_buff *skb, struct net_device *dev, struct ros
 		make_rose->source_digis[n] = facilities.source_digis[n];
 	make_rose->neighbour     = neigh;
 	make_rose->device        = dev;
-	/* Caller got a reference for us. */
-	netdev_tracker_alloc(make_rose->device, &make_rose->dev_tracker,
-			     GFP_ATOMIC);
 	make_rose->facilities    = facilities;
 
 	make_rose->neighbour->use++;
@@ -1280,8 +1273,7 @@ static int rose_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		return -ENOTCONN;
 
 	/* Now we can treat all alike */
-	skb = skb_recv_datagram(sk, flags, &er);
-	if (!skb)
+	if ((skb = skb_recv_datagram(sk, flags & ~MSG_DONTWAIT, flags & MSG_DONTWAIT, &er)) == NULL)
 		return er;
 
 	qbit = (skb->data[0] & ROSE_Q_BIT) == ROSE_Q_BIT;
@@ -1527,6 +1519,7 @@ static const struct proto_ops rose_proto_ops = {
 	.sendmsg	=	rose_sendmsg,
 	.recvmsg	=	rose_recvmsg,
 	.mmap		=	sock_no_mmap,
+	.sendpage	=	sock_no_sendpage,
 };
 
 static struct notifier_block rose_dev_notifier = {

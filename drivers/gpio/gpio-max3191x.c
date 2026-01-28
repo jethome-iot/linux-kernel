@@ -326,7 +326,7 @@ static void gpiod_set_array_single_value_cansleep(unsigned int ndescs,
 		bitmap_zero(values, ndescs);
 
 	gpiod_set_array_value_cansleep(ndescs, desc, info, values);
-	bitmap_free(values);
+	kfree(values);
 }
 
 static struct gpio_descs *devm_gpiod_get_array_optional_count(
@@ -443,12 +443,14 @@ static int max3191x_probe(struct spi_device *spi)
 	return 0;
 }
 
-static void max3191x_remove(struct spi_device *spi)
+static int max3191x_remove(struct spi_device *spi)
 {
 	struct max3191x_chip *max3191x = spi_get_drvdata(spi);
 
 	gpiochip_remove(&max3191x->gpio);
 	mutex_destroy(&max3191x->lock);
+
+	return 0;
 }
 
 static int __init max3191x_register_driver(struct spi_driver *sdrv)
@@ -457,6 +459,7 @@ static int __init max3191x_register_driver(struct spi_driver *sdrv)
 	return spi_register_driver(sdrv);
 }
 
+#ifdef CONFIG_OF
 static const struct of_device_id max3191x_of_id[] = {
 	{ .compatible = "maxim,max31910" },
 	{ .compatible = "maxim,max31911" },
@@ -467,6 +470,7 @@ static const struct of_device_id max3191x_of_id[] = {
 	{ }
 };
 MODULE_DEVICE_TABLE(of, max3191x_of_id);
+#endif
 
 static const struct spi_device_id max3191x_spi_id[] = {
 	{ "max31910" },
@@ -482,7 +486,7 @@ MODULE_DEVICE_TABLE(spi, max3191x_spi_id);
 static struct spi_driver max3191x_driver = {
 	.driver = {
 		.name		= "max3191x",
-		.of_match_table	= max3191x_of_id,
+		.of_match_table	= of_match_ptr(max3191x_of_id),
 	},
 	.probe	  = max3191x_probe,
 	.remove	  = max3191x_remove,

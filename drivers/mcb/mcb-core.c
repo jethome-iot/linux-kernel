@@ -41,9 +41,9 @@ static int mcb_match(struct device *dev, struct device_driver *drv)
 	return 0;
 }
 
-static int mcb_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int mcb_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct mcb_device *mdev = to_mcb_device(dev);
+	struct mcb_device *mdev = to_mcb_device(dev);
 	int ret;
 
 	ret = add_uevent_var(env, "MODALIAS=mcb:16z%03d", mdev->id);
@@ -257,13 +257,12 @@ static void mcb_free_bus(struct device *dev)
 	struct mcb_bus *bus = to_mcb_bus(dev);
 
 	put_device(bus->carrier);
-	ida_free(&mcb_ida, bus->bus_nr);
+	ida_simple_remove(&mcb_ida, bus->bus_nr);
 	kfree(bus);
 }
 
 /**
  * mcb_alloc_bus() - Allocate a new @mcb_bus
- * @carrier: generic &struct device for the carrier device
  *
  * Allocate a new @mcb_bus.
  */
@@ -277,7 +276,7 @@ struct mcb_bus *mcb_alloc_bus(struct device *carrier)
 	if (!bus)
 		return ERR_PTR(-ENOMEM);
 
-	bus_nr = ida_alloc(&mcb_ida, GFP_KERNEL);
+	bus_nr = ida_simple_get(&mcb_ida, 0, 0, GFP_KERNEL);
 	if (bus_nr < 0) {
 		kfree(bus);
 		return ERR_PTR(bus_nr);
@@ -290,7 +289,7 @@ struct mcb_bus *mcb_alloc_bus(struct device *carrier)
 	bus->dev.parent = carrier;
 	bus->dev.bus = &mcb_bus_type;
 	bus->dev.type = &mcb_carrier_device_type;
-	bus->dev.release = mcb_free_bus;
+	bus->dev.release = &mcb_free_bus;
 
 	dev_set_name(&bus->dev, "mcb:%d", bus_nr);
 	rc = device_add(&bus->dev);
@@ -313,7 +312,7 @@ static int __mcb_devices_unregister(struct device *dev, void *data)
 
 static void mcb_devices_unregister(struct mcb_bus *bus)
 {
-	bus_for_each_dev(bus->dev.bus, NULL, NULL, __mcb_devices_unregister);
+	bus_for_each_dev(&mcb_bus_type, NULL, NULL, __mcb_devices_unregister);
 }
 /**
  * mcb_release_bus() - Free a @mcb_bus
@@ -328,7 +327,7 @@ void mcb_release_bus(struct mcb_bus *bus)
 EXPORT_SYMBOL_NS_GPL(mcb_release_bus, MCB);
 
 /**
- * mcb_bus_get() - Increment refcnt
+ * mcb_bus_put() - Increment refcnt
  * @bus: The @mcb_bus
  *
  * Get a @mcb_bus' ref
@@ -408,7 +407,7 @@ static int __mcb_bus_add_devices(struct device *dev, void *data)
  */
 void mcb_bus_add_devices(const struct mcb_bus *bus)
 {
-	bus_for_each_dev(bus->dev.bus, NULL, NULL, __mcb_bus_add_devices);
+	bus_for_each_dev(&mcb_bus_type, NULL, NULL, __mcb_bus_add_devices);
 }
 EXPORT_SYMBOL_NS_GPL(mcb_bus_add_devices, MCB);
 
@@ -456,7 +455,7 @@ EXPORT_SYMBOL_NS_GPL(mcb_request_mem, MCB);
 
 /**
  * mcb_release_mem() - Release memory requested by device
- * @mem: The memory resource to be released
+ * @dev: The @mcb_device that requested the memory
  *
  * Release memory that was prior requested via @mcb_request_mem().
  */

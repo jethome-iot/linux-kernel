@@ -9,12 +9,8 @@
 #define __ASM_FACILITY_H
 
 #include <asm/facility-defs.h>
-
-#include <linux/minmax.h>
 #include <linux/string.h>
-#include <linux/types.h>
 #include <linux/preempt.h>
-
 #include <asm/lowcore.h>
 
 #define MAX_FACILITY_BIT (sizeof(stfle_fac_list) * 8)
@@ -110,11 +106,5 @@ static inline void stfle(u64 *stfle_fac_list, int size)
 	__stfle(stfle_fac_list, size);
 	preempt_enable();
 }
-
-/**
- * stfle_size - Actual size of the facility list as specified by stfle
- * (number of double words)
- */
-unsigned int stfle_size(void);
 
 #endif /* __ASM_FACILITY_H */

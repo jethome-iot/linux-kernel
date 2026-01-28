@@ -16,8 +16,6 @@
 void add_cmdname(struct cmdnames *cmds, const char *name, size_t len)
 {
 	struct cmdname *ent = malloc(sizeof(*ent) + len + 1);
-	if (!ent)
-		return;
 
 	ent->len = len;
 	memcpy(ent->name, name, len);
@@ -78,13 +76,7 @@ void exclude_cmds(struct cmdnames *cmds, struct cmdnames *excludes)
 	while (ci < cmds->cnt && ei < excludes->cnt) {
 		cmp = strcmp(cmds->names[ci]->name, excludes->names[ei]->name);
 		if (cmp < 0) {
-			if (ci == cj) {
-				ci++;
-				cj++;
-			} else {
-				zfree(&cmds->names[cj]);
-				cmds->names[cj++] = cmds->names[ci++];
-			}
+			cmds->names[cj++] = cmds->names[ci++];
 		} else if (cmp == 0) {
 			ci++;
 			ei++;
@@ -92,14 +84,10 @@ void exclude_cmds(struct cmdnames *cmds, struct cmdnames *excludes)
 			ei++;
 		}
 	}
-	if (ci != cj) {
-		while (ci < cmds->cnt) {
-			zfree(&cmds->names[cj]);
-			cmds->names[cj++] = cmds->names[ci++];
-		}
-	}
-	for (ci = cj; ci < cmds->cnt; ci++)
-		zfree(&cmds->names[ci]);
+
+	while (ci < cmds->cnt)
+		cmds->names[cj++] = cmds->names[ci++];
+
 	cmds->cnt = cj;
 }
 

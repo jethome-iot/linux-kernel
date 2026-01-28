@@ -4,6 +4,11 @@
  * Copyright(c) 2008 - 2014 Intel Corporation. All rights reserved.
  * Copyright (C) 2019 Intel Corporation
  * Copyright (C) 2023 Intel Corporation
+ *
+ * Contact Information:
+ *  Intel Linux Wireless <linuxwifi@intel.com>
+ * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
+ *
  *****************************************************************************/
 
 #include <linux/kernel.h>
@@ -1248,7 +1253,7 @@ void iwlagn_rx_reply_tx(struct iwl_priv *priv, struct iwl_rx_cmd_buffer *rxb)
 
 	while (!skb_queue_empty(&skbs)) {
 		skb = __skb_dequeue(&skbs);
-		ieee80211_tx_status_skb(priv->hw, skb);
+		ieee80211_tx_status(priv->hw, skb);
 	}
 }
 
@@ -1385,6 +1390,6 @@ void iwlagn_rx_reply_compressed_ba(struct iwl_priv *priv,
 
 	while (!skb_queue_empty(&reclaimed_skbs)) {
 		skb = __skb_dequeue(&reclaimed_skbs);
-		ieee80211_tx_status_skb(priv->hw, skb);
+		ieee80211_tx_status(priv->hw, skb);
 	}
 }

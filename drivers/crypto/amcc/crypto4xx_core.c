@@ -1101,7 +1101,7 @@ static void crypto4xx_bh_tasklet_cb(unsigned long data)
 static inline irqreturn_t crypto4xx_interrupt_handler(int irq, void *data,
 						      u32 clr_val)
 {
-	struct device *dev = data;
+	struct device *dev = (struct device *)data;
 	struct crypto4xx_core_device *core_dev = dev_get_drvdata(dev);
 
 	writel(clr_val, core_dev->dev->ce_base + CRYPTO4XX_INT_CLR);
@@ -1211,6 +1211,26 @@ static struct crypto4xx_alg_common crypto4xx_alg[] = {
 	} },
 	{ .type = CRYPTO_ALG_TYPE_SKCIPHER, .u.cipher = {
 		.base = {
+			.cra_name = "cfb(aes)",
+			.cra_driver_name = "cfb-aes-ppc4xx",
+			.cra_priority = CRYPTO4XX_CRYPTO_PRIORITY,
+			.cra_flags = CRYPTO_ALG_ASYNC |
+				CRYPTO_ALG_KERN_DRIVER_ONLY,
+			.cra_blocksize = 1,
+			.cra_ctxsize = sizeof(struct crypto4xx_ctx),
+			.cra_module = THIS_MODULE,
+		},
+		.min_keysize = AES_MIN_KEY_SIZE,
+		.max_keysize = AES_MAX_KEY_SIZE,
+		.ivsize	= AES_IV_SIZE,
+		.setkey	= crypto4xx_setkey_aes_cfb,
+		.encrypt = crypto4xx_encrypt_iv_stream,
+		.decrypt = crypto4xx_decrypt_iv_stream,
+		.init = crypto4xx_sk_init,
+		.exit = crypto4xx_sk_exit,
+	} },
+	{ .type = CRYPTO_ALG_TYPE_SKCIPHER, .u.cipher = {
+		.base = {
 			.cra_name = "ctr(aes)",
 			.cra_driver_name = "ctr-aes-ppc4xx",
 			.cra_priority = CRYPTO4XX_CRYPTO_PRIORITY,
@@ -1266,6 +1286,26 @@ static struct crypto4xx_alg_common crypto4xx_alg[] = {
 		.setkey	= crypto4xx_setkey_aes_ecb,
 		.encrypt = crypto4xx_encrypt_noiv_block,
 		.decrypt = crypto4xx_decrypt_noiv_block,
+		.init = crypto4xx_sk_init,
+		.exit = crypto4xx_sk_exit,
+	} },
+	{ .type = CRYPTO_ALG_TYPE_SKCIPHER, .u.cipher = {
+		.base = {
+			.cra_name = "ofb(aes)",
+			.cra_driver_name = "ofb-aes-ppc4xx",
+			.cra_priority = CRYPTO4XX_CRYPTO_PRIORITY,
+			.cra_flags = CRYPTO_ALG_ASYNC |
+				CRYPTO_ALG_KERN_DRIVER_ONLY,
+			.cra_blocksize = 1,
+			.cra_ctxsize = sizeof(struct crypto4xx_ctx),
+			.cra_module = THIS_MODULE,
+		},
+		.min_keysize = AES_MIN_KEY_SIZE,
+		.max_keysize = AES_MAX_KEY_SIZE,
+		.ivsize	= AES_IV_SIZE,
+		.setkey	= crypto4xx_setkey_aes_ofb,
+		.encrypt = crypto4xx_encrypt_iv_stream,
+		.decrypt = crypto4xx_decrypt_iv_stream,
 		.init = crypto4xx_sk_init,
 		.exit = crypto4xx_sk_exit,
 	} },
@@ -1336,7 +1376,6 @@ static int crypto4xx_probe(struct platform_device *ofdev)
 	struct resource res;
 	struct device *dev = &ofdev->dev;
 	struct crypto4xx_core_device *core_dev;
-	struct device_node *np;
 	u32 pvr;
 	bool is_revb = true;
 
@@ -1344,35 +1383,28 @@ static int crypto4xx_probe(struct platform_device *ofdev)
 	if (rc)
 		return -ENODEV;
 
-	np = of_find_compatible_node(NULL, NULL, "amcc,ppc460ex-crypto");
-	if (np) {
+	if (of_find_compatible_node(NULL, NULL, "amcc,ppc460ex-crypto")) {
 		mtdcri(SDR0, PPC460EX_SDR0_SRST,
 		       mfdcri(SDR0, PPC460EX_SDR0_SRST) | PPC460EX_CE_RESET);
 		mtdcri(SDR0, PPC460EX_SDR0_SRST,
 		       mfdcri(SDR0, PPC460EX_SDR0_SRST) & ~PPC460EX_CE_RESET);
+	} else if (of_find_compatible_node(NULL, NULL,
+			"amcc,ppc405ex-crypto")) {
+		mtdcri(SDR0, PPC405EX_SDR0_SRST,
+		       mfdcri(SDR0, PPC405EX_SDR0_SRST) | PPC405EX_CE_RESET);
+		mtdcri(SDR0, PPC405EX_SDR0_SRST,
+		       mfdcri(SDR0, PPC405EX_SDR0_SRST) & ~PPC405EX_CE_RESET);
+		is_revb = false;
+	} else if (of_find_compatible_node(NULL, NULL,
+			"amcc,ppc460sx-crypto")) {
+		mtdcri(SDR0, PPC460SX_SDR0_SRST,
+		       mfdcri(SDR0, PPC460SX_SDR0_SRST) | PPC460SX_CE_RESET);
+		mtdcri(SDR0, PPC460SX_SDR0_SRST,
+		       mfdcri(SDR0, PPC460SX_SDR0_SRST) & ~PPC460SX_CE_RESET);
 	} else {
-		np = of_find_compatible_node(NULL, NULL, "amcc,ppc405ex-crypto");
-		if (np) {
-			mtdcri(SDR0, PPC405EX_SDR0_SRST,
-				   mfdcri(SDR0, PPC405EX_SDR0_SRST) | PPC405EX_CE_RESET);
-			mtdcri(SDR0, PPC405EX_SDR0_SRST,
-				   mfdcri(SDR0, PPC405EX_SDR0_SRST) & ~PPC405EX_CE_RESET);
-			is_revb = false;
-		} else {
-			np = of_find_compatible_node(NULL, NULL, "amcc,ppc460sx-crypto");
-			if (np) {
-				mtdcri(SDR0, PPC460SX_SDR0_SRST,
-					mfdcri(SDR0, PPC460SX_SDR0_SRST) | PPC460SX_CE_RESET);
-				mtdcri(SDR0, PPC460SX_SDR0_SRST,
-					mfdcri(SDR0, PPC460SX_SDR0_SRST) & ~PPC460SX_CE_RESET);
-			} else {
-				printk(KERN_ERR "Crypto Function Not supported!\n");
-				return -EINVAL;
-			}
-		}
+		printk(KERN_ERR "Crypto Function Not supported!\n");
+		return -EINVAL;
 	}
-
-	of_node_put(np);
 
 	core_dev = kzalloc(sizeof(struct crypto4xx_core_device), GFP_KERNEL);
 	if (!core_dev)
@@ -1467,7 +1499,7 @@ err_alloc_dev:
 	return rc;
 }
 
-static void crypto4xx_remove(struct platform_device *ofdev)
+static int crypto4xx_remove(struct platform_device *ofdev)
 {
 	struct device *dev = &ofdev->dev;
 	struct crypto4xx_core_device *core_dev = dev_get_drvdata(dev);
@@ -1483,6 +1515,8 @@ static void crypto4xx_remove(struct platform_device *ofdev)
 	mutex_destroy(&core_dev->rng_lock);
 	/* Free all allocated memory */
 	crypto4xx_stop_all(core_dev);
+
+	return 0;
 }
 
 static const struct of_device_id crypto4xx_match[] = {
@@ -1497,7 +1531,7 @@ static struct platform_driver crypto4xx_driver = {
 		.of_match_table = crypto4xx_match,
 	},
 	.probe		= crypto4xx_probe,
-	.remove_new	= crypto4xx_remove,
+	.remove		= crypto4xx_remove,
 };
 
 module_platform_driver(crypto4xx_driver);

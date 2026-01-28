@@ -404,12 +404,11 @@ out:
 static int macscsi_dma_xfer_len(struct NCR5380_hostdata *hostdata,
                                 struct scsi_cmnd *cmd)
 {
-	int resid = NCR5380_to_ncmd(cmd)->this_residual;
-
-	if (hostdata->flags & FLAG_NO_PSEUDO_DMA || resid < setup_use_pdma)
+	if (hostdata->flags & FLAG_NO_PSEUDO_DMA ||
+	    cmd->SCp.this_residual < setup_use_pdma)
 		return 0;
 
-	return resid;
+	return cmd->SCp.this_residual;
 }
 
 static int macscsi_dma_residual(struct NCR5380_hostdata *hostdata)
@@ -435,7 +434,7 @@ static struct scsi_host_template mac_scsi_template = {
 	.sg_tablesize		= 1,
 	.cmd_per_lun		= 2,
 	.dma_boundary		= PAGE_SIZE - 1,
-	.cmd_size		= sizeof(struct NCR5380_cmd),
+	.cmd_size		= NCR5380_CMD_SIZE,
 	.max_sectors		= 128,
 };
 
@@ -523,7 +522,7 @@ fail_init:
 	return error;
 }
 
-static void __exit mac_scsi_remove(struct platform_device *pdev)
+static int __exit mac_scsi_remove(struct platform_device *pdev)
 {
 	struct Scsi_Host *instance = platform_get_drvdata(pdev);
 
@@ -532,10 +531,11 @@ static void __exit mac_scsi_remove(struct platform_device *pdev)
 		free_irq(instance->irq, instance);
 	NCR5380_exit(instance);
 	scsi_host_put(instance);
+	return 0;
 }
 
 static struct platform_driver mac_scsi_driver = {
-	.remove_new = __exit_p(mac_scsi_remove),
+	.remove = __exit_p(mac_scsi_remove),
 	.driver = {
 		.name	= DRV_MODULE_NAME,
 	},

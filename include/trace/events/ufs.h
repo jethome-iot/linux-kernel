@@ -18,7 +18,9 @@
 		{ READ_16,		"READ_16" },			\
 		{ READ_10,		"READ_10" },			\
 		{ SYNCHRONIZE_CACHE,	"SYNC" },			\
-		{ UNMAP,		"UNMAP" })
+		{ UNMAP,		"UNMAP" },			\
+		{ ZBC_IN,		"ZBC_IN" },			\
+		{ ZBC_OUT,		"ZBC_OUT" })
 
 #define UFS_LINK_STATES						\
 	EM(UIC_LINK_OFF_STATE,		"UIC_LINK_OFF_STATE")		\
@@ -268,21 +270,20 @@ DEFINE_EVENT(ufshcd_template, ufshcd_wl_runtime_resume,
 
 TRACE_EVENT(ufshcd_command,
 	TP_PROTO(struct scsi_device *sdev, enum ufs_trace_str_t str_t,
-		 unsigned int tag, u32 doorbell, u32 hwq_id, int transfer_len,
-		 u32 intr, u64 lba, u8 opcode, u8 group_id),
+		 unsigned int tag, u32 doorbell, int transfer_len, u32 intr,
+		 u64 lba, u8 opcode, u8 group_id),
 
-	TP_ARGS(sdev, str_t, tag, doorbell, hwq_id, transfer_len, intr, lba,
-		opcode, group_id),
+	TP_ARGS(sdev, str_t, tag, doorbell, transfer_len,
+				intr, lba, opcode, group_id),
 
 	TP_STRUCT__entry(
 		__field(struct scsi_device *, sdev)
 		__field(enum ufs_trace_str_t, str_t)
 		__field(unsigned int, tag)
 		__field(u32, doorbell)
-		__field(u32, hwq_id)
+		__field(int, transfer_len)
 		__field(u32, intr)
 		__field(u64, lba)
-		__field(int, transfer_len)
 		__field(u8, opcode)
 		__field(u8, group_id)
 	),
@@ -292,21 +293,20 @@ TRACE_EVENT(ufshcd_command,
 		__entry->str_t = str_t;
 		__entry->tag = tag;
 		__entry->doorbell = doorbell;
-		__entry->hwq_id = hwq_id;
+		__entry->transfer_len = transfer_len;
 		__entry->intr = intr;
 		__entry->lba = lba;
-		__entry->transfer_len = transfer_len;
 		__entry->opcode = opcode;
 		__entry->group_id = group_id;
 	),
 
 	TP_printk(
-		"%s: %s: tag: %u, DB: 0x%x, size: %d, IS: %u, LBA: %llu, opcode: 0x%x (%s), group_id: 0x%x, hwq_id: %d",
+		"%s: %s: tag: %u, DB: 0x%x, size: %d, IS: %u, LBA: %llu, opcode: 0x%x (%s), group_id: 0x%x",
 		show_ufs_cmd_trace_str(__entry->str_t),
-		dev_name(&__entry->sdev->sdev_dev), __entry->tag,
-		__entry->doorbell, __entry->transfer_len, __entry->intr,
-		__entry->lba, (u32)__entry->opcode, str_opcode(__entry->opcode),
-		(u32)__entry->group_id, __entry->hwq_id
+		dev_name(&__entry->sdev->sdev_dev),
+		__entry->tag, __entry->doorbell, __entry->transfer_len,
+		__entry->intr, __entry->lba, (u32)__entry->opcode,
+		str_opcode(__entry->opcode), (u32)__entry->group_id
 	)
 );
 

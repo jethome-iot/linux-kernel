@@ -6,7 +6,6 @@
 
 MAX_RETRIES=600
 RETRY_INTERVAL=".1"	# seconds
-KLP_SYSFS_DIR="/sys/kernel/livepatch"
 
 # Kselftest framework requirement - SKIP code is 4
 ksft_skip=4
@@ -42,6 +41,17 @@ function die() {
 	exit 1
 }
 
+# save existing dmesg so we can detect new content
+function save_dmesg() {
+	SAVED_DMESG=$(mktemp --tmpdir -t klp-dmesg-XXXXXX)
+	dmesg > "$SAVED_DMESG"
+}
+
+# cleanup temporary dmesg file from save_dmesg()
+function cleanup_dmesg_file() {
+	rm -f "$SAVED_DMESG"
+}
+
 function push_config() {
 	DYNAMIC_DEBUG=$(grep '^kernel/livepatch' /sys/kernel/debug/dynamic_debug/control | \
 			awk -F'[: ]' '{print "file " $1 " line " $2 " " $4}')
@@ -65,29 +75,14 @@ function set_dynamic_debug() {
 }
 
 function set_ftrace_enabled() {
-	local can_fail=0
-	if [[ "$1" == "--fail" ]] ; then
-		can_fail=1
-		shift
-	fi
-
-	local err=$(sysctl -q kernel.ftrace_enabled="$1" 2>&1)
-	local result=$(sysctl --values kernel.ftrace_enabled)
-
-	if [[ "$result" != "$1" ]] ; then
-		if [[ $can_fail -eq 1 ]] ; then
-			echo "livepatch: $err" | sed 's#/proc/sys/kernel/#kernel.#' > /dev/kmsg
-			return
-		fi
-
-		skip "failed to set kernel.ftrace_enabled = $1"
-	fi
-
-	echo "livepatch: kernel.ftrace_enabled = $result" > /dev/kmsg
+	result=$(sysctl -q kernel.ftrace_enabled="$1" 2>&1 && \
+		 sysctl kernel.ftrace_enabled 2>&1)
+	echo "livepatch: $result" > /dev/kmsg
 }
 
 function cleanup() {
 	pop_config
+	cleanup_dmesg_file
 }
 
 # setup_config - save the current config and set a script exit trap that
@@ -268,15 +263,7 @@ function set_pre_patch_ret {
 function start_test {
 	local test="$1"
 
-	# Dump something unique into the dmesg log, then stash the entry
-	# in LAST_DMESG.  The check_result() function will use it to
-	# find new kernel messages since the test started.
-	local last_dmesg_msg="livepatch kselftest timestamp: $(date --rfc-3339=ns)"
-	log "$last_dmesg_msg"
-	loop_until 'dmesg | grep -q "$last_dmesg_msg"' ||
-		die "buffer busy? can't find canary dmesg message: $last_dmesg_msg"
-	LAST_DMESG=$(dmesg | grep "$last_dmesg_msg")
-
+	save_dmesg
 	echo -n "TEST: $test ... "
 	log "===== TEST: $test ====="
 }
@@ -287,55 +274,21 @@ function check_result {
 	local expect="$*"
 	local result
 
-	# Test results include any new dmesg entry since LAST_DMESG, then:
-	# - include lines matching keywords
-	# - exclude lines matching keywords
-	# - filter out dmesg timestamp prefixes
-	result=$(dmesg | awk -v last_dmesg="$LAST_DMESG" 'p; $0 == last_dmesg { p=1 }' | \
+	# Note: when comparing dmesg output, the kernel log timestamps
+	# help differentiate repeated testing runs.  Remove them with a
+	# post-comparison sed filter.
+
+	result=$(dmesg | comm --nocheck-order -13 "$SAVED_DMESG" - | \
 		 grep -e 'livepatch:' -e 'test_klp' | \
 		 grep -v '\(tainting\|taints\) kernel' | \
 		 sed 's/^\[[ 0-9.]*\] //')
 
 	if [[ "$expect" == "$result" ]] ; then
 		echo "ok"
-	elif [[ "$result" == "" ]] ; then
-		echo -e "not ok\n\nbuffer overrun? can't find canary dmesg entry: $LAST_DMESG\n"
-		die "livepatch kselftest(s) failed"
 	else
 		echo -e "not ok\n\n$(diff -upr --label expected --label result <(echo "$expect") <(echo "$result"))\n"
 		die "livepatch kselftest(s) failed"
 	fi
-}
 
-# check_sysfs_rights(modname, rel_path, expected_rights) - check sysfs
-# path permissions
-#	modname - livepatch module creating the sysfs interface
-#	rel_path - relative path of the sysfs interface
-#	expected_rights - expected access rights
-function check_sysfs_rights() {
-	local mod="$1"; shift
-	local rel_path="$1"; shift
-	local expected_rights="$1"; shift
-
-	local path="$KLP_SYSFS_DIR/$mod/$rel_path"
-	local rights=$(/bin/stat --format '%A' "$path")
-	if test "$rights" != "$expected_rights" ; then
-		die "Unexpected access rights of $path: $expected_rights vs. $rights"
-	fi
-}
-
-# check_sysfs_value(modname, rel_path, expected_value) - check sysfs value
-#	modname - livepatch module creating the sysfs interface
-#	rel_path - relative path of the sysfs interface
-#	expected_value - expected value read from the file
-function check_sysfs_value() {
-	local mod="$1"; shift
-	local rel_path="$1"; shift
-	local expected_value="$1"; shift
-
-	local path="$KLP_SYSFS_DIR/$mod/$rel_path"
-	local value=`cat $path`
-	if test "$value" != "$expected_value" ; then
-		die "Unexpected value in $path: $expected_value vs. $value"
-	fi
+	cleanup_dmesg_file
 }

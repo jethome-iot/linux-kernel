@@ -604,32 +604,55 @@ ice_set_fd_desc_val(struct ice_fd_fltr_desc_ctx *ctx,
 	u64 qword;
 
 	/* prep QW0 of FD filter programming desc */
-	qword = FIELD_PREP(ICE_FXD_FLTR_QW0_QINDEX_M, ctx->qindex);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_COMP_Q_M, ctx->comp_q);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_COMP_REPORT_M, ctx->comp_report);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_FD_SPACE_M, ctx->fd_space);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_STAT_CNT_M, ctx->cnt_index);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_STAT_ENA_M, ctx->cnt_ena);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_EVICT_ENA_M, ctx->evict_ena);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_TO_Q_M, ctx->toq);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_TO_Q_PRI_M, ctx->toq_prio);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_DPU_RECIPE_M, ctx->dpu_recipe);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_DROP_M, ctx->drop);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_FLEX_PRI_M, ctx->flex_prio);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_FLEX_MDID_M, ctx->flex_mdid);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW0_FLEX_VAL_M, ctx->flex_val);
+	qword = ((u64)ctx->qindex << ICE_FXD_FLTR_QW0_QINDEX_S) &
+		ICE_FXD_FLTR_QW0_QINDEX_M;
+	qword |= ((u64)ctx->comp_q << ICE_FXD_FLTR_QW0_COMP_Q_S) &
+		 ICE_FXD_FLTR_QW0_COMP_Q_M;
+	qword |= ((u64)ctx->comp_report << ICE_FXD_FLTR_QW0_COMP_REPORT_S) &
+		 ICE_FXD_FLTR_QW0_COMP_REPORT_M;
+	qword |= ((u64)ctx->fd_space << ICE_FXD_FLTR_QW0_FD_SPACE_S) &
+		 ICE_FXD_FLTR_QW0_FD_SPACE_M;
+	qword |= ((u64)ctx->cnt_index << ICE_FXD_FLTR_QW0_STAT_CNT_S) &
+		 ICE_FXD_FLTR_QW0_STAT_CNT_M;
+	qword |= ((u64)ctx->cnt_ena << ICE_FXD_FLTR_QW0_STAT_ENA_S) &
+		 ICE_FXD_FLTR_QW0_STAT_ENA_M;
+	qword |= ((u64)ctx->evict_ena << ICE_FXD_FLTR_QW0_EVICT_ENA_S) &
+		 ICE_FXD_FLTR_QW0_EVICT_ENA_M;
+	qword |= ((u64)ctx->toq << ICE_FXD_FLTR_QW0_TO_Q_S) &
+		 ICE_FXD_FLTR_QW0_TO_Q_M;
+	qword |= ((u64)ctx->toq_prio << ICE_FXD_FLTR_QW0_TO_Q_PRI_S) &
+		 ICE_FXD_FLTR_QW0_TO_Q_PRI_M;
+	qword |= ((u64)ctx->dpu_recipe << ICE_FXD_FLTR_QW0_DPU_RECIPE_S) &
+		 ICE_FXD_FLTR_QW0_DPU_RECIPE_M;
+	qword |= ((u64)ctx->drop << ICE_FXD_FLTR_QW0_DROP_S) &
+		 ICE_FXD_FLTR_QW0_DROP_M;
+	qword |= ((u64)ctx->flex_prio << ICE_FXD_FLTR_QW0_FLEX_PRI_S) &
+		 ICE_FXD_FLTR_QW0_FLEX_PRI_M;
+	qword |= ((u64)ctx->flex_mdid << ICE_FXD_FLTR_QW0_FLEX_MDID_S) &
+		 ICE_FXD_FLTR_QW0_FLEX_MDID_M;
+	qword |= ((u64)ctx->flex_val << ICE_FXD_FLTR_QW0_FLEX_VAL_S) &
+		 ICE_FXD_FLTR_QW0_FLEX_VAL_M;
 	fdir_desc->qidx_compq_space_stat = cpu_to_le64(qword);
 
 	/* prep QW1 of FD filter programming desc */
-	qword = FIELD_PREP(ICE_FXD_FLTR_QW1_DTYPE_M, ctx->dtype);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_PCMD_M, ctx->pcmd);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_PROF_PRI_M, ctx->desc_prof_prio);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_PROF_M, ctx->desc_prof);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_FD_VSI_M, ctx->fd_vsi);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_SWAP_M, ctx->swap);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_FDID_PRI_M, ctx->fdid_prio);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_FDID_MDID_M, ctx->fdid_mdid);
-	qword |= FIELD_PREP(ICE_FXD_FLTR_QW1_FDID_M, ctx->fdid);
+	qword = ((u64)ctx->dtype << ICE_FXD_FLTR_QW1_DTYPE_S) &
+		ICE_FXD_FLTR_QW1_DTYPE_M;
+	qword |= ((u64)ctx->pcmd << ICE_FXD_FLTR_QW1_PCMD_S) &
+		 ICE_FXD_FLTR_QW1_PCMD_M;
+	qword |= ((u64)ctx->desc_prof_prio << ICE_FXD_FLTR_QW1_PROF_PRI_S) &
+		 ICE_FXD_FLTR_QW1_PROF_PRI_M;
+	qword |= ((u64)ctx->desc_prof << ICE_FXD_FLTR_QW1_PROF_S) &
+		 ICE_FXD_FLTR_QW1_PROF_M;
+	qword |= ((u64)ctx->fd_vsi << ICE_FXD_FLTR_QW1_FD_VSI_S) &
+		 ICE_FXD_FLTR_QW1_FD_VSI_M;
+	qword |= ((u64)ctx->swap << ICE_FXD_FLTR_QW1_SWAP_S) &
+		 ICE_FXD_FLTR_QW1_SWAP_M;
+	qword |= ((u64)ctx->fdid_prio << ICE_FXD_FLTR_QW1_FDID_PRI_S) &
+		 ICE_FXD_FLTR_QW1_FDID_PRI_M;
+	qword |= ((u64)ctx->fdid_mdid << ICE_FXD_FLTR_QW1_FDID_MDID_S) &
+		 ICE_FXD_FLTR_QW1_FDID_MDID_M;
+	qword |= ((u64)ctx->fdid << ICE_FXD_FLTR_QW1_FDID_S) &
+		 ICE_FXD_FLTR_QW1_FDID_M;
 	fdir_desc->dtype_cmd_vsi_fdid = cpu_to_le64(qword);
 }
 
@@ -689,7 +712,7 @@ ice_fdir_get_prgm_desc(struct ice_hw *hw, struct ice_fdir_fltr *input,
  * @hw: pointer to the hardware structure
  * @cntr_id: returns counter index
  */
-int ice_alloc_fd_res_cntr(struct ice_hw *hw, u16 *cntr_id)
+enum ice_status ice_alloc_fd_res_cntr(struct ice_hw *hw, u16 *cntr_id)
 {
 	return ice_alloc_res_cntr(hw, ICE_AQC_RES_TYPE_FDIR_COUNTER_BLOCK,
 				  ICE_AQC_RES_TYPE_FLAG_DEDICATED, 1, cntr_id);
@@ -700,7 +723,7 @@ int ice_alloc_fd_res_cntr(struct ice_hw *hw, u16 *cntr_id)
  * @hw: pointer to the hardware structure
  * @cntr_id: counter index to be freed
  */
-int ice_free_fd_res_cntr(struct ice_hw *hw, u16 cntr_id)
+enum ice_status ice_free_fd_res_cntr(struct ice_hw *hw, u16 cntr_id)
 {
 	return ice_free_res_cntr(hw, ICE_AQC_RES_TYPE_FDIR_COUNTER_BLOCK,
 				 ICE_AQC_RES_TYPE_FLAG_DEDICATED, 1, cntr_id);
@@ -712,7 +735,8 @@ int ice_free_fd_res_cntr(struct ice_hw *hw, u16 cntr_id)
  * @cntr_id: returns counter index
  * @num_fltr: number of filter entries to be allocated
  */
-int ice_alloc_fd_guar_item(struct ice_hw *hw, u16 *cntr_id, u16 num_fltr)
+enum ice_status
+ice_alloc_fd_guar_item(struct ice_hw *hw, u16 *cntr_id, u16 num_fltr)
 {
 	return ice_alloc_res_cntr(hw, ICE_AQC_RES_TYPE_FDIR_GUARANTEED_ENTRIES,
 				  ICE_AQC_RES_TYPE_FLAG_DEDICATED, num_fltr,
@@ -725,7 +749,8 @@ int ice_alloc_fd_guar_item(struct ice_hw *hw, u16 *cntr_id, u16 num_fltr)
  * @cntr_id: returns counter index
  * @num_fltr: number of filter entries to be allocated
  */
-int ice_alloc_fd_shrd_item(struct ice_hw *hw, u16 *cntr_id, u16 num_fltr)
+enum ice_status
+ice_alloc_fd_shrd_item(struct ice_hw *hw, u16 *cntr_id, u16 num_fltr)
 {
 	return ice_alloc_res_cntr(hw, ICE_AQC_RES_TYPE_FDIR_SHARED_ENTRIES,
 				  ICE_AQC_RES_TYPE_FLAG_DEDICATED, num_fltr,
@@ -847,7 +872,7 @@ static void ice_pkt_insert_mac_addr(u8 *pkt, u8 *addr)
  * @frag: generate a fragment packet
  * @tun: true implies generate a tunnel packet
  */
-int
+enum ice_status
 ice_fdir_get_gen_prgm_pkt(struct ice_hw *hw, struct ice_fdir_fltr *input,
 			  u8 *pkt, bool frag, bool tun)
 {
@@ -894,15 +919,15 @@ ice_fdir_get_gen_prgm_pkt(struct ice_hw *hw, struct ice_fdir_fltr *input,
 		if (ice_fdir_pkt[idx].flow == flow)
 			break;
 	if (idx == ICE_FDIR_NUM_PKT)
-		return -EINVAL;
+		return ICE_ERR_PARAM;
 	if (!tun) {
 		memcpy(pkt, ice_fdir_pkt[idx].pkt, ice_fdir_pkt[idx].pkt_len);
 		loc = pkt;
 	} else {
-		if (!ice_get_open_tunnel_port(hw, &tnl_port, TNL_ALL))
-			return -ENOENT;
+		if (!ice_get_open_tunnel_port(hw, &tnl_port))
+			return ICE_ERR_DOES_NOT_EXIST;
 		if (!ice_fdir_pkt[idx].tun_pkt)
-			return -EINVAL;
+			return ICE_ERR_PARAM;
 		memcpy(pkt, ice_fdir_pkt[idx].tun_pkt,
 		       ice_fdir_pkt[idx].tun_pkt_len);
 		ice_pkt_insert_u16(pkt, ICE_IPV4_UDP_DST_PORT_OFFSET,
@@ -927,7 +952,7 @@ ice_fdir_get_gen_prgm_pkt(struct ice_hw *hw, struct ice_fdir_fltr *input,
 		ice_pkt_insert_u8(loc, ICE_IPV4_TTL_OFFSET, input->ip.v4.ttl);
 		ice_pkt_insert_mac_addr(loc, input->ext_data.dst_mac);
 		if (frag)
-			loc[20] = ICE_FDIR_IPV4_PKT_FLAG_MF;
+			loc[20] = ICE_FDIR_IPV4_PKT_FLAG_DF;
 		break;
 	case ICE_FLTR_PTYPE_NONF_IPV4_UDP:
 		ice_pkt_insert_u32(loc, ICE_IPV4_DST_ADDR_OFFSET,
@@ -1086,7 +1111,7 @@ ice_fdir_get_gen_prgm_pkt(struct ice_hw *hw, struct ice_fdir_fltr *input,
 		ice_pkt_insert_mac_addr(loc, input->ext_data.dst_mac);
 		break;
 	default:
-		return -EINVAL;
+		return ICE_ERR_PARAM;
 	}
 
 	if (input->flex_fltr)

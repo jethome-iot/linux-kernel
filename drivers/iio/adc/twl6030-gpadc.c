@@ -16,10 +16,9 @@
  */
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
+#include <linux/of_platform.h>
 #include <linux/mfd/twl.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -880,13 +879,16 @@ static int twl6030_gpadc_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct twl6030_gpadc_data *gpadc;
 	const struct twl6030_gpadc_platform_data *pdata;
+	const struct of_device_id *match;
 	struct iio_dev *indio_dev;
 	int irq;
 	int ret;
 
-	pdata = device_get_match_data(&pdev->dev);
-	if (!pdata)
+	match = of_match_device(of_twl6030_match_tbl, dev);
+	if (!match)
 		return -EINVAL;
+
+	pdata = match->data;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*gpadc));
 	if (!indio_dev)
@@ -910,7 +912,7 @@ static int twl6030_gpadc_probe(struct platform_device *pdev)
 
 	ret = pdata->calibrate(gpadc);
 	if (ret < 0) {
-		dev_err(dev, "failed to read calibration registers\n");
+		dev_err(&pdev->dev, "failed to read calibration registers\n");
 		return ret;
 	}
 
@@ -926,14 +928,14 @@ static int twl6030_gpadc_probe(struct platform_device *pdev)
 
 	ret = twl6030_gpadc_enable_irq(TWL6030_GPADC_RT_SW1_EOC_MASK);
 	if (ret < 0) {
-		dev_err(dev, "failed to enable GPADC interrupt\n");
+		dev_err(&pdev->dev, "failed to enable GPADC interrupt\n");
 		return ret;
 	}
 
 	ret = twl_i2c_write_u8(TWL6030_MODULE_ID1, TWL6030_GPADCS,
 					TWL6030_REG_TOGGLE1);
 	if (ret < 0) {
-		dev_err(dev, "failed to enable GPADC module\n");
+		dev_err(&pdev->dev, "failed to enable GPADC module\n");
 		return ret;
 	}
 
@@ -966,14 +968,17 @@ static int twl6030_gpadc_probe(struct platform_device *pdev)
 	return iio_device_register(indio_dev);
 }
 
-static void twl6030_gpadc_remove(struct platform_device *pdev)
+static int twl6030_gpadc_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 
 	twl6030_gpadc_disable_irq(TWL6030_GPADC_RT_SW1_EOC_MASK);
 	iio_device_unregister(indio_dev);
+
+	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int twl6030_gpadc_suspend(struct device *pdev)
 {
 	int ret;
@@ -997,16 +1002,17 @@ static int twl6030_gpadc_resume(struct device *pdev)
 
 	return 0;
 };
+#endif
 
-static DEFINE_SIMPLE_DEV_PM_OPS(twl6030_gpadc_pm_ops, twl6030_gpadc_suspend,
-				twl6030_gpadc_resume);
+static SIMPLE_DEV_PM_OPS(twl6030_gpadc_pm_ops, twl6030_gpadc_suspend,
+					twl6030_gpadc_resume);
 
 static struct platform_driver twl6030_gpadc_driver = {
 	.probe		= twl6030_gpadc_probe,
-	.remove_new	= twl6030_gpadc_remove,
+	.remove		= twl6030_gpadc_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
-		.pm	= pm_sleep_ptr(&twl6030_gpadc_pm_ops),
+		.pm	= &twl6030_gpadc_pm_ops,
 		.of_match_table = of_twl6030_match_tbl,
 	},
 };

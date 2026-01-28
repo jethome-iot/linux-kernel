@@ -14,6 +14,9 @@ description: |
 maintainers:
   - Kunihiko Hayashi <hayashi.kunihiko@socionext.com>
 
+allOf:
+  - $ref: "regulator.yaml#"
+
 # USB3 Controller
 
 properties:
@@ -24,7 +27,6 @@ properties:
       - socionext,uniphier-pxs2-usb3-regulator
       - socionext,uniphier-ld20-usb3-regulator
       - socionext,uniphier-pxs3-usb3-regulator
-      - socionext,uniphier-nx1-usb3-regulator
 
   reg:
     maxItems: 1
@@ -33,51 +35,27 @@ properties:
     minItems: 1
     maxItems: 2
 
-  clock-names: true
+  clock-names:
+    oneOf:
+      - items:          # for Pro4, Pro5
+          - const: gio
+          - const: link
+      - items:          # for others
+          - const: link
 
   resets:
     minItems: 1
     maxItems: 2
 
-  reset-names: true
+  reset-names:
+    oneOf:
+      - items:          # for Pro4, Pro5
+          - const: gio
+          - const: link
+      - items:
+          - const: link
 
-allOf:
-  - $ref: regulator.yaml#
-  - if:
-      properties:
-        compatible:
-          contains:
-            enum:
-              - socionext,uniphier-pro4-usb3-regulator
-              - socionext,uniphier-pro5-usb3-regulator
-    then:
-      properties:
-        clocks:
-          minItems: 2
-          maxItems: 2
-        clock-names:
-          items:
-            - const: gio
-            - const: link
-        resets:
-          minItems: 2
-          maxItems: 2
-        reset-names:
-          items:
-            - const: gio
-            - const: link
-    else:
-      properties:
-        clocks:
-          maxItems: 1
-        clock-names:
-          const: link
-        resets:
-          maxItems: 1
-        reset-names:
-          const: link
-
-unevaluatedProperties: false
+additionalProperties: false
 
 required:
   - compatible
@@ -89,11 +67,19 @@ required:
 
 examples:
   - |
-    usb_vbus0: regulators@100 {
-        compatible = "socionext,uniphier-ld20-usb3-regulator";
-        reg = <0x100 0x10>;
-        clock-names = "link";
-        clocks = <&sys_clk 14>;
-        reset-names = "link";
-        resets = <&sys_rst 14>;
+    usb-glue@65b00000 {
+        compatible = "simple-mfd";
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges = <0 0x65b00000 0x400>;
+
+        usb_vbus0: regulators@100 {
+            compatible = "socionext,uniphier-ld20-usb3-regulator";
+            reg = <0x100 0x10>;
+            clock-names = "link";
+            clocks = <&sys_clk 14>;
+            reset-names = "link";
+            resets = <&sys_rst 14>;
+        };
     };
+

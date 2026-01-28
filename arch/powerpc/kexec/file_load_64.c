@@ -17,29 +17,24 @@
 #include <linux/kexec.h>
 #include <linux/of_fdt.h>
 #include <linux/libfdt.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/memblock.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <asm/setup.h>
 #include <asm/drmem.h>
-#include <asm/firmware.h>
 #include <asm/kexec_ranges.h>
 #include <asm/crashdump-ppc64.h>
-#include <asm/mmzone.h>
-#include <asm/iommu.h>
-#include <asm/prom.h>
-#include <asm/plpks.h>
 
 struct umem_info {
-	__be64 *buf;		/* data buffer for usable-memory property */
+	u64 *buf;		/* data buffer for usable-memory property */
 	u32 size;		/* size allocated for the data buffer */
 	u32 max_entries;	/* maximum no. of entries */
 	u32 idx;		/* index of current entry */
 
 	/* usable memory ranges to look up */
 	unsigned int nr_ranges;
-	const struct range *ranges;
+	const struct crash_mem_range *ranges;
 };
 
 const struct kexec_file_ops * const kexec_file_loaders[] = {
@@ -443,10 +438,10 @@ static int locate_mem_hole_bottom_up_ppc64(struct kexec_buf *kbuf,
  *
  * Returns buffer on success, NULL on error.
  */
-static __be64 *check_realloc_usable_mem(struct umem_info *um_info, int cnt)
+static u64 *check_realloc_usable_mem(struct umem_info *um_info, int cnt)
 {
 	u32 new_size;
-	__be64 *tbuf;
+	u64 *tbuf;
 
 	if ((um_info->idx + cnt) <= um_info->max_entries)
 		return um_info->buf;
@@ -577,7 +572,7 @@ static int add_usable_mem_property(void *fdt, struct device_node *dn,
 		       NODE_PATH_LEN, dn);
 		return -EOVERFLOW;
 	}
-	kexec_dprintk("Memory node path: %s\n", path);
+	pr_debug("Memory node path: %s\n", path);
 
 	/* Now that we know the path, find its offset in kdump kernel's fdt */
 	node = fdt_path_offset(fdt, path);
@@ -590,8 +585,8 @@ static int add_usable_mem_property(void *fdt, struct device_node *dn,
 	/* Get the address & size cells */
 	n_mem_addr_cells = of_n_addr_cells(dn);
 	n_mem_size_cells = of_n_size_cells(dn);
-	kexec_dprintk("address cells: %d, size cells: %d\n", n_mem_addr_cells,
-		      n_mem_size_cells);
+	pr_debug("address cells: %d, size cells: %d\n", n_mem_addr_cells,
+		 n_mem_size_cells);
 
 	um_info->idx  = 0;
 	if (!check_realloc_usable_mem(um_info, 2)) {
@@ -664,7 +659,7 @@ static int update_usable_mem_fdt(void *fdt, struct crash_mem *usable_mem)
 
 	node = fdt_path_offset(fdt, "/ibm,dynamic-reconfiguration-memory");
 	if (node == -FDT_ERR_NOTFOUND)
-		kexec_dprintk("No dynamic reconfiguration memory found\n");
+		pr_debug("No dynamic reconfiguration memory found\n");
 	else if (node < 0) {
 		pr_err("Malformed device tree: error reading /ibm,dynamic-reconfiguration-memory.\n");
 		return -EINVAL;
@@ -691,8 +686,7 @@ static int update_usable_mem_fdt(void *fdt, struct crash_mem *usable_mem)
 		ret = fdt_setprop(fdt, node, "linux,drconf-usable-memory",
 				  um_info.buf, (um_info.idx * sizeof(u64)));
 		if (ret) {
-			pr_err("Failed to update fdt with linux,drconf-usable-memory property: %s",
-			       fdt_strerror(ret));
+			pr_err("Failed to update fdt with linux,drconf-usable-memory property");
 			goto out;
 		}
 	}
@@ -706,7 +700,6 @@ static int update_usable_mem_fdt(void *fdt, struct crash_mem *usable_mem)
 		if (ret) {
 			pr_err("Failed to set linux,usable-memory property for %s node",
 			       dn->full_name);
-			of_node_put(dn);
 			goto out;
 		}
 	}
@@ -776,8 +769,8 @@ static void update_backup_region_phdr(struct kimage *image, Elf64_Ehdr *ehdr)
 	for (i = 0; i < ehdr->e_phnum; i++) {
 		if (phdr->p_paddr == BACKUP_SRC_START) {
 			phdr->p_offset = image->arch.backup_start;
-			kexec_dprintk("Backup region offset updated to 0x%lx\n",
-				      image->arch.backup_start);
+			pr_debug("Backup region offset updated to 0x%lx\n",
+				 image->arch.backup_start);
 			return;
 		}
 	}
@@ -850,7 +843,7 @@ int load_crashdump_segments_ppc64(struct kimage *image,
 		pr_err("Failed to load backup segment\n");
 		return ret;
 	}
-	kexec_dprintk("Loaded the backup region at 0x%lx\n", kbuf->mem);
+	pr_debug("Loaded the backup region at 0x%lx\n", kbuf->mem);
 
 	/* Load elfcorehdr segment - to export crashing kernel's vmcore */
 	ret = load_elfcorehdr_segment(image, kbuf);
@@ -858,8 +851,8 @@ int load_crashdump_segments_ppc64(struct kimage *image,
 		pr_err("Failed to load elfcorehdr segment\n");
 		return ret;
 	}
-	kexec_dprintk("Loaded elf core header at 0x%lx, bufsz=0x%lx memsz=0x%lx\n",
-		      image->elf_load_addr, kbuf->bufsz, kbuf->memsz);
+	pr_debug("Loaded elf core header at 0x%lx, bufsz=0x%lx memsz=0x%lx\n",
+		 image->elf_load_addr, kbuf->bufsz, kbuf->memsz);
 
 	return 0;
 }
@@ -934,45 +927,6 @@ out:
 }
 
 /**
- * cpu_node_size - Compute the size of a CPU node in the FDT.
- *                 This should be done only once and the value is stored in
- *                 a static variable.
- * Returns the max size of a CPU node in the FDT.
- */
-static unsigned int cpu_node_size(void)
-{
-	static unsigned int size;
-	struct device_node *dn;
-	struct property *pp;
-
-	/*
-	 * Don't compute it twice, we are assuming that the per CPU node size
-	 * doesn't change during the system's life.
-	 */
-	if (size)
-		return size;
-
-	dn = of_find_node_by_type(NULL, "cpu");
-	if (WARN_ON_ONCE(!dn)) {
-		// Unlikely to happen
-		return 0;
-	}
-
-	/*
-	 * We compute the sub node size for a CPU node, assuming it
-	 * will be the same for all.
-	 */
-	size += strlen(dn->name) + 5;
-	for_each_property_of_node(dn, pp) {
-		size += strlen(pp->name);
-		size += pp->length;
-	}
-
-	of_node_put(dn);
-	return size;
-}
-
-/**
  * kexec_extra_fdt_size_ppc64 - Return the estimated additional size needed to
  *                              setup FDT for kexec/kdump kernel.
  * @image:                      kexec image being loaded.
@@ -981,42 +935,19 @@ static unsigned int cpu_node_size(void)
  */
 unsigned int kexec_extra_fdt_size_ppc64(struct kimage *image)
 {
-	unsigned int cpu_nodes, extra_size = 0;
-	struct device_node *dn;
 	u64 usm_entries;
 
-	// Budget some space for the password blob. There's already extra space
-	// for the key name
-	if (plpks_is_available())
-		extra_size += (unsigned int)plpks_get_passwordlen();
-
 	if (image->type != KEXEC_TYPE_CRASH)
-		return extra_size;
+		return 0;
 
 	/*
 	 * For kdump kernel, account for linux,usable-memory and
 	 * linux,drconf-usable-memory properties. Get an approximate on the
 	 * number of usable memory entries and use for FDT size estimation.
 	 */
-	if (drmem_lmb_size()) {
-		usm_entries = ((memory_hotplug_max() / drmem_lmb_size()) +
-			       (2 * (resource_size(&crashk_res) / drmem_lmb_size())));
-		extra_size += (unsigned int)(usm_entries * sizeof(u64));
-	}
-
-	/*
-	 * Get the number of CPU nodes in the current DT. This allows to
-	 * reserve places for CPU nodes added since the boot time.
-	 */
-	cpu_nodes = 0;
-	for_each_node_by_type(dn, "cpu") {
-		cpu_nodes++;
-	}
-
-	if (cpu_nodes > boot_cpu_node_count)
-		extra_size += (cpu_nodes - boot_cpu_node_count) * cpu_node_size();
-
-	return extra_size;
+	usm_entries = ((memblock_end_of_DRAM() / drmem_lmb_size()) +
+		       (2 * (resource_size(&crashk_res) / drmem_lmb_size())));
+	return (unsigned int)(usm_entries * sizeof(u64));
 }
 
 /**
@@ -1106,52 +1037,6 @@ out:
 	return ret;
 }
 
-static int copy_property(void *fdt, int node_offset, const struct device_node *dn,
-			 const char *propname)
-{
-	const void *prop, *fdtprop;
-	int len = 0, fdtlen = 0;
-
-	prop = of_get_property(dn, propname, &len);
-	fdtprop = fdt_getprop(fdt, node_offset, propname, &fdtlen);
-
-	if (fdtprop && !prop)
-		return fdt_delprop(fdt, node_offset, propname);
-	else if (prop)
-		return fdt_setprop(fdt, node_offset, propname, prop, len);
-	else
-		return -FDT_ERR_NOTFOUND;
-}
-
-static int update_pci_dma_nodes(void *fdt, const char *dmapropname)
-{
-	struct device_node *dn;
-	int pci_offset, root_offset, ret = 0;
-
-	if (!firmware_has_feature(FW_FEATURE_LPAR))
-		return 0;
-
-	root_offset = fdt_path_offset(fdt, "/");
-	for_each_node_with_property(dn, dmapropname) {
-		pci_offset = fdt_subnode_offset(fdt, root_offset, of_node_full_name(dn));
-		if (pci_offset < 0)
-			continue;
-
-		ret = copy_property(fdt, pci_offset, dn, "ibm,dma-window");
-		if (ret < 0) {
-			of_node_put(dn);
-			break;
-		}
-		ret = copy_property(fdt, pci_offset, dn, dmapropname);
-		if (ret < 0) {
-			of_node_put(dn);
-			break;
-		}
-	}
-
-	return ret;
-}
-
 /**
  * setup_new_fdt_ppc64 - Update the flattend device-tree of the kernel
  *                       being loaded.
@@ -1213,14 +1098,6 @@ int setup_new_fdt_ppc64(const struct kimage *image, void *fdt,
 	if (ret < 0)
 		goto out;
 
-	ret = update_pci_dma_nodes(fdt, DIRECT64_PROPNAME);
-	if (ret < 0)
-		goto out;
-
-	ret = update_pci_dma_nodes(fdt, DMA64_PROPNAME);
-	if (ret < 0)
-		goto out;
-
 	/* Update memory reserve map */
 	ret = get_reserved_memory_ranges(&rmem);
 	if (ret)
@@ -1239,10 +1116,6 @@ int setup_new_fdt_ppc64(const struct kimage *image, void *fdt,
 			goto out;
 		}
 	}
-
-	// If we have PLPKS active, we need to provide the password to the new kernel
-	if (plpks_is_available())
-		ret = plpks_populate_fdt(fdt);
 
 out:
 	kfree(rmem);

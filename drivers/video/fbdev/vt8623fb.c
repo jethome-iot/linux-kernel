@@ -12,7 +12,6 @@
  * (http://davesdomain.org.uk/viafb/)
  */
 
-#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -321,9 +320,6 @@ static int vt8623fb_release(struct fb_info *info, int user)
 static int vt8623fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	int rv, mem, step;
-
-	if (!var->pixclock)
-		return -EINVAL;
 
 	/* Find appropriate format */
 	rv = svga_match_format (vt8623fb_formats, var, NULL);
@@ -644,7 +640,6 @@ static const struct fb_ops vt8623fb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= vt8623fb_open,
 	.fb_release	= vt8623fb_release,
-	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= vt8623fb_check_var,
 	.fb_set_par	= vt8623fb_set_par,
 	.fb_setcolreg	= vt8623fb_setcolreg,
@@ -653,7 +648,6 @@ static const struct fb_ops vt8623fb_ops = {
 	.fb_fillrect	= vt8623fb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= vt8623fb_imageblit,
-	__FB_DEFAULT_IOMEM_OPS_MMAP,
 	.fb_get_caps    = svga_get_caps,
 };
 
@@ -674,10 +668,6 @@ static int vt8623_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		dev_info(&(dev->dev), "ignoring secondary device\n");
 		return -ENODEV;
 	}
-
-	rc = aperture_remove_conflicting_pci_devices(dev, "vt8623fb");
-	if (rc)
-		return rc;
 
 	/* Allocate and fill driver data structure */
 	info = framebuffer_alloc(sizeof(struct vt8623fb_info), &(dev->dev));
@@ -922,12 +912,7 @@ static int __init vt8623fb_init(void)
 
 #ifndef MODULE
 	char *option = NULL;
-#endif
 
-	if (fb_modesetting_disabled("vt8623fb"))
-		return -ENODEV;
-
-#ifndef MODULE
 	if (fb_get_options("vt8623fb", &option))
 		return -ENODEV;
 

@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
@@ -19,7 +20,6 @@
 #include <video/of_videomode.h>
 
 #include <drm/drm_fourcc.h>
-#include <drm/drm_framebuffer.h>
 #include <drm/drm_vblank.h>
 #include <drm/exynos_drm.h>
 
@@ -678,6 +678,7 @@ static int decon_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct decon_context *ctx;
 	struct device_node *i80_if_timings;
+	struct resource *res;
 	int ret;
 
 	if (!dev->of_node)
@@ -727,11 +728,16 @@ static int decon_probe(struct platform_device *pdev)
 		goto err_iounmap;
 	}
 
-	ret =  platform_get_irq_byname(pdev, ctx->i80_if ? "lcd_sys" : "vsync");
-	if (ret < 0)
+	res = platform_get_resource_byname(pdev, IORESOURCE_IRQ,
+					   ctx->i80_if ? "lcd_sys" : "vsync");
+	if (!res) {
+		dev_err(dev, "irq request failed.\n");
+		ret = -ENXIO;
 		goto err_iounmap;
+	}
 
-	ret = devm_request_irq(dev, ret, decon_irq_handler, 0, "drm_decon", ctx);
+	ret = devm_request_irq(dev, res->start, decon_irq_handler,
+							0, "drm_decon", ctx);
 	if (ret) {
 		dev_err(dev, "irq request failed.\n");
 		goto err_iounmap;
@@ -765,7 +771,7 @@ err_iounmap:
 	return ret;
 }
 
-static void decon_remove(struct platform_device *pdev)
+static int decon_remove(struct platform_device *pdev)
 {
 	struct decon_context *ctx = dev_get_drvdata(&pdev->dev);
 
@@ -774,8 +780,11 @@ static void decon_remove(struct platform_device *pdev)
 	iounmap(ctx->regs);
 
 	component_del(&pdev->dev, &decon_component_ops);
+
+	return 0;
 }
 
+#ifdef CONFIG_PM
 static int exynos7_decon_suspend(struct device *dev)
 {
 	struct decon_context *ctx = dev_get_drvdata(dev);
@@ -832,16 +841,21 @@ err_aclk_enable:
 err_pclk_enable:
 	return ret;
 }
+#endif
 
-static DEFINE_RUNTIME_DEV_PM_OPS(exynos7_decon_pm_ops, exynos7_decon_suspend,
-				 exynos7_decon_resume, NULL);
+static const struct dev_pm_ops exynos7_decon_pm_ops = {
+	SET_RUNTIME_PM_OPS(exynos7_decon_suspend, exynos7_decon_resume,
+			   NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
+};
 
 struct platform_driver decon_driver = {
 	.probe		= decon_probe,
-	.remove_new	= decon_remove,
+	.remove		= decon_remove,
 	.driver		= {
 		.name	= "exynos-decon",
-		.pm	= pm_ptr(&exynos7_decon_pm_ops),
+		.pm	= &exynos7_decon_pm_ops,
 		.of_match_table = decon_driver_dt_match,
 	},
 };

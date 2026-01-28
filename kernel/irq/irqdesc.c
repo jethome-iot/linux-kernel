@@ -12,7 +12,8 @@
 #include <linux/export.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
-#include <linux/maple_tree.h>
+#include <linux/radix-tree.h>
+#include <linux/bitmap.h>
 #include <linux/irqdomain.h>
 #include <linux/sysfs.h>
 
@@ -130,40 +131,7 @@ int nr_irqs = NR_IRQS;
 EXPORT_SYMBOL_GPL(nr_irqs);
 
 static DEFINE_MUTEX(sparse_irq_lock);
-static struct maple_tree sparse_irqs = MTREE_INIT_EXT(sparse_irqs,
-					MT_FLAGS_ALLOC_RANGE |
-					MT_FLAGS_LOCK_EXTERN |
-					MT_FLAGS_USE_RCU,
-					sparse_irq_lock);
-
-static int irq_find_free_area(unsigned int from, unsigned int cnt)
-{
-	MA_STATE(mas, &sparse_irqs, 0, 0);
-
-	if (mas_empty_area(&mas, from, MAX_SPARSE_IRQS, cnt))
-		return -ENOSPC;
-	return mas.index;
-}
-
-static unsigned int irq_find_at_or_after(unsigned int offset)
-{
-	unsigned long index = offset;
-	struct irq_desc *desc = mt_find(&sparse_irqs, &index, nr_irqs);
-
-	return desc ? irq_desc_get_irq(desc) : nr_irqs;
-}
-
-static void irq_insert_desc(unsigned int irq, struct irq_desc *desc)
-{
-	MA_STATE(mas, &sparse_irqs, irq, irq);
-	WARN_ON(mas_store_gfp(&mas, desc, GFP_KERNEL) != 0);
-}
-
-static void delete_irq_desc(unsigned int irq)
-{
-	MA_STATE(mas, &sparse_irqs, irq, irq);
-	mas_erase(&mas);
-}
+static DECLARE_BITMAP(allocated_irqs, IRQ_BITMAP_BITS);
 
 #ifdef CONFIG_SPARSE_IRQ
 
@@ -283,7 +251,7 @@ static ssize_t actions_show(struct kobject *kobj,
 	char *p = "";
 
 	raw_spin_lock_irq(&desc->lock);
-	for_each_action_of_desc(desc, action) {
+	for (action = desc->action; action != NULL; action = action->next) {
 		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%s%s",
 				 p, action->name);
 		p = ",";
@@ -309,7 +277,7 @@ static struct attribute *irq_attrs[] = {
 };
 ATTRIBUTE_GROUPS(irq);
 
-static const struct kobj_type irq_kobj_type = {
+static struct kobj_type irq_kobj_type = {
 	.release	= irq_kobj_release,
 	.sysfs_ops	= &kobj_sysfs_ops,
 	.default_groups = irq_groups,
@@ -367,7 +335,7 @@ postcore_initcall(irq_sysfs_init);
 
 #else /* !CONFIG_SYSFS */
 
-static const struct kobj_type irq_kobj_type = {
+static struct kobj_type irq_kobj_type = {
 	.release	= irq_kobj_release,
 };
 
@@ -376,13 +344,23 @@ static void irq_sysfs_del(struct irq_desc *desc) {}
 
 #endif /* CONFIG_SYSFS */
 
+static RADIX_TREE(irq_desc_tree, GFP_KERNEL);
+
+static void irq_insert_desc(unsigned int irq, struct irq_desc *desc)
+{
+	radix_tree_insert(&irq_desc_tree, irq, desc);
+}
+
 struct irq_desc *irq_to_desc(unsigned int irq)
 {
-	return mtree_load(&sparse_irqs, irq);
+	return radix_tree_lookup(&irq_desc_tree, irq);
 }
-#ifdef CONFIG_KVM_BOOK3S_64_HV_MODULE
 EXPORT_SYMBOL_GPL(irq_to_desc);
-#endif
+
+static void delete_irq_desc(unsigned int irq)
+{
+	radix_tree_delete(&irq_desc_tree, irq);
+}
 
 #ifdef CONFIG_SMP
 static void free_masks(struct irq_desc *desc)
@@ -435,7 +413,6 @@ static struct irq_desc *alloc_desc(int irq, int node, unsigned int flags,
 	desc_set_defaults(irq, desc, node, affinity, owner);
 	irqd_set(&desc->irq_data, flags);
 	kobject_init(&desc->kobj, &irq_kobj_type);
-	irq_resend_init(desc);
 
 	return desc;
 
@@ -526,6 +503,7 @@ static int alloc_descs(unsigned int start, unsigned int cnt, int node,
 		irq_sysfs_add(start + i, desc);
 		irq_add_debugfs_entry(start + i, desc);
 	}
+	bitmap_set(allocated_irqs, start, cnt);
 	return start;
 
 err:
@@ -536,7 +514,7 @@ err:
 
 static int irq_expand_nr_irqs(unsigned int nr)
 {
-	if (nr > MAX_SPARSE_IRQS)
+	if (nr > IRQ_BITMAP_BITS)
 		return -ENOMEM;
 	nr_irqs = nr;
 	return 0;
@@ -554,17 +532,18 @@ int __init early_irq_init(void)
 	printk(KERN_INFO "NR_IRQS: %d, nr_irqs: %d, preallocated irqs: %d\n",
 	       NR_IRQS, nr_irqs, initcnt);
 
-	if (WARN_ON(nr_irqs > MAX_SPARSE_IRQS))
-		nr_irqs = MAX_SPARSE_IRQS;
+	if (WARN_ON(nr_irqs > IRQ_BITMAP_BITS))
+		nr_irqs = IRQ_BITMAP_BITS;
 
-	if (WARN_ON(initcnt > MAX_SPARSE_IRQS))
-		initcnt = MAX_SPARSE_IRQS;
+	if (WARN_ON(initcnt > IRQ_BITMAP_BITS))
+		initcnt = IRQ_BITMAP_BITS;
 
 	if (initcnt > nr_irqs)
 		nr_irqs = initcnt;
 
 	for (i = 0; i < initcnt; i++) {
 		desc = alloc_desc(i, node, 0, NULL, NULL);
+		set_bit(i, allocated_irqs);
 		irq_insert_desc(i, desc);
 	}
 	return arch_early_irq_init();
@@ -600,7 +579,6 @@ int __init early_irq_init(void)
 		mutex_init(&desc[i].request_mutex);
 		init_waitqueue_head(&desc[i].wait_for_threads);
 		desc_set_defaults(i, &desc[i], node, NULL, NULL);
-		irq_resend_init(&desc[i]);
 	}
 	return arch_early_irq_init();
 }
@@ -619,7 +597,6 @@ static void free_desc(unsigned int irq)
 	raw_spin_lock_irqsave(&desc->lock, flags);
 	desc_set_defaults(irq, desc, irq_desc_get_node(desc), NULL, NULL);
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
-	delete_irq_desc(irq);
 }
 
 static inline int alloc_descs(unsigned int start, unsigned int cnt, int node,
@@ -632,8 +609,8 @@ static inline int alloc_descs(unsigned int start, unsigned int cnt, int node,
 		struct irq_desc *desc = irq_to_desc(start + i);
 
 		desc->owner = owner;
-		irq_insert_desc(start + i, desc);
 	}
+	bitmap_set(allocated_irqs, start, cnt);
 	return start;
 }
 
@@ -645,7 +622,7 @@ static int irq_expand_nr_irqs(unsigned int nr)
 void irq_mark_irq(unsigned int irq)
 {
 	mutex_lock(&sparse_irq_lock);
-	irq_insert_desc(irq, irq_desc + irq);
+	bitmap_set(allocated_irqs, irq, 1);
 	mutex_unlock(&sparse_irq_lock);
 }
 
@@ -666,62 +643,35 @@ int handle_irq_desc(struct irq_desc *desc)
 		return -EINVAL;
 
 	data = irq_desc_get_irq_data(desc);
-	if (WARN_ON_ONCE(!in_hardirq() && handle_enforce_irqctx(data)))
+	if (WARN_ON_ONCE(!in_irq() && handle_enforce_irqctx(data)))
 		return -EPERM;
 
 	generic_handle_irq_desc(desc);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(handle_irq_desc);
 
 /**
  * generic_handle_irq - Invoke the handler for a particular irq
  * @irq:	The irq number to handle
  *
- * Returns:	0 on success, or -EINVAL if conversion has failed
- *
- * 		This function must be called from an IRQ context with irq regs
- * 		initialized.
-  */
+ */
 int generic_handle_irq(unsigned int irq)
 {
 	return handle_irq_desc(irq_to_desc(irq));
 }
 EXPORT_SYMBOL_GPL(generic_handle_irq);
 
-/**
- * generic_handle_irq_safe - Invoke the handler for a particular irq from any
- *			     context.
- * @irq:	The irq number to handle
- *
- * Returns:	0 on success, a negative value on error.
- *
- * This function can be called from any context (IRQ or process context). It
- * will report an error if not invoked from IRQ context and the irq has been
- * marked to enforce IRQ-context only.
- */
-int generic_handle_irq_safe(unsigned int irq)
-{
-	unsigned long flags;
-	int ret;
-
-	local_irq_save(flags);
-	ret = handle_irq_desc(irq_to_desc(irq));
-	local_irq_restore(flags);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(generic_handle_irq_safe);
-
 #ifdef CONFIG_IRQ_DOMAIN
 /**
  * generic_handle_domain_irq - Invoke the handler for a HW irq belonging
- *                             to a domain.
+ *                             to a domain, usually for a non-root interrupt
+ *                             controller
  * @domain:	The domain where to perform the lookup
  * @hwirq:	The HW irq number to convert to a logical one
  *
  * Returns:	0 on success, or -EINVAL if conversion has failed
  *
- * 		This function must be called from an IRQ context with irq regs
- * 		initialized.
  */
 int generic_handle_domain_irq(struct irq_domain *domain, unsigned int hwirq)
 {
@@ -729,46 +679,80 @@ int generic_handle_domain_irq(struct irq_domain *domain, unsigned int hwirq)
 }
 EXPORT_SYMBOL_GPL(generic_handle_domain_irq);
 
- /**
- * generic_handle_irq_safe - Invoke the handler for a HW irq belonging
- *			     to a domain from any context.
- * @domain:	The domain where to perform the lookup
- * @hwirq:	The HW irq number to convert to a logical one
- *
- * Returns:	0 on success, a negative value on error.
- *
- * This function can be called from any context (IRQ or process
- * context). If the interrupt is marked as 'enforce IRQ-context only' then
- * the function must be invoked from hard interrupt context.
- */
-int generic_handle_domain_irq_safe(struct irq_domain *domain, unsigned int hwirq)
-{
-	unsigned long flags;
-	int ret;
-
-	local_irq_save(flags);
-	ret = handle_irq_desc(irq_resolve_mapping(domain, hwirq));
-	local_irq_restore(flags);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(generic_handle_domain_irq_safe);
-
+#ifdef CONFIG_HANDLE_DOMAIN_IRQ
 /**
- * generic_handle_domain_nmi - Invoke the handler for a HW nmi belonging
- *                             to a domain.
+ * handle_domain_irq - Invoke the handler for a HW irq belonging to a domain,
+ *                     usually for a root interrupt controller
  * @domain:	The domain where to perform the lookup
  * @hwirq:	The HW irq number to convert to a logical one
+ * @regs:	Register file coming from the low-level handling code
  *
  * Returns:	0 on success, or -EINVAL if conversion has failed
- *
- * 		This function must be called from an NMI context with irq regs
- * 		initialized.
- **/
-int generic_handle_domain_nmi(struct irq_domain *domain, unsigned int hwirq)
+ */
+int handle_domain_irq(struct irq_domain *domain,
+		      unsigned int hwirq, struct pt_regs *regs)
 {
-	WARN_ON_ONCE(!in_nmi());
-	return handle_irq_desc(irq_resolve_mapping(domain, hwirq));
+	struct pt_regs *old_regs = set_irq_regs(regs);
+	struct irq_desc *desc;
+	int ret = 0;
+
+
+	/* The irqdomain code provides boundary checks */
+	desc = irq_resolve_mapping(domain, hwirq);
+	if (likely(desc)) {
+		if (IS_ENABLED(CONFIG_ARCH_WANTS_IRQ_RAW) &&
+		    unlikely(irq_settings_is_raw(desc))) {
+			handle_irq_desc(desc);
+		} else {
+			irq_enter();
+			handle_irq_desc(desc);
+			irq_exit();
+		}
+	}
+	else
+		ret = -EINVAL;
+
+	set_irq_regs(old_regs);
+	return ret;
 }
+
+/**
+ * handle_domain_nmi - Invoke the handler for a HW irq belonging to a domain
+ * @domain:	The domain where to perform the lookup
+ * @hwirq:	The HW irq number to convert to a logical one
+ * @regs:	Register file coming from the low-level handling code
+ *
+ *		This function must be called from an NMI context.
+ *
+ * Returns:	0 on success, or -EINVAL if conversion has failed
+ */
+int handle_domain_nmi(struct irq_domain *domain, unsigned int hwirq,
+		      struct pt_regs *regs)
+{
+	struct pt_regs *old_regs = set_irq_regs(regs);
+	struct irq_desc *desc;
+	int ret = 0;
+
+	/*
+	 * NMI context needs to be setup earlier in order to deal with tracing.
+	 */
+	WARN_ON(!in_nmi());
+
+	desc = irq_resolve_mapping(domain, hwirq);
+
+	/*
+	 * ack_bad_irq is not NMI-safe, just report
+	 * an invalid interrupt.
+	 */
+	if (likely(desc))
+		handle_irq_desc(desc);
+	else
+		ret = -EINVAL;
+
+	set_irq_regs(old_regs);
+	return ret;
+}
+#endif
 #endif
 
 /* Dynamic interrupt handling */
@@ -789,6 +773,7 @@ void irq_free_descs(unsigned int from, unsigned int cnt)
 	for (i = 0; i < cnt; i++)
 		free_desc(from + i);
 
+	bitmap_clear(allocated_irqs, from, cnt);
 	mutex_unlock(&sparse_irq_lock);
 }
 EXPORT_SYMBOL_GPL(irq_free_descs);
@@ -830,7 +815,8 @@ __irq_alloc_descs(int irq, unsigned int from, unsigned int cnt, int node,
 
 	mutex_lock(&sparse_irq_lock);
 
-	start = irq_find_free_area(from, cnt);
+	start = bitmap_find_next_zero_area(allocated_irqs, IRQ_BITMAP_BITS,
+					   from, cnt, 0);
 	ret = -EEXIST;
 	if (irq >=0 && start != irq)
 		goto unlock;
@@ -855,7 +841,7 @@ EXPORT_SYMBOL_GPL(__irq_alloc_descs);
  */
 unsigned int irq_get_next_irq(unsigned int offset)
 {
-	return irq_find_at_or_after(offset);
+	return find_next_bit(allocated_irqs, nr_irqs, offset);
 }
 
 struct irq_desc *
@@ -955,6 +941,7 @@ unsigned int kstat_irqs_cpu(unsigned int irq, int cpu)
 	return desc && desc->kstat_irqs ?
 			*per_cpu_ptr(desc->kstat_irqs, cpu) : 0;
 }
+EXPORT_SYMBOL_GPL(kstat_irqs_cpu);
 
 static bool irq_is_nmi(struct irq_desc *desc)
 {
@@ -1012,3 +999,4 @@ void __irq_set_lockdep_class(unsigned int irq, struct lock_class_key *lock_class
 }
 EXPORT_SYMBOL_GPL(__irq_set_lockdep_class);
 #endif
+EXPORT_SYMBOL_GPL(kstat_irqs_usr);

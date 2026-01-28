@@ -1,8 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Generic infrastructure for lifetime debugging of objects.
  *
+ * Started by Thomas Gleixner
+ *
  * Copyright (C) 2008, Thomas Gleixner <tglx@linutronix.de>
+ *
+ * For licencing details see kernel-base/COPYING
  */
 
 #define pr_fmt(fmt) "ODEBUG: " fmt
@@ -89,7 +92,7 @@ static int			debug_objects_pool_size __read_mostly
 static int			debug_objects_pool_min_level __read_mostly
 				= ODEBUG_POOL_MIN_LEVEL;
 static const struct debug_obj_descr *descr_test  __read_mostly;
-static struct kmem_cache	*obj_cache __ro_after_init;
+static struct kmem_cache	*obj_cache __read_mostly;
 
 /*
  * Track numbers of kmem_cache_alloc()/free() calls done.
@@ -512,9 +515,9 @@ static void debug_print_object(struct debug_obj *obj, char *msg)
 			descr->debug_hint(obj->object) : NULL;
 		limit++;
 		WARN(1, KERN_ERR "ODEBUG: %s %s (active state %u) "
-				 "object: %p object type: %s hint: %pS\n",
+				 "object type: %s hint: %pS\n",
 			msg, obj_states[obj->state], obj->astate,
-			obj->object, descr->name, hint);
+			descr->name, hint);
 	}
 	debug_objects_warnings++;
 }
@@ -596,27 +599,6 @@ static struct debug_obj *lookup_object_or_alloc(void *addr, struct debug_bucket 
 	return NULL;
 }
 
-static void debug_objects_fill_pool(void)
-{
-	/*
-	 * On RT enabled kernels the pool refill must happen in preemptible
-	 * context -- for !RT kernels we rely on the fact that spinlock_t and
-	 * raw_spinlock_t are basically the same type and this lock-type
-	 * inversion works just fine.
-	 */
-	if (!IS_ENABLED(CONFIG_PREEMPT_RT) || preemptible()) {
-		/*
-		 * Annotate away the spinlock_t inside raw_spinlock_t warning
-		 * by temporarily raising the wait-type to WAIT_SLEEP, matching
-		 * the preemptible() condition above.
-		 */
-		static DEFINE_WAIT_OVERRIDE_MAP(fill_pool_map, LD_WAIT_SLEEP);
-		lock_map_acquire_try(&fill_pool_map);
-		fill_pool();
-		lock_map_release(&fill_pool_map);
-	}
-}
-
 static void
 __debug_object_init(void *addr, const struct debug_obj_descr *descr, int onstack)
 {
@@ -624,7 +606,12 @@ __debug_object_init(void *addr, const struct debug_obj_descr *descr, int onstack
 	struct debug_bucket *db;
 	unsigned long flags;
 
-	debug_objects_fill_pool();
+	/*
+	 * On RT enabled kernels the pool refill must happen in preemptible
+	 * context:
+	 */
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT) || preemptible())
+		fill_pool();
 
 	db = get_bucket((unsigned long) addr);
 
@@ -700,8 +687,6 @@ int debug_object_activate(void *addr, const struct debug_obj_descr *descr)
 
 	if (!debug_objects_enabled)
 		return 0;
-
-	debug_objects_fill_pool();
 
 	db = get_bucket((unsigned long) addr);
 
@@ -889,8 +874,6 @@ void debug_object_assert_init(void *addr, const struct debug_obj_descr *descr)
 
 	if (!debug_objects_enabled)
 		return;
-
-	debug_objects_fill_pool();
 
 	db = get_bucket((unsigned long) addr);
 

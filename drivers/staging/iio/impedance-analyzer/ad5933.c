@@ -608,7 +608,7 @@ static void ad5933_work(struct work_struct *work)
 		struct ad5933_state, work.work);
 	struct iio_dev *indio_dev = i2c_get_clientdata(st->client);
 	__be16 buf[2];
-	int val[2];
+	u16 val[2];
 	unsigned char status;
 	int ret;
 
@@ -667,9 +667,16 @@ static void ad5933_reg_disable(void *data)
 	regulator_disable(st->reg);
 }
 
-static int ad5933_probe(struct i2c_client *client)
+static void ad5933_clk_disable(void *data)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
+	struct ad5933_state *st = data;
+
+	clk_disable_unprepare(st->mclk);
+}
+
+static int ad5933_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
+{
 	int ret;
 	struct ad5933_state *st;
 	struct iio_dev *indio_dev;
@@ -705,12 +712,23 @@ static int ad5933_probe(struct i2c_client *client)
 
 	st->vref_mv = ret / 1000;
 
-	st->mclk = devm_clk_get_enabled(&client->dev, "mclk");
+	st->mclk = devm_clk_get(&client->dev, "mclk");
 	if (IS_ERR(st->mclk) && PTR_ERR(st->mclk) != -ENOENT)
 		return PTR_ERR(st->mclk);
 
-	if (!IS_ERR(st->mclk))
+	if (!IS_ERR(st->mclk)) {
+		ret = clk_prepare_enable(st->mclk);
+		if (ret < 0)
+			return ret;
+
+		ret = devm_add_action_or_reset(&client->dev,
+					       ad5933_clk_disable,
+					       st);
+		if (ret)
+			return ret;
+
 		ext_clk_hz = clk_get_rate(st->mclk);
+	}
 
 	if (ext_clk_hz) {
 		st->mclk_hz = ext_clk_hz;
@@ -731,6 +749,7 @@ static int ad5933_probe(struct i2c_client *client)
 	indio_dev->num_channels = ARRAY_SIZE(ad5933_channels);
 
 	ret = devm_iio_kfifo_buffer_setup(&client->dev, indio_dev,
+					  INDIO_BUFFER_SOFTWARE,
 					  &ad5933_ring_setup_ops);
 	if (ret)
 		return ret;

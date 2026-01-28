@@ -148,13 +148,6 @@ static const struct dw_pcie_ops keembay_pcie_ops = {
 	.stop_link	= keembay_pcie_stop_link,
 };
 
-static inline void keembay_pcie_disable_clock(void *data)
-{
-	struct clk *clk = data;
-
-	clk_disable_unprepare(clk);
-}
-
 static inline struct clk *keembay_pcie_probe_clock(struct device *dev,
 						   const char *id, u64 rate)
 {
@@ -175,7 +168,9 @@ static inline struct clk *keembay_pcie_probe_clock(struct device *dev,
 	if (ret)
 		return ERR_PTR(ret);
 
-	ret = devm_add_action_or_reset(dev, keembay_pcie_disable_clock, clk);
+	ret = devm_add_action_or_reset(dev,
+				       (void(*)(void *))clk_disable_unprepare,
+				       clk);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -236,7 +231,7 @@ static void keembay_pcie_msi_irq_handler(struct irq_desc *desc)
 	struct keembay_pcie *pcie = irq_desc_get_handler_data(desc);
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 	u32 val, mask, status;
-	struct dw_pcie_rp *pp;
+	struct pcie_port *pp;
 
 	/*
 	 * Keem Bay PCIe Controller provides an additional IP logic on top of
@@ -289,18 +284,19 @@ static void keembay_pcie_ep_init(struct dw_pcie_ep *ep)
 }
 
 static int keembay_pcie_ep_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
-				     unsigned int type, u16 interrupt_num)
+				     enum pci_epc_irq_type type,
+				     u16 interrupt_num)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 
 	switch (type) {
-	case PCI_IRQ_INTX:
-		/* INTx interrupts are not supported in Keem Bay */
-		dev_err(pci->dev, "INTx IRQ is not supported\n");
+	case PCI_EPC_IRQ_LEGACY:
+		/* Legacy interrupts are not supported in Keem Bay */
+		dev_err(pci->dev, "Legacy IRQ is not supported\n");
 		return -EINVAL;
-	case PCI_IRQ_MSI:
+	case PCI_EPC_IRQ_MSI:
 		return dw_pcie_ep_raise_msi_irq(ep, func_no, interrupt_num);
-	case PCI_IRQ_MSIX:
+	case PCI_EPC_IRQ_MSIX:
 		return dw_pcie_ep_raise_msix_irq(ep, func_no, interrupt_num);
 	default:
 		dev_err(pci->dev, "Unknown IRQ type %d\n", type);
@@ -324,7 +320,7 @@ keembay_pcie_get_features(struct dw_pcie_ep *ep)
 }
 
 static const struct dw_pcie_ep_ops keembay_pcie_ep_ops = {
-	.init		= keembay_pcie_ep_init,
+	.ep_init	= keembay_pcie_ep_init,
 	.raise_irq	= keembay_pcie_ep_raise_irq,
 	.get_features	= keembay_pcie_get_features,
 };
@@ -336,13 +332,13 @@ static int keembay_pcie_add_pcie_port(struct keembay_pcie *pcie,
 				      struct platform_device *pdev)
 {
 	struct dw_pcie *pci = &pcie->pci;
-	struct dw_pcie_rp *pp = &pci->pp;
+	struct pcie_port *pp = &pci->pp;
 	struct device *dev = &pdev->dev;
 	u32 val;
 	int ret;
 
 	pp->ops = &keembay_pcie_host_ops;
-	pp->msi_irq[0] = -ENODEV;
+	pp->msi_irq = -ENODEV;
 
 	ret = keembay_pcie_setup_msi_irq(pcie);
 	if (ret)

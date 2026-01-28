@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/mfd/allwinner,sun6i-a31-prcm.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner A31 PRCM
+title: Allwinner A31 PRCM Device Tree Bindings
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
@@ -22,7 +22,6 @@ properties:
 patternProperties:
   "^.*_(clk|rst)$":
     type: object
-    unevaluatedProperties: false
 
     properties:
       compatible:
@@ -34,41 +33,7 @@ patternProperties:
           - allwinner,sun6i-a31-clock-reset
           - fixed-factor-clock
 
-    required:
-      - compatible
-
     allOf:
-      - if:
-          properties:
-            compatible:
-              contains:
-                const: fixed-factor-clock
-
-        then:
-          $ref: /schemas/clock/fixed-factor-clock.yaml#
-
-      - if:
-          properties:
-            compatible:
-              contains:
-                const: allwinner,sun4i-a10-mod0-clk
-
-        then:
-          properties:
-            "#clock-cells":
-              const: 0
-
-            clocks:
-              maxItems: 2
-
-            clock-output-names:
-              maxItems: 1
-
-          required:
-            - "#clock-cells"
-            - clocks
-            - clock-output-names
-
       - if:
           properties:
             compatible:
@@ -80,16 +45,24 @@ patternProperties:
             "#clock-cells":
               const: 0
 
+            # Already checked in the main schema
+            compatible: true
+
             clocks:
               maxItems: 1
 
             clock-output-names:
               maxItems: 1
 
+            phandle: true
+
           required:
             - "#clock-cells"
+            - compatible
             - clocks
             - clock-output-names
+
+          additionalProperties: false
 
       - if:
           properties:
@@ -106,6 +79,9 @@ patternProperties:
                 offset of the bit controlling this particular gate in
                 the register.
 
+            # Already checked in the main schema
+            compatible: true
+
             clocks:
               maxItems: 1
 
@@ -113,10 +89,15 @@ patternProperties:
               minItems: 1
               maxItems: 32
 
+            phandle: true
+
           required:
             - "#clock-cells"
+            - compatible
             - clocks
             - clock-output-names
+
+          additionalProperties: false
 
       - if:
           properties:
@@ -129,6 +110,9 @@ patternProperties:
             "#clock-cells":
               const: 0
 
+            # Already checked in the main schema
+            compatible: true
+
             clocks:
               maxItems: 4
               description: >
@@ -138,10 +122,15 @@ patternProperties:
             clock-output-names:
               maxItems: 1
 
+            phandle: true
+
           required:
             - "#clock-cells"
+            - compatible
             - clocks
             - clock-output-names
+
+          additionalProperties: false
 
       - if:
           properties:
@@ -154,8 +143,16 @@ patternProperties:
             "#reset-cells":
               const: 1
 
+            # Already checked in the main schema
+            compatible: true
+
+            phandle: true
+
           required:
             - "#reset-cells"
+            - compatible
+
+          additionalProperties: false
 
 required:
   - compatible

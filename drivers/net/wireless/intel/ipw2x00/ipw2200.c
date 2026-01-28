@@ -199,7 +199,7 @@ static int ipw_queue_tx_reclaim(struct ipw_priv *priv,
 				struct clx2_tx_queue *txq, int qindex);
 static int ipw_queue_reset(struct ipw_priv *priv);
 
-static int ipw_queue_tx_hcmd(struct ipw_priv *priv, int hcmd, const void *buf,
+static int ipw_queue_tx_hcmd(struct ipw_priv *priv, int hcmd, void *buf,
 			     int len, int sync);
 
 static void ipw_tx_queue_free(struct ipw_priv *);
@@ -375,6 +375,19 @@ static inline u8 _ipw_read8(struct ipw_priv *ipw, unsigned long ofs)
 	IPW_DEBUG_IO("%s %d: read_direct8(0x%08X)\n", __FILE__, __LINE__, \
 			(u32)(ofs)); \
 	_ipw_read8(ipw, ofs); \
+})
+
+/* 16-bit direct read (low 4K) */
+static inline u16 _ipw_read16(struct ipw_priv *ipw, unsigned long ofs)
+{
+	return readw(ipw->hw_base + ofs);
+}
+
+/* alias to 16-bit direct read (low 4K of SRAM/regs), with debug wrapper */
+#define ipw_read16(ipw, ofs) ({ \
+	IPW_DEBUG_IO("%s %d: read_direct16(0x%08X)\n", __FILE__, __LINE__, \
+			(u32)(ofs)); \
+	_ipw_read16(ipw, ofs); \
 })
 
 /* 32-bit direct read (low 4K) */
@@ -1176,20 +1189,23 @@ static ssize_t debug_level_show(struct device_driver *d, char *buf)
 static ssize_t debug_level_store(struct device_driver *d, const char *buf,
 				 size_t count)
 {
-	unsigned long val;
+	char *p = (char *)buf;
+	u32 val;
 
-	int result = kstrtoul(buf, 0, &val);
-
-	if (result == -EINVAL)
+	if (p[1] == 'x' || p[1] == 'X' || p[0] == 'x' || p[0] == 'X') {
+		p++;
+		if (p[0] == 'x' || p[0] == 'X')
+			p++;
+		val = simple_strtoul(p, &p, 16);
+	} else
+		val = simple_strtoul(p, &p, 10);
+	if (p == buf)
 		printk(KERN_INFO DRV_NAME
 		       ": %s is not in hex or decimal form.\n", buf);
-	else if (result == -ERANGE)
-		printk(KERN_INFO DRV_NAME
-			 ": %s has overflowed.\n", buf);
 	else
 		ipw_debug_level = val;
 
-	return count;
+	return strnlen(buf, count);
 }
 static DRIVER_ATTR_RW(debug_level);
 
@@ -1218,9 +1234,9 @@ static struct ipw_fw_error *ipw_alloc_error_log(struct ipw_priv *priv)
 	u32 base = ipw_read32(priv, IPW_ERROR_LOG);
 	u32 elem_len = ipw_read_reg32(priv, base);
 
-	error = kmalloc(size_add(struct_size(error, elem, elem_len),
-				 array_size(sizeof(*error->log), log_len)),
-			GFP_ATOMIC);
+	error = kmalloc(sizeof(*error) +
+			sizeof(*error->elem) * elem_len +
+			sizeof(*error->log) * log_len, GFP_ATOMIC);
 	if (!error) {
 		IPW_ERROR("Memory allocation for firmware error log "
 			  "failed.\n");
@@ -1231,6 +1247,7 @@ static struct ipw_fw_error *ipw_alloc_error_log(struct ipw_priv *priv)
 	error->config = priv->config;
 	error->elem_len = elem_len;
 	error->log_len = log_len;
+	error->elem = (struct ipw_error_elem *)error->payload;
 	error->log = (struct ipw_event *)(error->elem + elem_len);
 
 	ipw_capture_event_log(priv, log_len, error->log);
@@ -1242,7 +1259,7 @@ static struct ipw_fw_error *ipw_alloc_error_log(struct ipw_priv *priv)
 	return error;
 }
 
-static ssize_t event_log_show(struct device *d,
+static ssize_t show_event_log(struct device *d,
 			      struct device_attribute *attr, char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1272,9 +1289,9 @@ static ssize_t event_log_show(struct device *d,
 	return len;
 }
 
-static DEVICE_ATTR_RO(event_log);
+static DEVICE_ATTR(event_log, 0444, show_event_log, NULL);
 
-static ssize_t error_show(struct device *d,
+static ssize_t show_error(struct device *d,
 			  struct device_attribute *attr, char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1309,7 +1326,7 @@ static ssize_t error_show(struct device *d,
 	return len;
 }
 
-static ssize_t error_store(struct device *d,
+static ssize_t clear_error(struct device *d,
 			   struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -1320,9 +1337,9 @@ static ssize_t error_store(struct device *d,
 	return count;
 }
 
-static DEVICE_ATTR_RW(error);
+static DEVICE_ATTR(error, 0644, show_error, clear_error);
 
-static ssize_t cmd_log_show(struct device *d,
+static ssize_t show_cmd_log(struct device *d,
 			    struct device_attribute *attr, char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1347,12 +1364,12 @@ static ssize_t cmd_log_show(struct device *d,
 	return len;
 }
 
-static DEVICE_ATTR_RO(cmd_log);
+static DEVICE_ATTR(cmd_log, 0444, show_cmd_log, NULL);
 
 #ifdef CONFIG_IPW2200_PROMISCUOUS
 static void ipw_prom_free(struct ipw_priv *priv);
 static int ipw_prom_alloc(struct ipw_priv *priv);
-static ssize_t rtap_iface_store(struct device *d,
+static ssize_t store_rtap_iface(struct device *d,
 			 struct device_attribute *attr,
 			 const char *buf, size_t count)
 {
@@ -1397,7 +1414,7 @@ static ssize_t rtap_iface_store(struct device *d,
 	return count;
 }
 
-static ssize_t rtap_iface_show(struct device *d,
+static ssize_t show_rtap_iface(struct device *d,
 			struct device_attribute *attr,
 			char *buf)
 {
@@ -1412,9 +1429,9 @@ static ssize_t rtap_iface_show(struct device *d,
 	}
 }
 
-static DEVICE_ATTR_ADMIN_RW(rtap_iface);
+static DEVICE_ATTR(rtap_iface, 0600, show_rtap_iface, store_rtap_iface);
 
-static ssize_t rtap_filter_store(struct device *d,
+static ssize_t store_rtap_filter(struct device *d,
 			 struct device_attribute *attr,
 			 const char *buf, size_t count)
 {
@@ -1434,7 +1451,7 @@ static ssize_t rtap_filter_store(struct device *d,
 	return count;
 }
 
-static ssize_t rtap_filter_show(struct device *d,
+static ssize_t show_rtap_filter(struct device *d,
 			struct device_attribute *attr,
 			char *buf)
 {
@@ -1443,28 +1460,40 @@ static ssize_t rtap_filter_show(struct device *d,
 		       priv->prom_priv ? priv->prom_priv->filter : 0);
 }
 
-static DEVICE_ATTR_ADMIN_RW(rtap_filter);
+static DEVICE_ATTR(rtap_filter, 0600, show_rtap_filter, store_rtap_filter);
 #endif
 
-static ssize_t scan_age_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_scan_age(struct device *d, struct device_attribute *attr,
 			     char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
 	return sprintf(buf, "%d\n", priv->ieee->scan_age);
 }
 
-static ssize_t scan_age_store(struct device *d, struct device_attribute *attr,
+static ssize_t store_scan_age(struct device *d, struct device_attribute *attr,
 			      const char *buf, size_t count)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
 	struct net_device *dev = priv->net_dev;
+	char buffer[] = "00000000";
+	unsigned long len =
+	    (sizeof(buffer) - 1) > count ? count : sizeof(buffer) - 1;
+	unsigned long val;
+	char *p = buffer;
 
 	IPW_DEBUG_INFO("enter\n");
 
-	unsigned long val;
-	int result = kstrtoul(buf, 0, &val);
+	strncpy(buffer, buf, len);
+	buffer[len] = 0;
 
-	if (result == -EINVAL || result == -ERANGE) {
+	if (p[1] == 'x' || p[1] == 'X' || p[0] == 'x' || p[0] == 'X') {
+		p++;
+		if (p[0] == 'x' || p[0] == 'X')
+			p++;
+		val = simple_strtoul(p, &p, 16);
+	} else
+		val = simple_strtoul(p, &p, 10);
+	if (p == buffer) {
 		IPW_DEBUG_INFO("%s: user supplied invalid value.\n", dev->name);
 	} else {
 		priv->ieee->scan_age = val;
@@ -1472,19 +1501,19 @@ static ssize_t scan_age_store(struct device *d, struct device_attribute *attr,
 	}
 
 	IPW_DEBUG_INFO("exit\n");
-	return count;
+	return len;
 }
 
-static DEVICE_ATTR_RW(scan_age);
+static DEVICE_ATTR(scan_age, 0644, show_scan_age, store_scan_age);
 
-static ssize_t led_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_led(struct device *d, struct device_attribute *attr,
 			char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
 	return sprintf(buf, "%d\n", (priv->config & CFG_NO_LED) ? 0 : 1);
 }
 
-static ssize_t led_store(struct device *d, struct device_attribute *attr,
+static ssize_t store_led(struct device *d, struct device_attribute *attr,
 			 const char *buf, size_t count)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1508,36 +1537,36 @@ static ssize_t led_store(struct device *d, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR_RW(led);
+static DEVICE_ATTR(led, 0644, show_led, store_led);
 
-static ssize_t status_show(struct device *d,
+static ssize_t show_status(struct device *d,
 			   struct device_attribute *attr, char *buf)
 {
 	struct ipw_priv *p = dev_get_drvdata(d);
 	return sprintf(buf, "0x%08x\n", (int)p->status);
 }
 
-static DEVICE_ATTR_RO(status);
+static DEVICE_ATTR(status, 0444, show_status, NULL);
 
-static ssize_t cfg_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_cfg(struct device *d, struct device_attribute *attr,
 			char *buf)
 {
 	struct ipw_priv *p = dev_get_drvdata(d);
 	return sprintf(buf, "0x%08x\n", (int)p->config);
 }
 
-static DEVICE_ATTR_RO(cfg);
+static DEVICE_ATTR(cfg, 0444, show_cfg, NULL);
 
-static ssize_t nic_type_show(struct device *d,
+static ssize_t show_nic_type(struct device *d,
 			     struct device_attribute *attr, char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
 	return sprintf(buf, "TYPE: %d\n", priv->nic_type);
 }
 
-static DEVICE_ATTR_RO(nic_type);
+static DEVICE_ATTR(nic_type, 0444, show_nic_type, NULL);
 
-static ssize_t ucode_version_show(struct device *d,
+static ssize_t show_ucode_version(struct device *d,
 				  struct device_attribute *attr, char *buf)
 {
 	u32 len = sizeof(u32), tmp = 0;
@@ -1549,9 +1578,9 @@ static ssize_t ucode_version_show(struct device *d,
 	return sprintf(buf, "0x%08x\n", tmp);
 }
 
-static DEVICE_ATTR_RO(ucode_version);
+static DEVICE_ATTR(ucode_version, 0644, show_ucode_version, NULL);
 
-static ssize_t rtc_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_rtc(struct device *d, struct device_attribute *attr,
 			char *buf)
 {
 	u32 len = sizeof(u32), tmp = 0;
@@ -1563,20 +1592,20 @@ static ssize_t rtc_show(struct device *d, struct device_attribute *attr,
 	return sprintf(buf, "0x%08x\n", tmp);
 }
 
-static DEVICE_ATTR_RO(rtc);
+static DEVICE_ATTR(rtc, 0644, show_rtc, NULL);
 
 /*
  * Add a device attribute to view/control the delay between eeprom
  * operations.
  */
-static ssize_t eeprom_delay_show(struct device *d,
+static ssize_t show_eeprom_delay(struct device *d,
 				 struct device_attribute *attr, char *buf)
 {
 	struct ipw_priv *p = dev_get_drvdata(d);
 	int n = p->eeprom_delay;
 	return sprintf(buf, "%i\n", n);
 }
-static ssize_t eeprom_delay_store(struct device *d,
+static ssize_t store_eeprom_delay(struct device *d,
 				  struct device_attribute *attr,
 				  const char *buf, size_t count)
 {
@@ -1585,9 +1614,9 @@ static ssize_t eeprom_delay_store(struct device *d,
 	return strnlen(buf, count);
 }
 
-static DEVICE_ATTR_RW(eeprom_delay);
+static DEVICE_ATTR(eeprom_delay, 0644, show_eeprom_delay, store_eeprom_delay);
 
-static ssize_t command_event_reg_show(struct device *d,
+static ssize_t show_command_event_reg(struct device *d,
 				      struct device_attribute *attr, char *buf)
 {
 	u32 reg = 0;
@@ -1596,7 +1625,7 @@ static ssize_t command_event_reg_show(struct device *d,
 	reg = ipw_read_reg32(p, IPW_INTERNAL_CMD_EVENT);
 	return sprintf(buf, "0x%08x\n", reg);
 }
-static ssize_t command_event_reg_store(struct device *d,
+static ssize_t store_command_event_reg(struct device *d,
 				       struct device_attribute *attr,
 				       const char *buf, size_t count)
 {
@@ -1608,9 +1637,10 @@ static ssize_t command_event_reg_store(struct device *d,
 	return strnlen(buf, count);
 }
 
-static DEVICE_ATTR_RW(command_event_reg);
+static DEVICE_ATTR(command_event_reg, 0644,
+		   show_command_event_reg, store_command_event_reg);
 
-static ssize_t mem_gpio_reg_show(struct device *d,
+static ssize_t show_mem_gpio_reg(struct device *d,
 				 struct device_attribute *attr, char *buf)
 {
 	u32 reg = 0;
@@ -1619,7 +1649,7 @@ static ssize_t mem_gpio_reg_show(struct device *d,
 	reg = ipw_read_reg32(p, 0x301100);
 	return sprintf(buf, "0x%08x\n", reg);
 }
-static ssize_t mem_gpio_reg_store(struct device *d,
+static ssize_t store_mem_gpio_reg(struct device *d,
 				  struct device_attribute *attr,
 				  const char *buf, size_t count)
 {
@@ -1631,9 +1661,9 @@ static ssize_t mem_gpio_reg_store(struct device *d,
 	return strnlen(buf, count);
 }
 
-static DEVICE_ATTR_RW(mem_gpio_reg);
+static DEVICE_ATTR(mem_gpio_reg, 0644, show_mem_gpio_reg, store_mem_gpio_reg);
 
-static ssize_t indirect_dword_show(struct device *d,
+static ssize_t show_indirect_dword(struct device *d,
 				   struct device_attribute *attr, char *buf)
 {
 	u32 reg = 0;
@@ -1646,7 +1676,7 @@ static ssize_t indirect_dword_show(struct device *d,
 
 	return sprintf(buf, "0x%08x\n", reg);
 }
-static ssize_t indirect_dword_store(struct device *d,
+static ssize_t store_indirect_dword(struct device *d,
 				    struct device_attribute *attr,
 				    const char *buf, size_t count)
 {
@@ -1657,9 +1687,10 @@ static ssize_t indirect_dword_store(struct device *d,
 	return strnlen(buf, count);
 }
 
-static DEVICE_ATTR_RW(indirect_dword);
+static DEVICE_ATTR(indirect_dword, 0644,
+		   show_indirect_dword, store_indirect_dword);
 
-static ssize_t indirect_byte_show(struct device *d,
+static ssize_t show_indirect_byte(struct device *d,
 				  struct device_attribute *attr, char *buf)
 {
 	u8 reg = 0;
@@ -1672,7 +1703,7 @@ static ssize_t indirect_byte_show(struct device *d,
 
 	return sprintf(buf, "0x%02x\n", reg);
 }
-static ssize_t indirect_byte_store(struct device *d,
+static ssize_t store_indirect_byte(struct device *d,
 				   struct device_attribute *attr,
 				   const char *buf, size_t count)
 {
@@ -1683,9 +1714,10 @@ static ssize_t indirect_byte_store(struct device *d,
 	return strnlen(buf, count);
 }
 
-static DEVICE_ATTR_RW(indirect_byte);
+static DEVICE_ATTR(indirect_byte, 0644,
+		   show_indirect_byte, store_indirect_byte);
 
-static ssize_t direct_dword_show(struct device *d,
+static ssize_t show_direct_dword(struct device *d,
 				 struct device_attribute *attr, char *buf)
 {
 	u32 reg = 0;
@@ -1698,7 +1730,7 @@ static ssize_t direct_dword_show(struct device *d,
 
 	return sprintf(buf, "0x%08x\n", reg);
 }
-static ssize_t direct_dword_store(struct device *d,
+static ssize_t store_direct_dword(struct device *d,
 				  struct device_attribute *attr,
 				  const char *buf, size_t count)
 {
@@ -1709,7 +1741,7 @@ static ssize_t direct_dword_store(struct device *d,
 	return strnlen(buf, count);
 }
 
-static DEVICE_ATTR_RW(direct_dword);
+static DEVICE_ATTR(direct_dword, 0644, show_direct_dword, store_direct_dword);
 
 static int rf_kill_active(struct ipw_priv *priv)
 {
@@ -1724,7 +1756,7 @@ static int rf_kill_active(struct ipw_priv *priv)
 	return (priv->status & STATUS_RF_KILL_HW) ? 1 : 0;
 }
 
-static ssize_t rf_kill_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_rf_kill(struct device *d, struct device_attribute *attr,
 			    char *buf)
 {
 	/* 0 - RF kill not enabled
@@ -1770,7 +1802,7 @@ static int ipw_radio_kill_sw(struct ipw_priv *priv, int disable_radio)
 	return 1;
 }
 
-static ssize_t rf_kill_store(struct device *d, struct device_attribute *attr,
+static ssize_t store_rf_kill(struct device *d, struct device_attribute *attr,
 			     const char *buf, size_t count)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1780,9 +1812,9 @@ static ssize_t rf_kill_store(struct device *d, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR_RW(rf_kill);
+static DEVICE_ATTR(rf_kill, 0644, show_rf_kill, store_rf_kill);
 
-static ssize_t speed_scan_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_speed_scan(struct device *d, struct device_attribute *attr,
 			       char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1797,7 +1829,7 @@ static ssize_t speed_scan_show(struct device *d, struct device_attribute *attr,
 	return sprintf(buf, "0\n");
 }
 
-static ssize_t speed_scan_store(struct device *d, struct device_attribute *attr,
+static ssize_t store_speed_scan(struct device *d, struct device_attribute *attr,
 				const char *buf, size_t count)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1833,16 +1865,16 @@ static ssize_t speed_scan_store(struct device *d, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR_RW(speed_scan);
+static DEVICE_ATTR(speed_scan, 0644, show_speed_scan, store_speed_scan);
 
-static ssize_t net_stats_show(struct device *d, struct device_attribute *attr,
+static ssize_t show_net_stats(struct device *d, struct device_attribute *attr,
 			      char *buf)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
 	return sprintf(buf, "%c\n", (priv->config & CFG_NET_STATS) ? '1' : '0');
 }
 
-static ssize_t net_stats_store(struct device *d, struct device_attribute *attr,
+static ssize_t store_net_stats(struct device *d, struct device_attribute *attr,
 			       const char *buf, size_t count)
 {
 	struct ipw_priv *priv = dev_get_drvdata(d);
@@ -1854,9 +1886,9 @@ static ssize_t net_stats_store(struct device *d, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR_RW(net_stats);
+static DEVICE_ATTR(net_stats, 0644, show_net_stats, store_net_stats);
 
-static ssize_t channels_show(struct device *d,
+static ssize_t show_channels(struct device *d,
 			     struct device_attribute *attr,
 			     char *buf)
 {
@@ -1900,7 +1932,7 @@ static ssize_t channels_show(struct device *d,
 	return len;
 }
 
-static DEVICE_ATTR_ADMIN_RO(channels);
+static DEVICE_ATTR(channels, 0400, show_channels, NULL);
 
 static void notify_wx_assoc_event(struct ipw_priv *priv)
 {
@@ -2232,7 +2264,7 @@ static int ipw_send_cmd_simple(struct ipw_priv *priv, u8 command)
 }
 
 static int ipw_send_cmd_pdu(struct ipw_priv *priv, u8 command, u8 len,
-			    const void *data)
+			    void *data)
 {
 	struct host_cmd cmd = {
 		.cmd = command,
@@ -2271,7 +2303,7 @@ static int ipw_send_ssid(struct ipw_priv *priv, u8 * ssid, int len)
 				ssid);
 }
 
-static int ipw_send_adapter_address(struct ipw_priv *priv, const u8 * mac)
+static int ipw_send_adapter_address(struct ipw_priv *priv, u8 * mac)
 {
 	if (!priv || !mac) {
 		IPW_ERROR("Invalid args\n");
@@ -2555,7 +2587,7 @@ static int ipw_send_retry_limit(struct ipw_priv *priv, u8 slimit, u8 llimit)
  * through a couple of memory mapped registers.
  *
  * The following is a simplified implementation for pulling data out of the
- * eeprom, along with some helper functions to find information in
+ * the eeprom, along with some helper functions to find information in
  * the per device private data's copy of the eeprom.
  *
  * NOTE: To better understand how these functions work (i.e what is a chip
@@ -2964,6 +2996,20 @@ static void ipw_remove_current_network(struct ipw_priv *priv)
 		}
 	}
 	spin_unlock_irqrestore(&priv->ieee->lock, flags);
+}
+
+/*
+ * Check that card is still alive.
+ * Reads debug register from domain0.
+ * If card is present, pre-defined value should
+ * be found there.
+ *
+ * @param priv
+ * @return 1 if card is present, 0 otherwise
+ */
+static inline int ipw_alive(struct ipw_priv *priv)
+{
+	return ipw_read32(priv, 0x90) == 0xd55555d5;
 }
 
 /* timeout in msec, attempted in 10-msec quanta */
@@ -3731,7 +3777,7 @@ static int ipw_queue_tx_init(struct ipw_priv *priv,
 	    dma_alloc_coherent(&dev->dev, sizeof(q->bd[0]) * count,
 			       &q->q.dma_addr, GFP_KERNEL);
 	if (!q->bd) {
-		IPW_ERROR("dma_alloc_coherent(%zd) failed\n",
+		IPW_ERROR("pci_alloc_consistent(%zd) failed\n",
 			  sizeof(q->bd[0]) * count);
 		kfree(q->txb);
 		q->txb = NULL;
@@ -4987,7 +5033,7 @@ static int ipw_queue_tx_reclaim(struct ipw_priv *priv,
 	return used;
 }
 
-static int ipw_queue_tx_hcmd(struct ipw_priv *priv, int hcmd, const void *buf,
+static int ipw_queue_tx_hcmd(struct ipw_priv *priv, int hcmd, void *buf,
 			     int len, int sync)
 {
 	struct clx2_tx_queue *txq = &priv->txq_cmd;
@@ -9656,30 +9702,31 @@ static int ipw_wx_get_wireless_mode(struct net_device *dev,
 	mutex_lock(&priv->mutex);
 	switch (priv->ieee->mode) {
 	case IEEE_A:
-		strscpy_pad(extra, "802.11a (1)", MAX_WX_STRING);
+		strncpy(extra, "802.11a (1)", MAX_WX_STRING);
 		break;
 	case IEEE_B:
-		strscpy_pad(extra, "802.11b (2)", MAX_WX_STRING);
+		strncpy(extra, "802.11b (2)", MAX_WX_STRING);
 		break;
 	case IEEE_A | IEEE_B:
-		strscpy_pad(extra, "802.11ab (3)", MAX_WX_STRING);
+		strncpy(extra, "802.11ab (3)", MAX_WX_STRING);
 		break;
 	case IEEE_G:
-		strscpy_pad(extra, "802.11g (4)", MAX_WX_STRING);
+		strncpy(extra, "802.11g (4)", MAX_WX_STRING);
 		break;
 	case IEEE_A | IEEE_G:
-		strscpy_pad(extra, "802.11ag (5)", MAX_WX_STRING);
+		strncpy(extra, "802.11ag (5)", MAX_WX_STRING);
 		break;
 	case IEEE_B | IEEE_G:
-		strscpy_pad(extra, "802.11bg (6)", MAX_WX_STRING);
+		strncpy(extra, "802.11bg (6)", MAX_WX_STRING);
 		break;
 	case IEEE_A | IEEE_B | IEEE_G:
-		strscpy_pad(extra, "802.11abg (7)", MAX_WX_STRING);
+		strncpy(extra, "802.11abg (7)", MAX_WX_STRING);
 		break;
 	default:
-		strscpy_pad(extra, "unknown", MAX_WX_STRING);
+		strncpy(extra, "unknown", MAX_WX_STRING);
 		break;
 	}
+	extra[MAX_WX_STRING - 1] = '\0';
 
 	IPW_DEBUG_WX("PRIV GET MODE: %s\n", extra);
 
@@ -9826,7 +9873,7 @@ static int ipw_wx_sw_reset(struct net_device *dev,
 
 /* Rebase the WE IOCTLs to zero for the handler array */
 static iw_handler ipw_wx_handlers[] = {
-	IW_HANDLER(SIOCGIWNAME, cfg80211_wext_giwname),
+	IW_HANDLER(SIOCGIWNAME, (iw_handler)cfg80211_wext_giwname),
 	IW_HANDLER(SIOCSIWFREQ, ipw_wx_set_freq),
 	IW_HANDLER(SIOCGIWFREQ, ipw_wx_get_freq),
 	IW_HANDLER(SIOCSIWMODE, ipw_wx_set_mode),
@@ -10377,16 +10424,20 @@ static void ipw_ethtool_get_drvinfo(struct net_device *dev,
 {
 	struct ipw_priv *p = libipw_priv(dev);
 	char vers[64];
+	char date[32];
 	u32 len;
 
-	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->version, DRV_VERSION, sizeof(info->version));
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
 
 	len = sizeof(vers);
 	ipw_get_ordinal(p, IPW_ORD_STAT_FW_VERSION, vers, &len);
+	len = sizeof(date);
+	ipw_get_ordinal(p, IPW_ORD_STAT_FW_DATE, date, &len);
 
-	strscpy(info->fw_version, vers, sizeof(info->fw_version));
-	strscpy(info->bus_info, pci_name(p->pci_dev),
+	snprintf(info->fw_version, sizeof(info->fw_version), "%s (%s)",
+		 vers, date);
+	strlcpy(info->bus_info, pci_name(p->pci_dev),
 		sizeof(info->bus_info));
 }
 
@@ -11134,7 +11185,7 @@ static int ipw_up(struct ipw_priv *priv)
 		ipw_init_ordinals(priv);
 		if (!(priv->config & CFG_CUSTOM_MAC))
 			eeprom_parse_mac(priv, priv->mac_addr);
-		eth_hw_addr_set(priv->net_dev, priv->mac_addr);
+		memcpy(priv->net_dev->dev_addr, priv->mac_addr, ETH_ALEN);
 
 		ipw_set_geo(priv);
 
@@ -11496,7 +11547,7 @@ static int ipw_prom_alloc(struct ipw_priv *priv)
 	priv->prom_priv->priv = priv;
 
 	strcpy(priv->prom_net_dev->name, "rtap%d");
-	eth_hw_addr_set(priv->prom_net_dev, priv->mac_addr);
+	memcpy(priv->prom_net_dev->dev_addr, priv->mac_addr, ETH_ALEN);
 
 	priv->prom_net_dev->type = ARPHRD_IEEE80211_RADIOTAP;
 	priv->prom_net_dev->netdev_ops = &ipw_prom_netdev_ops;

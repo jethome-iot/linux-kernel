@@ -35,6 +35,7 @@
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_net.h>
 #include <linux/sched.h>
 #include <linux/skbuff.h>
@@ -434,7 +435,7 @@ qcaspi_receive(struct qcaspi *qca)
 				qca->rx_skb->protocol = eth_type_trans(
 					qca->rx_skb, qca->rx_skb->dev);
 				skb_checksum_none_assert(qca->rx_skb);
-				netif_rx(qca->rx_skb);
+				netif_rx_ni(qca->rx_skb);
 				qca->rx_skb = netdev_alloc_skb_ip_align(net_dev,
 					net_dev->mtu + VLAN_ETH_HLEN);
 				if (!qca->rx_skb) {
@@ -1017,7 +1018,7 @@ qca_spi_probe(struct spi_device *spi)
 	return 0;
 }
 
-static void
+static int
 qca_spi_remove(struct spi_device *spi)
 {
 	struct net_device *qcaspi_devs = spi_get_drvdata(spi);
@@ -1027,6 +1028,8 @@ qca_spi_remove(struct spi_device *spi)
 
 	unregister_netdev(qcaspi_devs);
 	free_netdev(qcaspi_devs);
+
+	return 0;
 }
 
 static const struct spi_device_id qca_spi_id[] = {

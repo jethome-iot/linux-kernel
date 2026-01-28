@@ -20,7 +20,6 @@
 #include <linux/mutex.h>
 #include <linux/bitmap.h>
 #include <linux/lockdep.h>
-#include <linux/log2.h>
 
 #include <acpi/acpi_numa.h>
 
@@ -37,6 +36,11 @@ static unsigned long bbm_block_size;
 module_param(bbm_block_size, ulong, 0444);
 MODULE_PARM_DESC(bbm_block_size,
 		 "Big Block size in bytes. Default is 0 (auto-detection).");
+
+static bool bbm_safe_unplug = true;
+module_param(bbm_safe_unplug, bool, 0444);
+MODULE_PARM_DESC(bbm_safe_unplug,
+	     "Use a safe unplug mechanism in BBM, avoiding long/endless loops");
 
 /*
  * virtio-mem currently supports the following modes of operation:
@@ -168,13 +172,6 @@ struct virtio_mem {
 			/* The number of subblocks per Linux memory block. */
 			uint32_t sbs_per_mb;
 
-			/*
-			 * Some of the Linux memory blocks tracked as "partially
-			 * plugged" are completely unplugged and can be offlined
-			 * and removed -- which previously failed.
-			 */
-			bool have_unplugged_mb;
-
 			/* Summary of all memory block states. */
 			unsigned long mb_count[VIRTIO_MEM_SBM_MB_COUNT];
 
@@ -226,18 +223,12 @@ struct virtio_mem {
 	 * When this lock is held the pointers can't change, ONLINE and
 	 * OFFLINE blocks can't change the state and no subblocks will get
 	 * plugged/unplugged.
-	 *
-	 * In kdump mode, used to serialize requests, last_block_addr and
-	 * last_block_plugged.
 	 */
 	struct mutex hotplug_mutex;
 	bool hotplug_active;
 
 	/* An error occurred we cannot handle - stop processing requests. */
 	bool broken;
-
-	/* Cached valued of is_kdump_kernel() when the device was probed. */
-	bool in_kdump;
 
 	/* The driver is being removed. */
 	spinlock_t removal_lock;
@@ -251,13 +242,6 @@ struct virtio_mem {
 
 	/* Memory notifier (online/offline events). */
 	struct notifier_block memory_notifier;
-
-#ifdef CONFIG_PROC_VMCORE
-	/* vmcore callback for /proc/vmcore handling in kdump mode */
-	struct vmcore_cb vmcore_cb;
-	uint64_t last_block_addr;
-	bool last_block_plugged;
-#endif /* CONFIG_PROC_VMCORE */
 
 	/* Next device in the list of virtio-mem devices. */
 	struct list_head next;
@@ -276,8 +260,6 @@ static void virtio_mem_fake_offline_going_offline(unsigned long pfn,
 static void virtio_mem_fake_offline_cancel_offline(unsigned long pfn,
 						   unsigned long nr_pages);
 static void virtio_mem_retry(struct virtio_mem *vm);
-static int virtio_mem_create_resource(struct virtio_mem *vm);
-static void virtio_mem_delete_resource(struct virtio_mem *vm);
 
 /*
  * Register a virtio-mem device so it will be considered for the online_page
@@ -748,15 +730,11 @@ static int virtio_mem_offline_and_remove_memory(struct virtio_mem *vm,
 		 * immediately instead of waiting.
 		 */
 		virtio_mem_retry(vm);
-		return 0;
+	} else {
+		dev_dbg(&vm->vdev->dev,
+			"offlining and removing memory failed: %d\n", rc);
 	}
-	dev_dbg(&vm->vdev->dev, "offlining and removing memory failed: %d\n", rc);
-	/*
-	 * We don't really expect this to fail, because we fake-offlined all
-	 * memory already. But it could fail in corner cases.
-	 */
-	WARN_ON_ONCE(rc != -ENOMEM && rc != -EBUSY);
-	return rc == -ENOMEM ? -ENOMEM : -EBUSY;
+	return rc;
 }
 
 /*
@@ -770,34 +748,6 @@ static int virtio_mem_sbm_offline_and_remove_mb(struct virtio_mem *vm,
 	const uint64_t size = memory_block_size_bytes();
 
 	return virtio_mem_offline_and_remove_memory(vm, addr, size);
-}
-
-/*
- * Try (offlining and) removing memory from Linux in case all subblocks are
- * unplugged. Can be called on online and offline memory blocks.
- *
- * May modify the state of memory blocks in virtio-mem.
- */
-static int virtio_mem_sbm_try_remove_unplugged_mb(struct virtio_mem *vm,
-						  unsigned long mb_id)
-{
-	int rc;
-
-	/*
-	 * Once all subblocks of a memory block were unplugged, offline and
-	 * remove it.
-	 */
-	if (!virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb))
-		return 0;
-
-	/* offline_and_remove_memory() works for online and offline memory. */
-	mutex_unlock(&vm->hotplug_mutex);
-	rc = virtio_mem_sbm_offline_and_remove_mb(vm, mb_id);
-	mutex_lock(&vm->hotplug_mutex);
-	if (!rc)
-		virtio_mem_sbm_set_mb_state(vm, mb_id,
-					    VIRTIO_MEM_SBM_MB_UNUSED);
-	return rc;
 }
 
 /*
@@ -896,7 +846,8 @@ static void virtio_mem_sbm_notify_online(struct virtio_mem *vm,
 					 unsigned long mb_id,
 					 unsigned long start_pfn)
 {
-	const bool is_movable = is_zone_movable_page(pfn_to_page(start_pfn));
+	const bool is_movable = page_zonenum(pfn_to_page(start_pfn)) ==
+				ZONE_MOVABLE;
 	int new_state;
 
 	switch (virtio_mem_sbm_get_mb_state(vm, mb_id)) {
@@ -1154,18 +1105,15 @@ static void virtio_mem_clear_fake_offline(unsigned long pfn,
  */
 static void virtio_mem_fake_online(unsigned long pfn, unsigned long nr_pages)
 {
-	unsigned long order = MAX_PAGE_ORDER;
+	const unsigned long max_nr_pages = MAX_ORDER_NR_PAGES;
 	unsigned long i;
 
 	/*
-	 * We might get called for ranges that don't cover properly aligned
-	 * MAX_PAGE_ORDER pages; however, we can only online properly aligned
-	 * pages with an order of MAX_PAGE_ORDER at maximum.
+	 * We are always called at least with MAX_ORDER_NR_PAGES
+	 * granularity/alignment (e.g., the way subblocks work). All pages
+	 * inside such a block are alike.
 	 */
-	while (!IS_ALIGNED(pfn | nr_pages, 1 << order))
-		order--;
-
-	for (i = 0; i < nr_pages; i += 1 << order) {
+	for (i = 0; i < nr_pages; i += max_nr_pages) {
 		struct page *page = pfn_to_page(pfn + i);
 
 		/*
@@ -1175,12 +1123,14 @@ static void virtio_mem_fake_online(unsigned long pfn, unsigned long nr_pages)
 		 * alike.
 		 */
 		if (PageDirty(page)) {
-			virtio_mem_clear_fake_offline(pfn + i, 1 << order, false);
-			generic_online_page(page, order);
+			virtio_mem_clear_fake_offline(pfn + i, max_nr_pages,
+						      false);
+			generic_online_page(page, MAX_ORDER - 1);
 		} else {
-			virtio_mem_clear_fake_offline(pfn + i, 1 << order, true);
-			free_contig_range(pfn + i, 1 << order);
-			adjust_managed_page_count(page, 1 << order);
+			virtio_mem_clear_fake_offline(pfn + i, max_nr_pages,
+						      true);
+			free_contig_range(pfn + i, max_nr_pages);
+			adjust_managed_page_count(page, max_nr_pages);
 		}
 	}
 }
@@ -1189,11 +1139,12 @@ static void virtio_mem_fake_online(unsigned long pfn, unsigned long nr_pages)
  * Try to allocate a range, marking pages fake-offline, effectively
  * fake-offlining them.
  */
-static int virtio_mem_fake_offline(struct virtio_mem *vm, unsigned long pfn,
-				   unsigned long nr_pages)
+static int virtio_mem_fake_offline(unsigned long pfn, unsigned long nr_pages)
 {
-	const bool is_movable = is_zone_movable_page(pfn_to_page(pfn));
+	const bool is_movable = page_zonenum(pfn_to_page(pfn)) ==
+				ZONE_MOVABLE;
 	int rc, retry_count;
+	struct acr_info dummy;
 
 	/*
 	 * TODO: We want an alloc_contig_range() mode that tries to allocate
@@ -1203,16 +1154,8 @@ static int virtio_mem_fake_offline(struct virtio_mem *vm, unsigned long pfn,
 	 * some guarantees.
 	 */
 	for (retry_count = 0; retry_count < 5; retry_count++) {
-		/*
-		 * If the config changed, stop immediately and go back to the
-		 * main loop: avoid trying to keep unplugging if the device
-		 * might have decided to not remove any more memory.
-		 */
-		if (atomic_read(&vm->config_changed))
-			return -EAGAIN;
-
 		rc = alloc_contig_range(pfn, pfn + nr_pages, MIGRATE_MOVABLE,
-					GFP_KERNEL);
+					GFP_KERNEL, &dummy);
 		if (rc == -ENOMEM)
 			/* whoops, out of memory */
 			return rc;
@@ -1271,46 +1214,28 @@ static void virtio_mem_fake_offline_cancel_offline(unsigned long pfn,
 		page_ref_inc(pfn_to_page(pfn + i));
 }
 
-static void virtio_mem_online_page(struct virtio_mem *vm,
-				   struct page *page, unsigned int order)
+static void virtio_mem_online_page_cb(struct page *page, unsigned int order)
 {
-	const unsigned long start = page_to_phys(page);
-	const unsigned long end = start + PFN_PHYS(1 << order);
-	unsigned long addr, next, id, sb_id, count;
+	const unsigned long addr = page_to_phys(page);
+	unsigned long id, sb_id;
+	struct virtio_mem *vm;
 	bool do_online;
 
-	/*
-	 * We can get called with any order up to MAX_PAGE_ORDER. If our subblock
-	 * size is smaller than that and we have a mixture of plugged and
-	 * unplugged subblocks within such a page, we have to process in
-	 * smaller granularity. In that case we'll adjust the order exactly once
-	 * within the loop.
-	 */
-	for (addr = start; addr < end; ) {
-		next = addr + PFN_PHYS(1 << order);
+	rcu_read_lock();
+	list_for_each_entry_rcu(vm, &virtio_mem_devices, next) {
+		if (!virtio_mem_contains_range(vm, addr, PFN_PHYS(1 << order)))
+			continue;
 
 		if (vm->in_sbm) {
+			/*
+			 * We exploit here that subblocks have at least
+			 * MAX_ORDER_NR_PAGES size/alignment - so we cannot
+			 * cross subblocks within one call.
+			 */
 			id = virtio_mem_phys_to_mb_id(addr);
 			sb_id = virtio_mem_phys_to_sb_id(vm, addr);
-			count = virtio_mem_phys_to_sb_id(vm, next - 1) - sb_id + 1;
-
-			if (virtio_mem_sbm_test_sb_plugged(vm, id, sb_id, count)) {
-				/* Fully plugged. */
-				do_online = true;
-			} else if (count == 1 ||
-				   virtio_mem_sbm_test_sb_unplugged(vm, id, sb_id, count)) {
-				/* Fully unplugged. */
-				do_online = false;
-			} else {
-				/*
-				 * Mixture, process sub-blocks instead. This
-				 * will be at least the size of a pageblock.
-				 * We'll run into this case exactly once.
-				 */
-				order = ilog2(vm->sbm.sb_size) - PAGE_SHIFT;
-				do_online = virtio_mem_sbm_test_sb_plugged(vm, id, sb_id, 1);
-				continue;
-			}
+			do_online = virtio_mem_sbm_test_sb_plugged(vm, id,
+								   sb_id, 1);
 		} else {
 			/*
 			 * If the whole block is marked fake offline, keep
@@ -1321,38 +1246,18 @@ static void virtio_mem_online_page(struct virtio_mem *vm,
 				    VIRTIO_MEM_BBM_BB_FAKE_OFFLINE;
 		}
 
-		if (do_online)
-			generic_online_page(pfn_to_page(PFN_DOWN(addr)), order);
-		else
-			virtio_mem_set_fake_offline(PFN_DOWN(addr), 1 << order,
-						    false);
-		addr = next;
-	}
-}
-
-static void virtio_mem_online_page_cb(struct page *page, unsigned int order)
-{
-	const unsigned long addr = page_to_phys(page);
-	struct virtio_mem *vm;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(vm, &virtio_mem_devices, next) {
 		/*
-		 * Pages we're onlining will never cross memory blocks and,
-		 * therefore, not virtio-mem devices.
-		 */
-		if (!virtio_mem_contains_range(vm, addr, PFN_PHYS(1 << order)))
-			continue;
-
-		/*
-		 * virtio_mem_set_fake_offline() might sleep. We can safely
-		 * drop the RCU lock at this point because the device
-		 * cannot go away. See virtio_mem_remove() how races
+		 * virtio_mem_set_fake_offline() might sleep, we don't need
+		 * the device anymore. See virtio_mem_remove() how races
 		 * between memory onlining and device removal are handled.
 		 */
 		rcu_read_unlock();
 
-		virtio_mem_online_page(vm, page, order);
+		if (do_online)
+			generic_online_page(page, order);
+		else
+			virtio_mem_set_fake_offline(PFN_DOWN(addr), 1 << order,
+						    false);
 		return;
 	}
 	rcu_read_unlock();
@@ -1960,7 +1865,7 @@ static int virtio_mem_sbm_unplug_sb_online(struct virtio_mem *vm,
 	start_pfn = PFN_DOWN(virtio_mem_mb_id_to_phys(mb_id) +
 			     sb_id * vm->sbm.sb_size);
 
-	rc = virtio_mem_fake_offline(vm, start_pfn, nr_pages);
+	rc = virtio_mem_fake_offline(start_pfn, nr_pages);
 	if (rc)
 		return rc;
 
@@ -2032,10 +1937,20 @@ static int virtio_mem_sbm_unplug_any_sb_online(struct virtio_mem *vm,
 	}
 
 unplugged:
-	rc = virtio_mem_sbm_try_remove_unplugged_mb(vm, mb_id);
-	if (rc)
-		vm->sbm.have_unplugged_mb = 1;
-	/* Ignore errors, this is not critical. We'll retry later. */
+	/*
+	 * Once all subblocks of a memory block were unplugged, offline and
+	 * remove it. This will usually not fail, as no memory is in use
+	 * anymore - however some other notifiers might NACK the request.
+	 */
+	if (virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb)) {
+		mutex_unlock(&vm->hotplug_mutex);
+		rc = virtio_mem_sbm_offline_and_remove_mb(vm, mb_id);
+		mutex_lock(&vm->hotplug_mutex);
+		if (!rc)
+			virtio_mem_sbm_set_mb_state(vm, mb_id,
+						    VIRTIO_MEM_SBM_MB_UNUSED);
+	}
+
 	return 0;
 }
 
@@ -2144,32 +2059,38 @@ static int virtio_mem_bbm_offline_remove_and_unplug_bb(struct virtio_mem *vm,
 			 VIRTIO_MEM_BBM_BB_ADDED))
 		return -EINVAL;
 
-	/*
-	 * Start by fake-offlining all memory. Once we marked the device
-	 * block as fake-offline, all newly onlined memory will
-	 * automatically be kept fake-offline. Protect from concurrent
-	 * onlining/offlining until we have a consistent state.
-	 */
-	mutex_lock(&vm->hotplug_mutex);
-	virtio_mem_bbm_set_bb_state(vm, bb_id, VIRTIO_MEM_BBM_BB_FAKE_OFFLINE);
+	if (bbm_safe_unplug) {
+		/*
+		 * Start by fake-offlining all memory. Once we marked the device
+		 * block as fake-offline, all newly onlined memory will
+		 * automatically be kept fake-offline. Protect from concurrent
+		 * onlining/offlining until we have a consistent state.
+		 */
+		mutex_lock(&vm->hotplug_mutex);
+		virtio_mem_bbm_set_bb_state(vm, bb_id,
+					    VIRTIO_MEM_BBM_BB_FAKE_OFFLINE);
 
-	for (pfn = start_pfn; pfn < end_pfn; pfn += PAGES_PER_SECTION) {
-		page = pfn_to_online_page(pfn);
-		if (!page)
-			continue;
+		for (pfn = start_pfn; pfn < end_pfn; pfn += PAGES_PER_SECTION) {
+			page = pfn_to_online_page(pfn);
+			if (!page)
+				continue;
 
-		rc = virtio_mem_fake_offline(vm, pfn, PAGES_PER_SECTION);
-		if (rc) {
-			end_pfn = pfn;
-			goto rollback;
+			rc = virtio_mem_fake_offline(pfn, PAGES_PER_SECTION);
+			if (rc) {
+				end_pfn = pfn;
+				goto rollback_safe_unplug;
+			}
 		}
+		mutex_unlock(&vm->hotplug_mutex);
 	}
-	mutex_unlock(&vm->hotplug_mutex);
 
 	rc = virtio_mem_bbm_offline_and_remove_bb(vm, bb_id);
 	if (rc) {
-		mutex_lock(&vm->hotplug_mutex);
-		goto rollback;
+		if (bbm_safe_unplug) {
+			mutex_lock(&vm->hotplug_mutex);
+			goto rollback_safe_unplug;
+		}
+		return rc;
 	}
 
 	rc = virtio_mem_bbm_unplug_bb(vm, bb_id);
@@ -2181,7 +2102,7 @@ static int virtio_mem_bbm_offline_remove_and_unplug_bb(struct virtio_mem *vm,
 					    VIRTIO_MEM_BBM_BB_UNUSED);
 	return rc;
 
-rollback:
+rollback_safe_unplug:
 	for (pfn = start_pfn; pfn < end_pfn; pfn += PAGES_PER_SECTION) {
 		page = pfn_to_online_page(pfn);
 		if (!page)
@@ -2287,13 +2208,12 @@ static int virtio_mem_unplug_request(struct virtio_mem *vm, uint64_t diff)
 
 /*
  * Try to unplug all blocks that couldn't be unplugged before, for example,
- * because the hypervisor was busy. Further, offline and remove any memory
- * blocks where we previously failed.
+ * because the hypervisor was busy.
  */
-static int virtio_mem_cleanup_pending_mb(struct virtio_mem *vm)
+static int virtio_mem_unplug_pending_mb(struct virtio_mem *vm)
 {
 	unsigned long id;
-	int rc = 0;
+	int rc;
 
 	if (!vm->in_sbm) {
 		virtio_mem_bbm_for_each_bb(vm, id,
@@ -2315,27 +2235,6 @@ static int virtio_mem_cleanup_pending_mb(struct virtio_mem *vm)
 					    VIRTIO_MEM_SBM_MB_UNUSED);
 	}
 
-	if (!vm->sbm.have_unplugged_mb)
-		return 0;
-
-	/*
-	 * Let's retry (offlining and) removing completely unplugged Linux
-	 * memory blocks.
-	 */
-	vm->sbm.have_unplugged_mb = false;
-
-	mutex_lock(&vm->hotplug_mutex);
-	virtio_mem_sbm_for_each_mb(vm, id, VIRTIO_MEM_SBM_MB_MOVABLE_PARTIAL)
-		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id);
-	virtio_mem_sbm_for_each_mb(vm, id, VIRTIO_MEM_SBM_MB_KERNEL_PARTIAL)
-		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id);
-	virtio_mem_sbm_for_each_mb(vm, id, VIRTIO_MEM_SBM_MB_OFFLINE_PARTIAL)
-		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id);
-	mutex_unlock(&vm->hotplug_mutex);
-
-	if (rc)
-		vm->sbm.have_unplugged_mb = true;
-	/* Ignore errors, this is not critical. We'll retry later. */
 	return 0;
 }
 
@@ -2393,12 +2292,6 @@ static void virtio_mem_run_wq(struct work_struct *work)
 	uint64_t diff;
 	int rc;
 
-	if (unlikely(vm->in_kdump)) {
-		dev_warn_once(&vm->vdev->dev,
-			     "unexpected workqueue run in kdump kernel\n");
-		return;
-	}
-
 	hrtimer_cancel(&vm->retry_timer);
 
 	if (vm->broken)
@@ -2417,9 +2310,9 @@ retry:
 		virtio_mem_refresh_config(vm);
 	}
 
-	/* Cleanup any leftovers from previous runs */
+	/* Unplug any leftovers from previous runs */
 	if (!rc)
-		rc = virtio_mem_cleanup_pending_mb(vm);
+		rc = virtio_mem_unplug_pending_mb(vm);
 
 	if (!rc && vm->requested_size != vm->plugged_size) {
 		if (vm->requested_size > vm->plugged_size) {
@@ -2430,13 +2323,6 @@ retry:
 			rc = virtio_mem_unplug_request(vm, diff);
 		}
 	}
-
-	/*
-	 * Keep retrying to offline and remove completely unplugged Linux
-	 * memory blocks.
-	 */
-	if (!rc && vm->in_sbm && vm->sbm.have_unplugged_mb)
-		rc = -EBUSY;
 
 	switch (rc) {
 	case 0:
@@ -2507,11 +2393,41 @@ static int virtio_mem_init_vq(struct virtio_mem *vm)
 	return 0;
 }
 
-static int virtio_mem_init_hotplug(struct virtio_mem *vm)
+static int virtio_mem_init(struct virtio_mem *vm)
 {
 	const struct range pluggable_range = mhp_get_pluggable_range(true);
-	uint64_t unit_pages, sb_size, addr;
-	int rc;
+	uint64_t sb_size, addr;
+	uint16_t node_id;
+
+	if (!vm->vdev->config->get) {
+		dev_err(&vm->vdev->dev, "config access disabled\n");
+		return -EINVAL;
+	}
+
+	/*
+	 * We don't want to (un)plug or reuse any memory when in kdump. The
+	 * memory is still accessible (but not mapped).
+	 */
+	if (is_kdump_kernel()) {
+		dev_warn(&vm->vdev->dev, "disabled in kdump kernel\n");
+		return -EBUSY;
+	}
+
+	/* Fetch all properties that can't change. */
+	virtio_cread_le(vm->vdev, struct virtio_mem_config, plugged_size,
+			&vm->plugged_size);
+	virtio_cread_le(vm->vdev, struct virtio_mem_config, block_size,
+			&vm->device_block_size);
+	virtio_cread_le(vm->vdev, struct virtio_mem_config, node_id,
+			&node_id);
+	vm->nid = virtio_mem_translate_node_id(vm, node_id);
+	virtio_cread_le(vm->vdev, struct virtio_mem_config, addr, &vm->addr);
+	virtio_cread_le(vm->vdev, struct virtio_mem_config, region_size,
+			&vm->region_size);
+
+	/* Determine the nid for the device based on the lowest address. */
+	if (vm->nid == NUMA_NO_NODE)
+		vm->nid = memory_add_physaddr_to_nid(vm->addr);
 
 	/* bad device setup - warn only */
 	if (!IS_ALIGNED(vm->addr, memory_block_size_bytes()))
@@ -2530,10 +2446,15 @@ static int virtio_mem_init_hotplug(struct virtio_mem *vm)
 				      VIRTIO_MEM_DEFAULT_OFFLINE_THRESHOLD);
 
 	/*
-	 * alloc_contig_range() works reliably with pageblock
-	 * granularity on ZONE_NORMAL, use pageblock_nr_pages.
+	 * We want subblocks to span at least MAX_ORDER_NR_PAGES and
+	 * pageblock_nr_pages pages. This:
+	 * - Simplifies our page onlining code (virtio_mem_online_page_cb)
+	 *   and fake page onlining code (virtio_mem_fake_online).
+	 * - Is required for now for alloc_contig_range() to work reliably -
+	 *   it doesn't properly handle smaller granularity on ZONE_NORMAL.
 	 */
-	sb_size = PAGE_SIZE * pageblock_nr_pages;
+	sb_size = max_t(uint64_t, MAX_ORDER_NR_PAGES,
+			pageblock_nr_pages) * PAGE_SIZE;
 	sb_size = max_t(uint64_t, vm->device_block_size, sb_size);
 
 	if (sb_size < memory_block_size_bytes() && !force_bbm) {
@@ -2576,6 +2497,10 @@ static int virtio_mem_init_hotplug(struct virtio_mem *vm)
 					      vm->offline_threshold);
 	}
 
+	dev_info(&vm->vdev->dev, "start address: 0x%llx", vm->addr);
+	dev_info(&vm->vdev->dev, "region size: 0x%llx", vm->region_size);
+	dev_info(&vm->vdev->dev, "device block size: 0x%llx",
+		 (unsigned long long)vm->device_block_size);
 	dev_info(&vm->vdev->dev, "memory block size: 0x%lx",
 		 memory_block_size_bytes());
 	if (vm->in_sbm)
@@ -2584,170 +2509,10 @@ static int virtio_mem_init_hotplug(struct virtio_mem *vm)
 	else
 		dev_info(&vm->vdev->dev, "big block size: 0x%llx",
 			 (unsigned long long)vm->bbm.bb_size);
-
-	/* create the parent resource for all memory */
-	rc = virtio_mem_create_resource(vm);
-	if (rc)
-		return rc;
-
-	/* use a single dynamic memory group to cover the whole memory device */
-	if (vm->in_sbm)
-		unit_pages = PHYS_PFN(memory_block_size_bytes());
-	else
-		unit_pages = PHYS_PFN(vm->bbm.bb_size);
-	rc = memory_group_register_dynamic(vm->nid, unit_pages);
-	if (rc < 0)
-		goto out_del_resource;
-	vm->mgid = rc;
-
-	/*
-	 * If we still have memory plugged, we have to unplug all memory first.
-	 * Registering our parent resource makes sure that this memory isn't
-	 * actually in use (e.g., trying to reload the driver).
-	 */
-	if (vm->plugged_size) {
-		vm->unplug_all_required = true;
-		dev_info(&vm->vdev->dev, "unplugging all memory is required\n");
-	}
-
-	/* register callbacks */
-	vm->memory_notifier.notifier_call = virtio_mem_memory_notifier_cb;
-	rc = register_memory_notifier(&vm->memory_notifier);
-	if (rc)
-		goto out_unreg_group;
-	rc = register_virtio_mem_device(vm);
-	if (rc)
-		goto out_unreg_mem;
-
-	return 0;
-out_unreg_mem:
-	unregister_memory_notifier(&vm->memory_notifier);
-out_unreg_group:
-	memory_group_unregister(vm->mgid);
-out_del_resource:
-	virtio_mem_delete_resource(vm);
-	return rc;
-}
-
-#ifdef CONFIG_PROC_VMCORE
-static int virtio_mem_send_state_request(struct virtio_mem *vm, uint64_t addr,
-					 uint64_t size)
-{
-	const uint64_t nb_vm_blocks = size / vm->device_block_size;
-	const struct virtio_mem_req req = {
-		.type = cpu_to_virtio16(vm->vdev, VIRTIO_MEM_REQ_STATE),
-		.u.state.addr = cpu_to_virtio64(vm->vdev, addr),
-		.u.state.nb_blocks = cpu_to_virtio16(vm->vdev, nb_vm_blocks),
-	};
-	int rc = -ENOMEM;
-
-	dev_dbg(&vm->vdev->dev, "requesting state: 0x%llx - 0x%llx\n", addr,
-		addr + size - 1);
-
-	switch (virtio_mem_send_request(vm, &req)) {
-	case VIRTIO_MEM_RESP_ACK:
-		return virtio16_to_cpu(vm->vdev, vm->resp.u.state.state);
-	case VIRTIO_MEM_RESP_ERROR:
-		rc = -EINVAL;
-		break;
-	default:
-		break;
-	}
-
-	dev_dbg(&vm->vdev->dev, "requesting state failed: %d\n", rc);
-	return rc;
-}
-
-static bool virtio_mem_vmcore_pfn_is_ram(struct vmcore_cb *cb,
-					 unsigned long pfn)
-{
-	struct virtio_mem *vm = container_of(cb, struct virtio_mem,
-					     vmcore_cb);
-	uint64_t addr = PFN_PHYS(pfn);
-	bool is_ram;
-	int rc;
-
-	if (!virtio_mem_contains_range(vm, addr, PAGE_SIZE))
-		return true;
-	if (!vm->plugged_size)
-		return false;
-
-	/*
-	 * We have to serialize device requests and access to the information
-	 * about the block queried last.
-	 */
-	mutex_lock(&vm->hotplug_mutex);
-
-	addr = ALIGN_DOWN(addr, vm->device_block_size);
-	if (addr != vm->last_block_addr) {
-		rc = virtio_mem_send_state_request(vm, addr,
-						   vm->device_block_size);
-		/* On any kind of error, we're going to signal !ram. */
-		if (rc == VIRTIO_MEM_STATE_PLUGGED)
-			vm->last_block_plugged = true;
-		else
-			vm->last_block_plugged = false;
-		vm->last_block_addr = addr;
-	}
-
-	is_ram = vm->last_block_plugged;
-	mutex_unlock(&vm->hotplug_mutex);
-	return is_ram;
-}
-#endif /* CONFIG_PROC_VMCORE */
-
-static int virtio_mem_init_kdump(struct virtio_mem *vm)
-{
-#ifdef CONFIG_PROC_VMCORE
-	dev_info(&vm->vdev->dev, "memory hot(un)plug disabled in kdump kernel\n");
-	vm->vmcore_cb.pfn_is_ram = virtio_mem_vmcore_pfn_is_ram;
-	register_vmcore_cb(&vm->vmcore_cb);
-	return 0;
-#else /* CONFIG_PROC_VMCORE */
-	dev_warn(&vm->vdev->dev, "disabled in kdump kernel without vmcore\n");
-	return -EBUSY;
-#endif /* CONFIG_PROC_VMCORE */
-}
-
-static int virtio_mem_init(struct virtio_mem *vm)
-{
-	uint16_t node_id;
-
-	if (!vm->vdev->config->get) {
-		dev_err(&vm->vdev->dev, "config access disabled\n");
-		return -EINVAL;
-	}
-
-	/* Fetch all properties that can't change. */
-	virtio_cread_le(vm->vdev, struct virtio_mem_config, plugged_size,
-			&vm->plugged_size);
-	virtio_cread_le(vm->vdev, struct virtio_mem_config, block_size,
-			&vm->device_block_size);
-	virtio_cread_le(vm->vdev, struct virtio_mem_config, node_id,
-			&node_id);
-	vm->nid = virtio_mem_translate_node_id(vm, node_id);
-	virtio_cread_le(vm->vdev, struct virtio_mem_config, addr, &vm->addr);
-	virtio_cread_le(vm->vdev, struct virtio_mem_config, region_size,
-			&vm->region_size);
-
-	/* Determine the nid for the device based on the lowest address. */
-	if (vm->nid == NUMA_NO_NODE)
-		vm->nid = memory_add_physaddr_to_nid(vm->addr);
-
-	dev_info(&vm->vdev->dev, "start address: 0x%llx", vm->addr);
-	dev_info(&vm->vdev->dev, "region size: 0x%llx", vm->region_size);
-	dev_info(&vm->vdev->dev, "device block size: 0x%llx",
-		 (unsigned long long)vm->device_block_size);
 	if (vm->nid != NUMA_NO_NODE && IS_ENABLED(CONFIG_NUMA))
 		dev_info(&vm->vdev->dev, "nid: %d", vm->nid);
 
-	/*
-	 * We don't want to (un)plug or reuse any memory when in kdump. The
-	 * memory is still accessible (but not exposed to Linux).
-	 */
-	if (vm->in_kdump)
-		return virtio_mem_init_kdump(vm);
-	return virtio_mem_init_hotplug(vm);
+	return 0;
 }
 
 static int virtio_mem_create_resource(struct virtio_mem *vm)
@@ -2761,10 +2526,8 @@ static int virtio_mem_create_resource(struct virtio_mem *vm)
 	if (!name)
 		return -ENOMEM;
 
-	/* Disallow mapping device memory via /dev/mem completely. */
 	vm->parent_resource = __request_mem_region(vm->addr, vm->region_size,
-						   name, IORESOURCE_SYSTEM_RAM |
-						   IORESOURCE_EXCLUSIVE);
+						   name, IORESOURCE_SYSTEM_RAM);
 	if (!vm->parent_resource) {
 		kfree(name);
 		dev_warn(&vm->vdev->dev, "could not reserve device region\n");
@@ -2809,6 +2572,7 @@ static bool virtio_mem_has_memory_added(struct virtio_mem *vm)
 static int virtio_mem_probe(struct virtio_device *vdev)
 {
 	struct virtio_mem *vm;
+	uint64_t unit_pages;
 	int rc;
 
 	BUILD_BUG_ON(sizeof(struct virtio_mem_req) != 24);
@@ -2827,7 +2591,6 @@ static int virtio_mem_probe(struct virtio_device *vdev)
 	hrtimer_init(&vm->retry_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	vm->retry_timer.function = virtio_mem_timer_expired;
 	vm->retry_timer_ms = VIRTIO_MEM_RETRY_TIMER_MIN_MS;
-	vm->in_kdump = is_kdump_kernel();
 
 	/* register the virtqueue */
 	rc = virtio_mem_init_vq(vm);
@@ -2839,15 +2602,53 @@ static int virtio_mem_probe(struct virtio_device *vdev)
 	if (rc)
 		goto out_del_vq;
 
+	/* create the parent resource for all memory */
+	rc = virtio_mem_create_resource(vm);
+	if (rc)
+		goto out_del_vq;
+
+	/* use a single dynamic memory group to cover the whole memory device */
+	if (vm->in_sbm)
+		unit_pages = PHYS_PFN(memory_block_size_bytes());
+	else
+		unit_pages = PHYS_PFN(vm->bbm.bb_size);
+	rc = memory_group_register_dynamic(vm->nid, unit_pages);
+	if (rc < 0)
+		goto out_del_resource;
+	vm->mgid = rc;
+
+	/*
+	 * If we still have memory plugged, we have to unplug all memory first.
+	 * Registering our parent resource makes sure that this memory isn't
+	 * actually in use (e.g., trying to reload the driver).
+	 */
+	if (vm->plugged_size) {
+		vm->unplug_all_required = true;
+		dev_info(&vm->vdev->dev, "unplugging all memory is required\n");
+	}
+
+	/* register callbacks */
+	vm->memory_notifier.notifier_call = virtio_mem_memory_notifier_cb;
+	rc = register_memory_notifier(&vm->memory_notifier);
+	if (rc)
+		goto out_unreg_group;
+	rc = register_virtio_mem_device(vm);
+	if (rc)
+		goto out_unreg_mem;
+
 	virtio_device_ready(vdev);
 
 	/* trigger a config update to start processing the requested_size */
-	if (!vm->in_kdump) {
-		atomic_set(&vm->config_changed, 1);
-		queue_work(system_freezable_wq, &vm->wq);
-	}
+	atomic_set(&vm->config_changed, 1);
+	queue_work(system_freezable_wq, &vm->wq);
 
 	return 0;
+out_unreg_mem:
+	unregister_memory_notifier(&vm->memory_notifier);
+out_unreg_group:
+	memory_group_unregister(vm->mgid);
+out_del_resource:
+	virtio_mem_delete_resource(vm);
 out_del_vq:
 	vdev->config->del_vqs(vdev);
 out_free_vm:
@@ -2857,8 +2658,9 @@ out_free_vm:
 	return rc;
 }
 
-static void virtio_mem_deinit_hotplug(struct virtio_mem *vm)
+static void virtio_mem_remove(struct virtio_device *vdev)
 {
+	struct virtio_mem *vm = vdev->priv;
 	unsigned long mb_id;
 	int rc;
 
@@ -2905,8 +2707,7 @@ static void virtio_mem_deinit_hotplug(struct virtio_mem *vm)
 	 * away. Warn at least.
 	 */
 	if (virtio_mem_has_memory_added(vm)) {
-		dev_warn(&vm->vdev->dev,
-			 "device still has system memory added\n");
+		dev_warn(&vdev->dev, "device still has system memory added\n");
 	} else {
 		virtio_mem_delete_resource(vm);
 		kfree_const(vm->resource_name);
@@ -2920,26 +2721,9 @@ static void virtio_mem_deinit_hotplug(struct virtio_mem *vm)
 	} else {
 		vfree(vm->bbm.bb_states);
 	}
-}
-
-static void virtio_mem_deinit_kdump(struct virtio_mem *vm)
-{
-#ifdef CONFIG_PROC_VMCORE
-	unregister_vmcore_cb(&vm->vmcore_cb);
-#endif /* CONFIG_PROC_VMCORE */
-}
-
-static void virtio_mem_remove(struct virtio_device *vdev)
-{
-	struct virtio_mem *vm = vdev->priv;
-
-	if (vm->in_kdump)
-		virtio_mem_deinit_kdump(vm);
-	else
-		virtio_mem_deinit_hotplug(vm);
 
 	/* reset the device and cleanup the queues */
-	virtio_reset_device(vdev);
+	vdev->config->reset(vdev);
 	vdev->config->del_vqs(vdev);
 
 	kfree(vm);
@@ -2949,9 +2733,6 @@ static void virtio_mem_remove(struct virtio_device *vdev)
 static void virtio_mem_config_changed(struct virtio_device *vdev)
 {
 	struct virtio_mem *vm = vdev->priv;
-
-	if (unlikely(vm->in_kdump))
-		return;
 
 	atomic_set(&vm->config_changed, 1);
 	virtio_mem_retry(vm);
@@ -2978,7 +2759,6 @@ static unsigned int virtio_mem_features[] = {
 #if defined(CONFIG_NUMA) && defined(CONFIG_ACPI_NUMA)
 	VIRTIO_MEM_F_ACPI_PXM,
 #endif
-	VIRTIO_MEM_F_UNPLUGGED_INACCESSIBLE,
 };
 
 static const struct virtio_device_id virtio_mem_id_table[] = {

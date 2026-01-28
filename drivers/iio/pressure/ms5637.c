@@ -142,7 +142,8 @@ static const struct iio_info ms5637_info = {
 	.attrs = &ms5637_attribute_group,
 };
 
-static int ms5637_probe(struct i2c_client *client)
+static int ms5637_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	const struct ms_tp_data *data;
 	struct ms_tp_dev *dev_data;
@@ -158,7 +159,10 @@ static int ms5637_probe(struct i2c_client *client)
 		return -EOPNOTSUPP;
 	}
 
-	data = i2c_get_match_data(client);
+	if (id)
+		data = (const struct ms_tp_data *)id->driver_data;
+	else
+		data = device_get_match_data(&client->dev);
 	if (!data)
 		return -EINVAL;
 
@@ -248,4 +252,3 @@ MODULE_DESCRIPTION("Measurement-Specialties ms5637 temperature & pressure driver
 MODULE_AUTHOR("William Markezana <william.markezana@meas-spec.com>");
 MODULE_AUTHOR("Ludovic Tancerel <ludovic.tancerel@maplehightech.com>");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_MEAS_SPEC_SENSORS);

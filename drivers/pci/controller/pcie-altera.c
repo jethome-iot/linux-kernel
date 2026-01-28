@@ -9,10 +9,11 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/irqchip/chained_irq.h>
-#include <linux/irqdomain.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
 #include <linux/of_pci.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
@@ -509,8 +510,10 @@ static int altera_pcie_cfg_read(struct pci_bus *bus, unsigned int devfn,
 	if (altera_pcie_hide_rc_bar(bus, devfn, where))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 
-	if (!altera_pcie_valid_device(pcie, bus, PCI_SLOT(devfn)))
+	if (!altera_pcie_valid_device(pcie, bus, PCI_SLOT(devfn))) {
+		*value = 0xffffffff;
 		return PCIBIOS_DEVICE_NOT_FOUND;
+	}
 
 	return _altera_pcie_cfg_read(pcie, bus->number, devfn, where, size,
 				     value);
@@ -764,7 +767,7 @@ static int altera_pcie_probe(struct platform_device *pdev)
 	struct altera_pcie *pcie;
 	struct pci_host_bridge *bridge;
 	int ret;
-	const struct altera_pcie_data *data;
+	const struct of_device_id *match;
 
 	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*pcie));
 	if (!bridge)
@@ -774,11 +777,11 @@ static int altera_pcie_probe(struct platform_device *pdev)
 	pcie->pdev = pdev;
 	platform_set_drvdata(pdev, pcie);
 
-	data = of_device_get_match_data(&pdev->dev);
-	if (!data)
+	match = of_match_device(altera_pcie_of_match, &pdev->dev);
+	if (!match)
 		return -ENODEV;
 
-	pcie->pcie_data = data;
+	pcie->pcie_data = match->data;
 
 	ret = altera_pcie_parse_dt(pcie);
 	if (ret) {
@@ -805,7 +808,7 @@ static int altera_pcie_probe(struct platform_device *pdev)
 	return pci_host_probe(bridge);
 }
 
-static void altera_pcie_remove(struct platform_device *pdev)
+static int altera_pcie_remove(struct platform_device *pdev)
 {
 	struct altera_pcie *pcie = platform_get_drvdata(pdev);
 	struct pci_host_bridge *bridge = pci_host_bridge_from_priv(pcie);
@@ -813,11 +816,13 @@ static void altera_pcie_remove(struct platform_device *pdev)
 	pci_stop_root_bus(bridge->bus);
 	pci_remove_root_bus(bridge->bus);
 	altera_pcie_irq_teardown(pcie);
+
+	return 0;
 }
 
 static struct platform_driver altera_pcie_driver = {
 	.probe		= altera_pcie_probe,
-	.remove_new	= altera_pcie_remove,
+	.remove		= altera_pcie_remove,
 	.driver = {
 		.name	= "altera-pcie",
 		.of_match_table = altera_pcie_of_match,

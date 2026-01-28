@@ -986,7 +986,7 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 	__u8 cap_type;
 	int ret;
 
-	bos = kzalloc(sizeof(*bos), GFP_KERNEL);
+	bos = kzalloc(sizeof(struct usb_bos_descriptor), GFP_KERNEL);
 	if (!bos)
 		return -ENOMEM;
 
@@ -1007,7 +1007,7 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 	if (total_len < length)
 		return -EINVAL;
 
-	dev->bos = kzalloc(sizeof(*dev->bos), GFP_KERNEL);
+	dev->bos = kzalloc(sizeof(struct usb_host_bos), GFP_KERNEL);
 	if (!dev->bos)
 		return -ENOMEM;
 
@@ -1051,6 +1051,9 @@ int usb_get_bos_descriptor(struct usb_device *dev)
 		}
 
 		switch (cap_type) {
+		case USB_CAP_TYPE_WIRELESS_USB:
+			/* Wireless USB cap descriptor is handled by wusb */
+			break;
 		case USB_CAP_TYPE_EXT:
 			dev->bos->ext_cap =
 				(struct usb_ext_cap_descriptor *)buffer;

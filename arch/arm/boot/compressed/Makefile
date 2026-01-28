@@ -13,6 +13,7 @@ ifeq ($(CONFIG_DEBUG_UNCOMPRESS),y)
 OBJS	+= debug.o
 AFLAGS_head.o += -DDEBUG
 endif
+FONTC	= $(srctree)/lib/fonts/font_acorn_8x8.c
 
 # string library code (-Os is enforced to keep it much smaller)
 OBJS		+= string.o
@@ -27,7 +28,6 @@ KASAN_SANITIZE		:= n
 
 # Prevents link failures: __sanitizer_cov_trace_pc() is not linked in.
 KCOV_INSTRUMENT		:= n
-UBSAN_SANITIZE		:= n
 
 #
 # Architecture dependencies
@@ -93,21 +93,26 @@ ifeq ($(CONFIG_USE_OF),y)
 OBJS	+= $(libfdt_objs) fdt_check_mem_start.o
 endif
 
-OBJS	+= lib1funcs.o ashldi3.o bswapsdi2.o
+# -fstack-protector-strong triggers protection checks in this code,
+# but it is being used too early to link to meaningful stack_chk logic.
+$(foreach o, $(libfdt_objs) atags_to_fdt.o fdt_check_mem_start.o, \
+	$(eval CFLAGS_$(o) := -I $(srctree)/scripts/dtc/libfdt -fno-stack-protector))
 
 targets       := vmlinux vmlinux.lds piggy_data piggy.o \
+		 lib1funcs.o ashldi3.o bswapsdi2.o \
 		 head.o $(OBJS)
+
+clean-files += lib1funcs.S ashldi3.S bswapsdi2.S hyp-stub.S
 
 KBUILD_CFLAGS += -DDISABLE_BRANCH_PROFILING
 
 ccflags-y := -fpic $(call cc-option,-mno-single-pic-base,) -fno-builtin \
-	     -I$(srctree)/scripts/dtc/libfdt -fno-stack-protector \
 	     -I$(obj) $(DISABLE_ARM_SSP_PER_TASK_PLUGIN)
 ccflags-remove-$(CONFIG_FUNCTION_TRACER) += -pg
 asflags-y := -DZIMAGE
 
 # Supply kernel BSS size to the decompressor via a linker symbol.
-KBSS_SZ = $(shell echo $$(($$($(NM) vmlinux | \
+KBSS_SZ = $(shell echo $$(($$($(NM) $(obj)/../../../../vmlinux | \
 		sed -n -e 's/^\([^ ]*\) [ABD] __bss_start$$/-0x\1/p' \
 		       -e 's/^\([^ ]*\) [ABD] __bss_stop$$/+0x\1/p') )) )
 LDFLAGS_vmlinux = --defsym _kernel_bss_size=$(KBSS_SZ)
@@ -124,10 +129,28 @@ LDFLAGS_vmlinux += --no-undefined
 LDFLAGS_vmlinux += -X
 # Report orphan sections
 ifdef CONFIG_LD_ORPHAN_WARN
-LDFLAGS_vmlinux += --orphan-handling=$(CONFIG_LD_ORPHAN_WARN_LEVEL)
+LDFLAGS_vmlinux += --orphan-handling=warn
 endif
 # Next argument is a linker script
 LDFLAGS_vmlinux += -T
+
+# For __aeabi_uidivmod
+lib1funcs = $(obj)/lib1funcs.o
+
+$(obj)/lib1funcs.S: $(srctree)/arch/$(SRCARCH)/lib/lib1funcs.S
+	$(call cmd,shipped)
+
+# For __aeabi_llsl
+ashldi3 = $(obj)/ashldi3.o
+
+$(obj)/ashldi3.S: $(srctree)/arch/$(SRCARCH)/lib/ashldi3.S
+	$(call cmd,shipped)
+
+# For __bswapsi2, __bswapdi2
+bswapsdi2 = $(obj)/bswapsdi2.o
+
+$(obj)/bswapsdi2.S: $(srctree)/arch/$(SRCARCH)/lib/bswapsdi2.S
+	$(call cmd,shipped)
 
 # We need to prevent any GOTOFF relocs being used with references
 # to symbols in the .bss section since we cannot relocate them
@@ -152,15 +175,81 @@ fi
 efi-obj-$(CONFIG_EFI_STUB) := $(objtree)/drivers/firmware/efi/libstub/lib.a
 
 $(obj)/vmlinux: $(obj)/vmlinux.lds $(obj)/$(HEAD) $(obj)/piggy.o \
-		$(addprefix $(obj)/, $(OBJS)) \
-		$(efi-obj-y) FORCE
+		$(addprefix $(obj)/, $(OBJS)) $(lib1funcs) $(ashldi3) \
+		$(bswapsdi2) $(efi-obj-y) FORCE
 	@$(check_for_multiple_zreladdr)
 	$(call if_changed,ld)
 	@$(check_for_bad_syms)
 
+ifneq ($(CONFIG_AMLOGIC_AMFC), )
+
+ifeq ($(srctree),)
+srctree := $(patsubst %/,%,$(dir $(CURDIR)))
+srctree := $(patsubst %/,%,$(dir $(srctree)))
+endif
+
+zstd_src := $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/debug.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/entropy_common.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/error_private.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/fse_decompress.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/pool.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/threading.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/xxhash.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/common/zstd_common.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/fse_compress.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/hist.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/huf_compress.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_compress.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_compress_literals.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_compress_sequences.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_compress_superblock.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_double_fast.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_fast.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_lazy.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_ldm.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstd_opt.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/compress/zstdmt_compress.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/decompress/huf_decompress.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/decompress/huf_decompress_amd64.S
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/decompress/zstd_ddict.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/decompress/zstd_decompress.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/decompress/zstd_decompress_block.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/dictBuilder/cover.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/dictBuilder/divsufsort.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/dictBuilder/fastcover.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/dictBuilder/zdict.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/legacy/zstd_v05.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/legacy/zstd_v06.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/legacy/zstd_v07.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/benchfn.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/benchzstd.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/datagen.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/dibio.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/fileio.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/timefn.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/util.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/zstdcli.c
+zstd_src += $(srctree)/common_drivers/drivers/amfc/zstd_tool/zstdcli_trace.c
+
+$(obj)/zstd:
+	$(HOSTCC) $(zstd_src) $(LDFLAGS) -o $@
+	cp -n $@ $(srctree)/
+
+$(obj)/piggy_data: $(obj)/../Image $(obj)/zstd FORCE
+	$(srctree)/zstd -a -19 $< -o $@
+else   # CONFIG_AMLOGIC_AMFC
 $(obj)/piggy_data: $(obj)/../Image FORCE
 	$(call if_changed,$(compress-y))
+endif  # CONFIG_AMLOGIC_AMFC
 
 $(obj)/piggy.o: $(obj)/piggy_data
 
 CFLAGS_font.o := -Dstatic=
+
+$(obj)/font.c: $(FONTC)
+	$(call cmd,shipped)
+
+AFLAGS_hyp-stub.o := -Wa,-march=armv7-a
+
+$(obj)/hyp-stub.S: $(srctree)/arch/$(SRCARCH)/kernel/hyp-stub.S
+	$(call cmd,shipped)

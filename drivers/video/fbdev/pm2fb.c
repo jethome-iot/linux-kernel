@@ -27,7 +27,6 @@
  *
  */
 
-#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -1492,7 +1491,6 @@ static int pm2fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 
 static const struct fb_ops pm2fb_ops = {
 	.owner		= THIS_MODULE,
-	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= pm2fb_check_var,
 	.fb_set_par	= pm2fb_set_par,
 	.fb_setcolreg	= pm2fb_setcolreg,
@@ -1503,7 +1501,6 @@ static const struct fb_ops pm2fb_ops = {
 	.fb_imageblit	= pm2fb_imageblit,
 	.fb_sync	= pm2fb_sync,
 	.fb_cursor	= pm2fb_cursor,
-	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 /*
@@ -1512,7 +1509,9 @@ static const struct fb_ops pm2fb_ops = {
 
 
 /**
- * pm2fb_probe - Initialise and allocate resource for PCI device.
+ * Device initialisation
+ *
+ * Initialise and allocate resource for PCI device.
  *
  * @pdev:	PCI device.
  * @id:		PCI device ID.
@@ -1523,10 +1522,6 @@ static int pm2fb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct fb_info *info;
 	int err;
 	int retval = -ENXIO;
-
-	err = aperture_remove_conflicting_pci_devices(pdev, "pm2fb");
-	if (err)
-		return err;
 
 	err = pci_enable_device(pdev);
 	if (err) {
@@ -1659,7 +1654,8 @@ static int pm2fb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	info->fbops		= &pm2fb_ops;
 	info->fix		= pm2fb_fix;
 	info->pseudo_palette	= default_par->palette;
-	info->flags		= FBINFO_HWACCEL_YPAN |
+	info->flags		= FBINFO_DEFAULT |
+				  FBINFO_HWACCEL_YPAN |
 				  FBINFO_HWACCEL_COPYAREA |
 				  FBINFO_HWACCEL_IMAGEBLIT |
 				  FBINFO_HWACCEL_FILLRECT;
@@ -1724,7 +1720,9 @@ static int pm2fb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 }
 
 /**
- * pm2fb_remove - Release all device resources.
+ * Device removal.
+ *
+ * Release all device resources.
  *
  * @pdev:	PCI device to clean up.
  */
@@ -1805,12 +1803,7 @@ static int __init pm2fb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;
-#endif
 
-	if (fb_modesetting_disabled("pm2fb"))
-		return -ENODEV;
-
-#ifndef MODULE
 	if (fb_get_options("pm2fb", &option))
 		return -ENODEV;
 	pm2fb_setup(option);

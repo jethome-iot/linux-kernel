@@ -7,7 +7,8 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: Xilinx ZynqMP Pinctrl
 
 maintainers:
-  - Sai Krishna Potthuri <sai.krishna.potthuri@amd.com>
+  - Sai Krishna Potthuri <lakshmi.sai.krishna.potthuri@xilinx.com>
+  - Rajan Vaja <rajan.vaja@xilinx.com>
 
 description: |
   Please refer to pinctrl-bindings.txt in this directory for details of the
@@ -31,7 +32,7 @@ properties:
     const: xlnx,zynqmp-pinctrl
 
 patternProperties:
-  '^(.*-)?(default|gpio-grp)$':
+  '^(.*-)?(default|gpio)$':
     type: object
     patternProperties:
       '^mux':
@@ -273,10 +274,6 @@ patternProperties:
           slew-rate:
             enum: [0, 1]
 
-          output-enable:
-            description:
-              This will internally disable the tri-state for MIO pins.
-
           drive-strength:
             description:
               Selects the drive strength for MIO pins, in mA.
@@ -292,9 +289,6 @@ patternProperties:
         additionalProperties: false
 
     additionalProperties: false
-
-allOf:
-  - $ref: pinctrl.yaml#
 
 required:
   - compatible

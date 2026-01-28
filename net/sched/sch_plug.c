@@ -161,6 +161,9 @@ static int plug_change(struct Qdisc *sch, struct nlattr *opt,
 	struct plug_sched_data *q = qdisc_priv(sch);
 	struct tc_plug_qopt *msg;
 
+	if (opt == NULL)
+		return -EINVAL;
+
 	msg = nla_data(opt);
 	if (nla_len(opt) < sizeof(*msg))
 		return -EINVAL;
@@ -226,4 +229,3 @@ static void __exit plug_module_exit(void)
 module_init(plug_module_init)
 module_exit(plug_module_exit)
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Qdisc to plug and unplug traffic via netlink control");

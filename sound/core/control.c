@@ -39,9 +39,6 @@ static LIST_HEAD(snd_control_compat_ioctls);
 #endif
 static struct snd_ctl_layer_ops *snd_ctl_layer;
 
-static int snd_ctl_remove_locked(struct snd_card *card,
-				 struct snd_kcontrol *kcontrol);
-
 static int snd_ctl_open(struct inode *inode, struct file *file)
 {
 	unsigned long flags;
@@ -388,14 +385,14 @@ static bool elem_id_matches(const struct snd_kcontrol *kctl,
 #define MULTIPLIER	37
 static unsigned long get_ctl_id_hash(const struct snd_ctl_elem_id *id)
 {
-	int i;
 	unsigned long h;
+	const unsigned char *p;
 
 	h = id->iface;
 	h = MULTIPLIER * h + id->device;
 	h = MULTIPLIER * h + id->subdevice;
-	for (i = 0; i < SNDRV_CTL_ELEM_ID_NAME_MAXLEN && id->name[i]; i++)
-		h = MULTIPLIER * h + id->name[i];
+	for (p = id->name; *p; p++)
+		h = MULTIPLIER * h + *p;
 	h = MULTIPLIER * h + id->index;
 	h &= LONG_MAX;
 	return h;
@@ -469,13 +466,11 @@ static int __snd_ctl_add_replace(struct snd_card *card,
 	struct snd_kcontrol *old;
 	int err;
 
-	lockdep_assert_held_write(&card->controls_rwsem);
-
 	id = kcontrol->id;
 	if (id.index > UINT_MAX - kcontrol->count)
 		return -EINVAL;
 
-	old = snd_ctl_find_id_locked(card, &id);
+	old = snd_ctl_find_id(card, &id);
 	if (!old) {
 		if (mode == CTL_REPLACE)
 			return -EINVAL;
@@ -488,7 +483,7 @@ static int __snd_ctl_add_replace(struct snd_card *card,
 			return -EBUSY;
 		}
 
-		err = snd_ctl_remove_locked(card, old);
+		err = snd_ctl_remove(card, old);
 		if (err < 0)
 			return err;
 	}
@@ -580,8 +575,6 @@ static int __snd_ctl_remove(struct snd_card *card,
 {
 	unsigned int idx;
 
-	lockdep_assert_held_write(&card->controls_rwsem);
-
 	if (snd_BUG_ON(!card || !kcontrol))
 		return -EINVAL;
 	list_del(&kcontrol->list);
@@ -596,32 +589,20 @@ static int __snd_ctl_remove(struct snd_card *card,
 	return 0;
 }
 
-static inline int snd_ctl_remove_locked(struct snd_card *card,
-					struct snd_kcontrol *kcontrol)
-{
-	return __snd_ctl_remove(card, kcontrol, true);
-}
-
 /**
  * snd_ctl_remove - remove the control from the card and release it
  * @card: the card instance
  * @kcontrol: the control instance to remove
  *
  * Removes the control from the card and then releases the instance.
- * You don't need to call snd_ctl_free_one().
+ * You don't need to call snd_ctl_free_one(). You must be in
+ * the write lock - down_write(&card->controls_rwsem).
  *
  * Return: 0 if successful, or a negative error code on failure.
- *
- * Note that this function takes card->controls_rwsem lock internally.
  */
 int snd_ctl_remove(struct snd_card *card, struct snd_kcontrol *kcontrol)
 {
-	int ret;
-
-	down_write(&card->controls_rwsem);
-	ret = snd_ctl_remove_locked(card, kcontrol);
-	up_write(&card->controls_rwsem);
-	return ret;
+	return __snd_ctl_remove(card, kcontrol, true);
 }
 EXPORT_SYMBOL(snd_ctl_remove);
 
@@ -641,12 +622,12 @@ int snd_ctl_remove_id(struct snd_card *card, struct snd_ctl_elem_id *id)
 	int ret;
 
 	down_write(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, id);
+	kctl = snd_ctl_find_id(card, id);
 	if (kctl == NULL) {
 		up_write(&card->controls_rwsem);
 		return -ENOENT;
 	}
-	ret = snd_ctl_remove_locked(card, kctl);
+	ret = snd_ctl_remove(card, kctl);
 	up_write(&card->controls_rwsem);
 	return ret;
 }
@@ -670,7 +651,7 @@ static int snd_ctl_remove_user_ctl(struct snd_ctl_file * file,
 	int idx, ret;
 
 	down_write(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, id);
+	kctl = snd_ctl_find_id(card, id);
 	if (kctl == NULL) {
 		ret = -ENOENT;
 		goto error;
@@ -684,7 +665,7 @@ static int snd_ctl_remove_user_ctl(struct snd_ctl_file * file,
 			ret = -EBUSY;
 			goto error;
 		}
-	ret = snd_ctl_remove_locked(card, kctl);
+	ret = snd_ctl_remove(card, kctl);
 error:
 	up_write(&card->controls_rwsem);
 	return ret;
@@ -711,7 +692,7 @@ int snd_ctl_activate_id(struct snd_card *card, struct snd_ctl_elem_id *id,
 	int ret;
 
 	down_write(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, id);
+	kctl = snd_ctl_find_id(card, id);
 	if (kctl == NULL) {
 		ret = -ENOENT;
 		goto unlock;
@@ -749,61 +730,28 @@ EXPORT_SYMBOL_GPL(snd_ctl_activate_id);
  * Finds the control with the old id from the card, and replaces the
  * id with the new one.
  *
- * The function tries to keep the already assigned numid while replacing
- * the rest.
- *
- * Note that this function should be used only in the card initialization
- * phase.  Calling after the card instantiation may cause issues with
- * user-space expecting persistent numids.
- *
  * Return: Zero if successful, or a negative error code on failure.
  */
 int snd_ctl_rename_id(struct snd_card *card, struct snd_ctl_elem_id *src_id,
 		      struct snd_ctl_elem_id *dst_id)
 {
 	struct snd_kcontrol *kctl;
-	int saved_numid;
 
 	down_write(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, src_id);
+	kctl = snd_ctl_find_id(card, src_id);
 	if (kctl == NULL) {
 		up_write(&card->controls_rwsem);
 		return -ENOENT;
 	}
-	saved_numid = kctl->id.numid;
 	remove_hash_entries(card, kctl);
 	kctl->id = *dst_id;
-	kctl->id.numid = saved_numid;
+	kctl->id.numid = card->last_numid + 1;
+	card->last_numid += kctl->count;
 	add_hash_entries(card, kctl);
 	up_write(&card->controls_rwsem);
 	return 0;
 }
 EXPORT_SYMBOL(snd_ctl_rename_id);
-
-/**
- * snd_ctl_rename - rename the control on the card
- * @card: the card instance
- * @kctl: the control to rename
- * @name: the new name
- *
- * Renames the specified control on the card to the new name.
- *
- * Note that this function takes card->controls_rwsem lock internally.
- */
-void snd_ctl_rename(struct snd_card *card, struct snd_kcontrol *kctl,
-		    const char *name)
-{
-	down_write(&card->controls_rwsem);
-	remove_hash_entries(card, kctl);
-
-	if (strscpy(kctl->id.name, name, sizeof(kctl->id.name)) < 0)
-		pr_warn("ALSA: Renamed control new name '%s' truncated to '%s'\n",
-			name, kctl->id.name);
-
-	add_hash_entries(card, kctl);
-	up_write(&card->controls_rwsem);
-}
-EXPORT_SYMBOL(snd_ctl_rename);
 
 #ifndef CONFIG_SND_CTL_FAST_LOOKUP
 static struct snd_kcontrol *
@@ -820,7 +768,7 @@ snd_ctl_find_numid_slow(struct snd_card *card, unsigned int numid)
 #endif /* !CONFIG_SND_CTL_FAST_LOOKUP */
 
 /**
- * snd_ctl_find_numid_locked - find the control instance with the given number-id
+ * snd_ctl_find_numid - find the control instance with the given number-id
  * @card: the card instance
  * @numid: the number-id to search
  *
@@ -830,46 +778,22 @@ snd_ctl_find_numid_slow(struct snd_card *card, unsigned int numid)
  * (if the race condition can happen).
  *
  * Return: The pointer of the instance if found, or %NULL if not.
+ *
  */
-struct snd_kcontrol *
-snd_ctl_find_numid_locked(struct snd_card *card, unsigned int numid)
+struct snd_kcontrol *snd_ctl_find_numid(struct snd_card *card, unsigned int numid)
 {
 	if (snd_BUG_ON(!card || !numid))
 		return NULL;
-	lockdep_assert_held(&card->controls_rwsem);
 #ifdef CONFIG_SND_CTL_FAST_LOOKUP
 	return xa_load(&card->ctl_numids, numid);
 #else
 	return snd_ctl_find_numid_slow(card, numid);
 #endif
 }
-EXPORT_SYMBOL(snd_ctl_find_numid_locked);
-
-/**
- * snd_ctl_find_numid - find the control instance with the given number-id
- * @card: the card instance
- * @numid: the number-id to search
- *
- * Finds the control instance with the given number-id from the card.
- *
- * Return: The pointer of the instance if found, or %NULL if not.
- *
- * Note that this function takes card->controls_rwsem lock internally.
- */
-struct snd_kcontrol *snd_ctl_find_numid(struct snd_card *card,
-					unsigned int numid)
-{
-	struct snd_kcontrol *kctl;
-
-	down_read(&card->controls_rwsem);
-	kctl = snd_ctl_find_numid_locked(card, numid);
-	up_read(&card->controls_rwsem);
-	return kctl;
-}
 EXPORT_SYMBOL(snd_ctl_find_numid);
 
 /**
- * snd_ctl_find_id_locked - find the control instance with the given id
+ * snd_ctl_find_id - find the control instance with the given id
  * @card: the card instance
  * @id: the id to search
  *
@@ -879,17 +803,17 @@ EXPORT_SYMBOL(snd_ctl_find_numid);
  * (if the race condition can happen).
  *
  * Return: The pointer of the instance if found, or %NULL if not.
+ *
  */
-struct snd_kcontrol *snd_ctl_find_id_locked(struct snd_card *card,
-					    const struct snd_ctl_elem_id *id)
+struct snd_kcontrol *snd_ctl_find_id(struct snd_card *card,
+				     struct snd_ctl_elem_id *id)
 {
 	struct snd_kcontrol *kctl;
 
 	if (snd_BUG_ON(!card || !id))
 		return NULL;
-	lockdep_assert_held(&card->controls_rwsem);
 	if (id->numid != 0)
-		return snd_ctl_find_numid_locked(card, id->numid);
+		return snd_ctl_find_numid(card, id->numid);
 #ifdef CONFIG_SND_CTL_FAST_LOOKUP
 	kctl = xa_load(&card->ctl_hash, get_ctl_id_hash(id));
 	if (kctl && elem_id_matches(kctl, id))
@@ -903,29 +827,6 @@ struct snd_kcontrol *snd_ctl_find_id_locked(struct snd_card *card,
 			return kctl;
 
 	return NULL;
-}
-EXPORT_SYMBOL(snd_ctl_find_id_locked);
-
-/**
- * snd_ctl_find_id - find the control instance with the given id
- * @card: the card instance
- * @id: the id to search
- *
- * Finds the control instance with the given id from the card.
- *
- * Return: The pointer of the instance if found, or %NULL if not.
- *
- * Note that this function takes card->controls_rwsem lock internally.
- */
-struct snd_kcontrol *snd_ctl_find_id(struct snd_card *card,
-				     const struct snd_ctl_elem_id *id)
-{
-	struct snd_kcontrol *kctl;
-
-	down_read(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, id);
-	up_read(&card->controls_rwsem);
-	return kctl;
 }
 EXPORT_SYMBOL(snd_ctl_find_id);
 
@@ -1066,6 +967,7 @@ static const unsigned int value_sizes[] = {
 	[SNDRV_CTL_ELEM_TYPE_INTEGER64] = sizeof(long long),
 };
 
+#ifdef CONFIG_SND_CTL_VALIDATION
 /* fill the remaining snd_ctl_elem_value data with the given pattern */
 static void fill_remaining_elem_value(struct snd_ctl_elem_value *control,
 				      struct snd_ctl_elem_info *info,
@@ -1082,7 +984,7 @@ static void fill_remaining_elem_value(struct snd_ctl_elem_value *control,
 static int sanity_check_int_value(struct snd_card *card,
 				  const struct snd_ctl_elem_value *control,
 				  const struct snd_ctl_elem_info *info,
-				  int i, bool print_error)
+				  int i)
 {
 	long long lval, lmin, lmax, lstep;
 	u64 rem;
@@ -1116,52 +1018,23 @@ static int sanity_check_int_value(struct snd_card *card,
 	}
 
 	if (lval < lmin || lval > lmax) {
-		if (print_error)
-			dev_err(card->dev,
-				"control %i:%i:%i:%s:%i: value out of range %lld (%lld/%lld) at count %i\n",
-				control->id.iface, control->id.device,
-				control->id.subdevice, control->id.name,
-				control->id.index, lval, lmin, lmax, i);
+		dev_err(card->dev,
+			"control %i:%i:%i:%s:%i: value out of range %lld (%lld/%lld) at count %i\n",
+			control->id.iface, control->id.device,
+			control->id.subdevice, control->id.name,
+			control->id.index, lval, lmin, lmax, i);
 		return -EINVAL;
 	}
 	if (lstep) {
 		div64_u64_rem(lval, lstep, &rem);
 		if (rem) {
-			if (print_error)
-				dev_err(card->dev,
-					"control %i:%i:%i:%s:%i: unaligned value %lld (step %lld) at count %i\n",
-					control->id.iface, control->id.device,
-					control->id.subdevice, control->id.name,
-					control->id.index, lval, lstep, i);
+			dev_err(card->dev,
+				"control %i:%i:%i:%s:%i: unaligned value %lld (step %lld) at count %i\n",
+				control->id.iface, control->id.device,
+				control->id.subdevice, control->id.name,
+				control->id.index, lval, lstep, i);
 			return -EINVAL;
 		}
-	}
-
-	return 0;
-}
-
-/* check whether the all input values are valid for the given elem value */
-static int sanity_check_input_values(struct snd_card *card,
-				     const struct snd_ctl_elem_value *control,
-				     const struct snd_ctl_elem_info *info,
-				     bool print_error)
-{
-	int i, ret;
-
-	switch (info->type) {
-	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
-	case SNDRV_CTL_ELEM_TYPE_INTEGER:
-	case SNDRV_CTL_ELEM_TYPE_INTEGER64:
-	case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
-		for (i = 0; i < info->count; i++) {
-			ret = sanity_check_int_value(card, control, info, i,
-						     print_error);
-			if (ret < 0)
-				return ret;
-		}
-		break;
-	default:
-		break;
 	}
 
 	return 0;
@@ -1174,12 +1047,23 @@ static int sanity_check_elem_value(struct snd_card *card,
 				   u32 pattern)
 {
 	size_t offset;
-	int ret;
+	int i, ret = 0;
 	u32 *p;
 
-	ret = sanity_check_input_values(card, control, info, true);
-	if (ret < 0)
-		return ret;
+	switch (info->type) {
+	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
+	case SNDRV_CTL_ELEM_TYPE_INTEGER:
+	case SNDRV_CTL_ELEM_TYPE_INTEGER64:
+	case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
+		for (i = 0; i < info->count; i++) {
+			ret = sanity_check_int_value(card, control, info, i);
+			if (ret < 0)
+				return ret;
+		}
+		break;
+	default:
+		break;
+	}
 
 	/* check whether the remaining area kept untouched */
 	offset = value_sizes[info->type] * info->count;
@@ -1195,6 +1079,21 @@ static int sanity_check_elem_value(struct snd_card *card,
 
 	return ret;
 }
+#else
+static inline void fill_remaining_elem_value(struct snd_ctl_elem_value *control,
+					     struct snd_ctl_elem_info *info,
+					     u32 pattern)
+{
+}
+
+static inline int sanity_check_elem_value(struct snd_card *card,
+					  struct snd_ctl_elem_value *control,
+					  struct snd_ctl_elem_info *info,
+					  u32 pattern)
+{
+	return 0;
+}
+#endif
 
 static int __snd_ctl_elem_info(struct snd_card *card,
 			       struct snd_kcontrol *kctl,
@@ -1241,7 +1140,7 @@ static int snd_ctl_elem_info(struct snd_ctl_file *ctl,
 	int result;
 
 	down_read(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, &info->id);
+	kctl = snd_ctl_find_id(card, &info->id);
 	if (kctl == NULL)
 		result = -ENOENT;
 	else
@@ -1280,7 +1179,7 @@ static int snd_ctl_elem_read(struct snd_card *card,
 	int ret;
 
 	down_read(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, &control->id);
+	kctl = snd_ctl_find_id(card, &control->id);
 	if (kctl == NULL) {
 		ret = -ENOENT;
 		goto unlock;
@@ -1295,7 +1194,7 @@ static int snd_ctl_elem_read(struct snd_card *card,
 
 	snd_ctl_build_ioff(&control->id, kctl, index_offset);
 
-#ifdef CONFIG_SND_CTL_DEBUG
+#ifdef CONFIG_SND_CTL_VALIDATION
 	/* info is needed only for validation */
 	memset(&info, 0, sizeof(info));
 	info.id = control->id;
@@ -1357,7 +1256,7 @@ static int snd_ctl_elem_write(struct snd_card *card, struct snd_ctl_file *file,
 	int result;
 
 	down_write(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, &control->id);
+	kctl = snd_ctl_find_id(card, &control->id);
 	if (kctl == NULL) {
 		up_write(&card->controls_rwsem);
 		return -ENOENT;
@@ -1373,17 +1272,6 @@ static int snd_ctl_elem_write(struct snd_card *card, struct snd_ctl_file *file,
 
 	snd_ctl_build_ioff(&control->id, kctl, index_offset);
 	result = snd_power_ref_and_wait(card);
-	/* validate input values */
-	if (IS_ENABLED(CONFIG_SND_CTL_INPUT_VALIDATION) && !result) {
-		struct snd_ctl_elem_info info;
-
-		memset(&info, 0, sizeof(info));
-		info.id = control->id;
-		result = __snd_ctl_elem_info(card, kctl, &info, NULL);
-		if (!result)
-			result = sanity_check_input_values(card, control, &info,
-							   false);
-	}
 	if (!result)
 		result = kctl->put(kctl, control);
 	snd_power_unref(card);
@@ -1438,7 +1326,7 @@ static int snd_ctl_elem_lock(struct snd_ctl_file *file,
 	if (copy_from_user(&id, _id, sizeof(id)))
 		return -EFAULT;
 	down_write(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, &id);
+	kctl = snd_ctl_find_id(card, &id);
 	if (kctl == NULL) {
 		result = -ENOENT;
 	} else {
@@ -1466,7 +1354,7 @@ static int snd_ctl_elem_unlock(struct snd_ctl_file *file,
 	if (copy_from_user(&id, _id, sizeof(id)))
 		return -EFAULT;
 	down_write(&card->controls_rwsem);
-	kctl = snd_ctl_find_id_locked(card, &id);
+	kctl = snd_ctl_find_id(card, &id);
 	if (kctl == NULL) {
 		result = -ENOENT;
 	} else {
@@ -1575,8 +1463,6 @@ static int replace_user_tlv(struct snd_kcontrol *kctl, unsigned int __user *buf,
 	int i;
 	int change;
 
-	lockdep_assert_held_write(&ue->card->controls_rwsem);
-
 	if (size > 1024 * 128)	/* sane value */
 		return -EINVAL;
 
@@ -1652,8 +1538,6 @@ static int snd_ctl_elem_init_enum_names(struct user_element *ue)
 	size_t buf_len, name_len;
 	unsigned int i;
 	const uintptr_t user_ptrval = ue->info.value.enumerated.names_ptr;
-
-	lockdep_assert_held_write(&ue->card->controls_rwsem);
 
 	buf_len = ue->info.value.enumerated.names_length;
 	if (buf_len > 64 * 1024)
@@ -1959,8 +1843,6 @@ static int snd_ctl_tlv_ioctl(struct snd_ctl_file *file,
 	struct snd_ctl_elem_id id;
 	struct snd_kcontrol_volatile *vd;
 
-	lockdep_assert_held(&file->card->controls_rwsem);
-
 	if (copy_from_user(&header, buf, sizeof(header)))
 		return -EFAULT;
 
@@ -1974,7 +1856,7 @@ static int snd_ctl_tlv_ioctl(struct snd_ctl_file *file,
 	container_size = header.length;
 	container = buf->tlv;
 
-	kctl = snd_ctl_find_numid_locked(file->card, header.numid);
+	kctl = snd_ctl_find_numid(file->card, header.numid);
 	if (kctl == NULL)
 		return -ENOENT;
 
@@ -2166,8 +2048,6 @@ static int _snd_ctl_register_ioctl(snd_kctl_ioctl_func_t fcn, struct list_head *
  * @fcn: ioctl callback function
  *
  * called from each device manager like pcm.c, hwdep.c, etc.
- *
- * Return: zero if successful, or a negative error code
  */
 int snd_ctl_register_ioctl(snd_kctl_ioctl_func_t fcn)
 {
@@ -2180,8 +2060,6 @@ EXPORT_SYMBOL(snd_ctl_register_ioctl);
  * snd_ctl_register_ioctl_compat - register the device-specific 32bit compat
  * control-ioctls
  * @fcn: ioctl callback function
- *
- * Return: zero if successful, or a negative error code
  */
 int snd_ctl_register_ioctl_compat(snd_kctl_ioctl_func_t fcn)
 {
@@ -2217,8 +2095,6 @@ static int _snd_ctl_unregister_ioctl(snd_kctl_ioctl_func_t fcn,
 /**
  * snd_ctl_unregister_ioctl - de-register the device-specific control-ioctls
  * @fcn: ioctl callback function to unregister
- *
- * Return: zero if successful, or a negative error code
  */
 int snd_ctl_unregister_ioctl(snd_kctl_ioctl_func_t fcn)
 {
@@ -2231,8 +2107,6 @@ EXPORT_SYMBOL(snd_ctl_unregister_ioctl);
  * snd_ctl_unregister_ioctl_compat - de-register the device-specific compat
  * 32bit control-ioctls
  * @fcn: ioctl callback function to unregister
- *
- * Return: zero if successful, or a negative error code
  */
 int snd_ctl_unregister_ioctl_compat(snd_kctl_ioctl_func_t fcn)
 {
@@ -2288,7 +2162,7 @@ EXPORT_SYMBOL_GPL(snd_ctl_get_preferred_subdevice);
  * snd_ctl_request_layer - request to use the layer
  * @module_name: Name of the kernel module (NULL == build-in)
  *
- * Return: zero if successful, or an error code when the module cannot be loaded
+ * Return an error code when the module cannot be loaded.
  */
 int snd_ctl_request_layer(const char *module_name)
 {
@@ -2389,7 +2263,7 @@ static int snd_ctl_dev_register(struct snd_device *device)
 	int err;
 
 	err = snd_register_device(SNDRV_DEVICE_TYPE_CONTROL, card, -1,
-				  &snd_ctl_f_ops, card, card->ctl_dev);
+				  &snd_ctl_f_ops, card, &card->ctl_dev);
 	if (err < 0)
 		return err;
 	down_read(&card->controls_rwsem);
@@ -2425,7 +2299,7 @@ static int snd_ctl_dev_disconnect(struct snd_device *device)
 	up_read(&snd_ctl_layer_rwsem);
 	up_read(&card->controls_rwsem);
 
-	return snd_unregister_device(card->ctl_dev);
+	return snd_unregister_device(&card->ctl_dev);
 }
 
 /*
@@ -2447,7 +2321,7 @@ static int snd_ctl_dev_free(struct snd_device *device)
 	xa_destroy(&card->ctl_hash);
 #endif
 	up_write(&card->controls_rwsem);
-	put_device(card->ctl_dev);
+	put_device(&card->ctl_dev);
 	return 0;
 }
 
@@ -2469,14 +2343,12 @@ int snd_ctl_create(struct snd_card *card)
 	if (snd_BUG_ON(card->number < 0 || card->number >= SNDRV_CARDS))
 		return -ENXIO;
 
-	err = snd_device_alloc(&card->ctl_dev, card);
-	if (err < 0)
-		return err;
-	dev_set_name(card->ctl_dev, "controlC%d", card->number);
+	snd_device_initialize(&card->ctl_dev, card);
+	dev_set_name(&card->ctl_dev, "controlC%d", card->number);
 
 	err = snd_device_new(card, SNDRV_DEV_CONTROL, card, &ops);
 	if (err < 0)
-		put_device(card->ctl_dev);
+		put_device(&card->ctl_dev);
 	return err;
 }
 
@@ -2492,8 +2364,6 @@ int snd_ctl_create(struct snd_card *card)
  *
  * This is a function that can be used as info callback for a standard
  * boolean control with a single mono channel.
- *
- * Return: Zero (always successful)
  */
 int snd_ctl_boolean_mono_info(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_info *uinfo)
@@ -2514,8 +2384,6 @@ EXPORT_SYMBOL(snd_ctl_boolean_mono_info);
  *
  * This is a function that can be used as info callback for a standard
  * boolean control with stereo two channels.
- *
- * Return: Zero (always successful)
  */
 int snd_ctl_boolean_stereo_info(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_info *uinfo)
@@ -2539,7 +2407,7 @@ EXPORT_SYMBOL(snd_ctl_boolean_stereo_info);
  * If the control's accessibility is not the default (readable and writable),
  * the caller has to fill @info->access.
  *
- * Return: Zero (always successful)
+ * Return: Zero.
  */
 int snd_ctl_enum_info(struct snd_ctl_elem_info *info, unsigned int channels,
 		      unsigned int items, const char *const names[])

@@ -4,7 +4,6 @@
  * Copyright © 2016 Intel Corporation
  */
 
-#include "i915_file_private.h"
 #include "mock_context.h"
 #include "selftests/mock_drm.h"
 #include "selftests/mock_gtt.h"
@@ -24,7 +23,6 @@ mock_context(struct drm_i915_private *i915,
 	kref_init(&ctx->ref);
 	INIT_LIST_HEAD(&ctx->link);
 	ctx->i915 = i915;
-	INIT_WORK(&ctx->release_work, i915_gem_context_release_work);
 
 	mutex_init(&ctx->mutex);
 
@@ -36,13 +34,14 @@ mock_context(struct drm_i915_private *i915,
 	if (name) {
 		struct i915_ppgtt *ppgtt;
 
-		strscpy(ctx->name, name, sizeof(ctx->name));
+		strncpy(ctx->name, name, sizeof(ctx->name) - 1);
 
 		ppgtt = mock_ppgtt(i915, name);
 		if (!ppgtt)
 			goto err_free;
 
-		ctx->vm = &ppgtt->vm;
+		ctx->vm = i915_vm_open(&ppgtt->vm);
+		i915_vm_put(&ppgtt->vm);
 	}
 
 	mutex_init(&ctx->engines_mutex);
@@ -58,7 +57,7 @@ mock_context(struct drm_i915_private *i915,
 
 err_vm:
 	if (ctx->vm)
-		i915_vm_put(ctx->vm);
+		i915_vm_close(ctx->vm);
 err_free:
 	kfree(ctx);
 	return NULL;
@@ -83,12 +82,12 @@ live_context(struct drm_i915_private *i915, struct file *file)
 	int err;
 	u32 id;
 
-	pc = proto_context_create(fpriv, i915, 0);
+	pc = proto_context_create(i915, 0);
 	if (IS_ERR(pc))
 		return ERR_CAST(pc);
 
 	ctx = i915_gem_create_context(i915, pc);
-	proto_context_close(i915, pc);
+	proto_context_close(pc);
 	if (IS_ERR(ctx))
 		return ctx;
 
@@ -152,7 +151,7 @@ kernel_context(struct drm_i915_private *i915,
 	struct i915_gem_context *ctx;
 	struct i915_gem_proto_context *pc;
 
-	pc = proto_context_create(NULL, i915, 0);
+	pc = proto_context_create(i915, 0);
 	if (IS_ERR(pc))
 		return ERR_CAST(pc);
 
@@ -163,7 +162,7 @@ kernel_context(struct drm_i915_private *i915,
 	}
 
 	ctx = i915_gem_create_context(i915, pc);
-	proto_context_close(i915, pc);
+	proto_context_close(pc);
 	if (IS_ERR(ctx))
 		return ctx;
 

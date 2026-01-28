@@ -15,7 +15,7 @@
 #include <linux/of_platform.h>
 #include <asm/mach/arch.h>
 #include "generic.h"
-#include "spear.h"
+#include <mach/spear.h>
 
 #define SPEAR310_UART1_BASE		UL(0xB2000000)
 #define SPEAR310_UART2_BASE		UL(0xB2080000)

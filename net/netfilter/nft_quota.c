@@ -217,12 +217,11 @@ static int nft_quota_init(const struct nft_ctx *ctx,
 	return nft_quota_do_init(tb, priv);
 }
 
-static int nft_quota_dump(struct sk_buff *skb,
-			  const struct nft_expr *expr, bool reset)
+static int nft_quota_dump(struct sk_buff *skb, const struct nft_expr *expr)
 {
 	struct nft_quota *priv = nft_expr_priv(expr);
 
-	return nft_quota_do_dump(skb, priv, reset);
+	return nft_quota_do_dump(skb, priv, false);
 }
 
 static void nft_quota_destroy(const struct nft_ctx *ctx,
@@ -259,7 +258,6 @@ static const struct nft_expr_ops nft_quota_ops = {
 	.destroy	= nft_quota_destroy,
 	.clone		= nft_quota_clone,
 	.dump		= nft_quota_dump,
-	.reduce		= NFT_REDUCE_READONLY,
 };
 
 static struct nft_expr_type nft_quota_type __read_mostly = {

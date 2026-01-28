@@ -1,0 +1,122 @@
+/* SPDX-License-Identifier: (GPL-2.0+ OR MIT) */
+/*
+ * Copyright (c) 2019 Amlogic, Inc. All rights reserved.
+ */
+
+#ifndef _HDMI_RX_T6D_H
+#define _HDMI_RX_T6D_H
+
+/* T6D PHY register */
+#define T6D_HDMIRX20PLL_CTRL0			(0x000 << 2)
+#define T6D_HDMIRX20PLL_CTRL1			(0x001 << 2)
+#define T6D_HDMIRX20PHY_DCHA_AFE		(0x002 << 2)
+	#define T6D_LEQ_HYPER_GAIN_CH0		_BIT(3)
+	#define T6D_LEQ_HYPER_GAIN_CH1		_BIT(7)
+	#define T6D_LEQ_HYPER_GAIN_CH2		_BIT(11)
+	#define T6D_BUF_BST					MSK(4, 24)
+	#define T6D_LEQ_BUF_GAIN            MSK(3, 16)
+	#define T6D_LEQ_POLE                MSK(3, 12)
+	#define T6D_VGA_GAIN				MSK(12, 0)
+#define T6D_HDMIRX20PHY_DCHA_DFE		(0x003 << 2)
+	#define T6D_SLICER_OFSTCAL_START	_BIT(13)
+	#define T6D_DCHA_DFE				MSK(5, 12)
+	#define T6D_PI_CFG					MSK(8, 20)
+	#define T6D_DFE_OFST_CAL_START		_BIT(9)
+#define T6D_HDMIRX20PHY_DCHD_CDR		(0x004 << 2)
+	#define T6D_EHM_DBG_SEL			_BIT(31)
+	#define T6D_OFSET_CAL_START		_BIT(27)
+	#define T6D_CDR_LKDET_EN		_BIT(14)
+	#define T6D_CDR_RSTB			_BIT(13)
+	#define T6D_CDR_EN              _BIT(12)
+	#define T6D_CDR_FR_EN				_BIT(6)
+	#define T6D_MUX_CDR_DBG_SEL		_BIT(19)
+	#define T6D_CDR_PI_DIV			MSK(2, 10)
+	#define T6D_CDR_OS_RATE			MSK(2, 8)
+	#define T6D_DFE_OFST_DBG_SEL		MSK(3, 28)
+	#define T6D_ERROR_CNT			0X0
+	#define T6D_SCAN_STATE			0X1
+	#define T6D_POSITIVE_EYE_HEIGHT		0x2
+	#define T6D_NEGATIVE_EYE_HEIGHT		0x3
+	#define T6D_LEFT_EYE_WIDTH		0x4
+	#define T6D_RIGHT_EYE_WIDTH		0x5
+#define T6D_HDMIRX20PHY_DCHD_EQ			(0x005 << 2)
+	#define T6D_BW_MAX_EN			_BIT(31)
+	#define T6D_BYP_TAP0_EN			_BIT(30)
+	#define T6D_BYP_TAP_EN			_BIT(19)
+	#define T6D_DFE_HOLD_EN			_BIT(18)
+	#define T6D_DFE_RSTB			_BIT(17)
+	#define T6D_DFE_EN			_BIT(16)
+	#define T6D_EHM_SW_SCAN_EN		_BIT(15)
+	#define T6D_EHM_HW_SCAN_EN		_BIT(14)
+	#define T6D_EQ_RSTB			_BIT(13)
+	#define T6D_EQ_EN			_BIT(12)
+	#define T6D_EN_BYP_EQ			_BIT(5)
+	#define T6D_BYP_EQ			MSK(5, 0)
+	#define T6D_BYP_EN			_BIT(5)
+	#define T6D_BYP_EQ_VAL			MSK(4, 0)
+	#define T6D_EQ_MODE			MSK(2, 8)
+	#define T6D_EQ_ERR_MODE			MSK(2, 10)
+	#define T6D_STATUS_MUX_SEL		MSK(2, 22)
+#define T6D_HDMIRX20PHY_DCHA_MISC1		(0x006 << 2)
+	#define T6D_SQ_RSTN			_BIT(26)
+	#define T6D_VCO_TMDS_EN			_BIT(20)
+	#define T6D_RTERM_CNTL			MSK(4, 12)
+	#define T6D_DCH_RSTN			MSK(3, 4)
+#define T6D_HDMIRX20PHY_DCHA_MISC2		(0x007 << 2)
+	#define T6D_TMDS_VALID_SEL		_BIT(10)
+	#define T6D_PLL_CLK_SEL			_BIT(9)
+#define T6D_HDMIRX20PHY_DCHD_STAT       (0x009 << 2)
+#define T6D_HDMIRX_EARCTX_CNTL0         (0x040 << 2)
+#define T6D_HDMIRX_EARCTX_CNTL1         (0x041 << 2)
+#define T6D_HDMIRX_ARC_CNTL             (0x042 << 2)
+#define T6D_HDMIRX_PHY_PROD_TEST0       (0x080 << 2)
+#define T6D_HDMIRX_PHY_PROD_TEST1       (0x081 << 2)
+
+#define T6D_RG_RX20PLL_0		0x000
+#define T6D_RG_RX20PLL_1		0x004
+
+/* i2c monitor reg */
+#define T6D_I2C_MONITOR_BASE		0x2c000
+
+extern int tapx_value;
+extern int agc_enable;
+extern u32 afe_value;
+extern u32 dfe_value;
+extern u32 cdr_value;
+extern u32 eq_value;
+extern u32 misc2_value;
+extern u32 misc1_value;
+/*--------------------------function declare------------------*/
+/* T6D */
+void aml_phy_init_t6d(void);
+void aml_eq_eye_monitor_t6d(void);
+void dump_reg_phy_t6d(void);
+void dump_aml_phy_sts_t6d(void);
+void aml_phy_short_bist_t6d(void);
+bool aml_get_tmds_valid_t6d(void);
+void aml_phy_power_off_t6d(void);
+void aml_phy_switch_port_t6d(void);
+void aml_phy_iq_skew_monitor_t6d(void);
+void dump_vsi_reg_t6d(u8 port);
+unsigned int rx_sec_hdcp_cfg_t6d(void);
+void rx_set_aud_output_t6d(u32 param);
+void rx_sw_reset_t6d(int level);
+void hdcp_init_t6d(void);
+void aml_phy_get_trim_val_t6d(void);
+void comb_val_t6d(void (*p)(char *, unsigned int, int),
+	     char *type, unsigned int val_0, unsigned int val_1,
+		 unsigned int val_2, int len);
+void get_flag_val_t6d(char *temp, unsigned int val, int len);
+void get_val_t6d(char *temp, unsigned int val, int len);
+void get_eq_val_t6d(void);
+void bubble_sort(u32 *sort_array);
+void quick_sort2_t6d(int arr[], int l, int r);
+void clk_init_cor_t6d(void);
+void rx_dig_clk_en_t6d(bool en);
+void dump_aml_phy_sts_t6d(void);
+void aml_phy_offset_cal_t6d(void);
+void rx_aud_pll_ctl_t6d(bool en, u8 port);
+int aml_phy_exbist_t6d(u8 port, u8 ch);
+/*function declare end*/
+
+#endif /*_HDMI_RX_T6D_H*/

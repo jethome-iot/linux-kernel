@@ -279,8 +279,10 @@ static int smsusb1_load_firmware(struct usb_device *udev, int id, int board_id)
 		}
 	}
 
-	fw_buffer = kmemdup(fw->data, fw->size, GFP_KERNEL);
+	fw_buffer = kmalloc(fw->size, GFP_KERNEL);
 	if (fw_buffer) {
+		memcpy(fw_buffer, fw->data, fw->size);
+
 		rc = usb_bulk_msg(udev, usb_sndbulkpipe(udev, 2),
 				  fw_buffer, fw->size, &dummy, 1000);
 
@@ -662,6 +664,10 @@ static const struct usb_device_id smsusb_id_table[] = {
 		.driver_info = SMS1XXX_BOARD_HAUPPAUGE_WINDHAM },
 	{ USB_DEVICE(0x2040, 0x5590),
 		.driver_info = SMS1XXX_BOARD_HAUPPAUGE_WINDHAM },
+	{ USB_DEVICE(0x187f, 0x0202),
+		.driver_info = SMS1XXX_BOARD_SIANO_NICE },
+	{ USB_DEVICE(0x187f, 0x0301),
+		.driver_info = SMS1XXX_BOARD_SIANO_VENICE },
 	{ USB_DEVICE(0x2040, 0xb900),
 		.driver_info = SMS1XXX_BOARD_HAUPPAUGE_WINDHAM },
 	{ USB_DEVICE(0x2040, 0xb910),

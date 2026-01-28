@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2020 Intel Corporation.
  */
 
 #include <linux/topology.h>
 #include <linux/cpumask.h>
+#include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/numa.h>
 
@@ -230,9 +231,11 @@ static void node_affinity_add_tail(struct hfi1_affinity_node *entry)
 /* It must be called with node_affinity.lock held */
 static struct hfi1_affinity_node *node_affinity_lookup(int node)
 {
+	struct list_head *pos;
 	struct hfi1_affinity_node *entry;
 
-	list_for_each_entry(entry, &node_affinity.list, list) {
+	list_for_each(pos, &node_affinity.list) {
+		entry = list_entry(pos, struct hfi1_affinity_node, list);
 		if (entry->node == node)
 			return entry;
 	}
@@ -666,7 +669,7 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 			 * engines, use the same CPU cores as general/control
 			 * context.
 			 */
-			if (cpumask_empty(&entry->def_intr.mask))
+			if (cpumask_weight(&entry->def_intr.mask) == 0)
 				cpumask_copy(&entry->def_intr.mask,
 					     &entry->general_intr_mask);
 		}
@@ -686,7 +689,7 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 		 * vectors, use the same CPU core as the general/control
 		 * context.
 		 */
-		if (cpumask_empty(&entry->comp_vect_mask))
+		if (cpumask_weight(&entry->comp_vect_mask) == 0)
 			cpumask_copy(&entry->comp_vect_mask,
 				     &entry->general_intr_mask);
 	}

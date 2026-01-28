@@ -322,8 +322,6 @@ static s32 e1000_init_phy_workarounds_pchlan(struct e1000_hw *hw)
 	case e1000_pch_adp:
 	case e1000_pch_mtp:
 	case e1000_pch_lnp:
-	case e1000_pch_ptp:
-	case e1000_pch_nvp:
 		if (e1000_phy_is_accessible_pchlan(hw))
 			break;
 
@@ -470,8 +468,6 @@ static s32 e1000_init_phy_params_pchlan(struct e1000_hw *hw)
 		case e1000_pch_adp:
 		case e1000_pch_mtp:
 		case e1000_pch_lnp:
-		case e1000_pch_ptp:
-		case e1000_pch_nvp:
 			/* In case the PHY needs to be in mdio slow mode,
 			 * set slow mode and try to get the PHY id again.
 			 */
@@ -718,8 +714,6 @@ static s32 e1000_init_mac_params_ich8lan(struct e1000_hw *hw)
 	case e1000_pch_adp:
 	case e1000_pch_mtp:
 	case e1000_pch_lnp:
-	case e1000_pch_ptp:
-	case e1000_pch_nvp:
 	case e1000_pchlan:
 		/* check management mode */
 		mac->ops.check_mng_mode = e1000_check_mng_mode_pchlan;
@@ -1072,11 +1066,13 @@ static s32 e1000_platform_pm_pch_lpt(struct e1000_hw *hw, bool link)
 
 		lat_enc_d = (lat_enc & E1000_LTRV_VALUE_MASK) *
 			     (1U << (E1000_LTRV_SCALE_FACTOR *
-			     FIELD_GET(E1000_LTRV_SCALE_MASK, lat_enc)));
+			     ((lat_enc & E1000_LTRV_SCALE_MASK)
+			     >> E1000_LTRV_SCALE_SHIFT)));
 
 		max_ltr_enc_d = (max_ltr_enc & E1000_LTRV_VALUE_MASK) *
-			(1U << (E1000_LTRV_SCALE_FACTOR *
-				FIELD_GET(E1000_LTRV_SCALE_MASK, max_ltr_enc)));
+				 (1U << (E1000_LTRV_SCALE_FACTOR *
+				 ((max_ltr_enc & E1000_LTRV_SCALE_MASK)
+				 >> E1000_LTRV_SCALE_SHIFT)));
 
 		if (lat_enc_d > max_ltr_enc_d)
 			lat_enc = max_ltr_enc;
@@ -1685,8 +1681,6 @@ static s32 e1000_get_variants_ich8lan(struct e1000_adapter *adapter)
 	case e1000_pch_adp:
 	case e1000_pch_mtp:
 	case e1000_pch_lnp:
-	case e1000_pch_ptp:
-	case e1000_pch_nvp:
 		rc = e1000_init_phy_params_pchlan(hw);
 		break;
 	default:
@@ -2073,7 +2067,8 @@ static s32 e1000_write_smbus_addr(struct e1000_hw *hw)
 {
 	u16 phy_data;
 	u32 strap = er32(STRAP);
-	u32 freq = FIELD_GET(E1000_STRAP_SMT_FREQ_MASK, strap);
+	u32 freq = (strap & E1000_STRAP_SMT_FREQ_MASK) >>
+	    E1000_STRAP_SMT_FREQ_SHIFT;
 	s32 ret_val;
 
 	strap &= E1000_STRAP_SMBUS_ADDRESS_MASK;
@@ -2142,8 +2137,6 @@ static s32 e1000_sw_lcd_config_ich8lan(struct e1000_hw *hw)
 	case e1000_pch_adp:
 	case e1000_pch_mtp:
 	case e1000_pch_lnp:
-	case e1000_pch_ptp:
-	case e1000_pch_nvp:
 		sw_cfg_mask = E1000_FEXTNVM_SW_CONFIG_ICH8M;
 		break;
 	default:
@@ -2559,7 +2552,8 @@ void e1000_copy_rx_addrs_to_phy_ich8lan(struct e1000_hw *hw)
 		hw->phy.ops.write_reg_page(hw, BM_RAR_H(i),
 					   (u16)(mac_reg & 0xFFFF));
 		hw->phy.ops.write_reg_page(hw, BM_RAR_CTRL(i),
-					   FIELD_GET(E1000_RAH_AV, mac_reg));
+					   (u16)((mac_reg & E1000_RAH_AV)
+						 >> 16));
 	}
 
 	e1000_disable_phy_wakeup_reg_access_bm(hw, &phy_reg);
@@ -3188,8 +3182,6 @@ static s32 e1000_valid_nvm_bank_detect_ich8lan(struct e1000_hw *hw, u32 *bank)
 	case e1000_pch_adp:
 	case e1000_pch_mtp:
 	case e1000_pch_lnp:
-	case e1000_pch_ptp:
-	case e1000_pch_nvp:
 		bank1_offset = nvm->flash_bank_size;
 		act_offset = E1000_ICH_NVM_SIG_WORD;
 
@@ -3201,7 +3193,7 @@ static s32 e1000_valid_nvm_bank_detect_ich8lan(struct e1000_hw *hw, u32 *bank)
 							 &nvm_dword);
 		if (ret_val)
 			return ret_val;
-		sig_byte = FIELD_GET(0xFF00, nvm_dword);
+		sig_byte = (u8)((nvm_dword & 0xFF00) >> 8);
 		if ((sig_byte & E1000_ICH_NVM_VALID_SIG_MASK) ==
 		    E1000_ICH_NVM_SIG_VALUE) {
 			*bank = 0;
@@ -3214,7 +3206,7 @@ static s32 e1000_valid_nvm_bank_detect_ich8lan(struct e1000_hw *hw, u32 *bank)
 							 &nvm_dword);
 		if (ret_val)
 			return ret_val;
-		sig_byte = FIELD_GET(0xFF00, nvm_dword);
+		sig_byte = (u8)((nvm_dword & 0xFF00) >> 8);
 		if ((sig_byte & E1000_ICH_NVM_VALID_SIG_MASK) ==
 		    E1000_ICH_NVM_SIG_VALUE) {
 			*bank = 1;
@@ -4130,8 +4122,6 @@ static s32 e1000_validate_nvm_checksum_ich8lan(struct e1000_hw *hw)
 	case e1000_pch_adp:
 	case e1000_pch_mtp:
 	case e1000_pch_lnp:
-	case e1000_pch_ptp:
-	case e1000_pch_nvp:
 		word = NVM_COMPAT;
 		valid_csum_mask = NVM_COMPAT_VALID_CSUM;
 		break;
@@ -6034,26 +6024,6 @@ const struct e1000_info e1000_pch_tgp_info = {
 
 const struct e1000_info e1000_pch_adp_info = {
 	.mac			= e1000_pch_adp,
-	.flags			= FLAG_IS_ICH
-				  | FLAG_HAS_WOL
-				  | FLAG_HAS_HW_TIMESTAMP
-				  | FLAG_HAS_CTRLEXT_ON_LOAD
-				  | FLAG_HAS_AMT
-				  | FLAG_HAS_FLASH
-				  | FLAG_HAS_JUMBO_FRAMES
-				  | FLAG_APME_IN_WUC,
-	.flags2			= FLAG2_HAS_PHY_STATS
-				  | FLAG2_HAS_EEE,
-	.pba			= 26,
-	.max_hw_frame_size	= 9022,
-	.get_variants		= e1000_get_variants_ich8lan,
-	.mac_ops		= &ich8_mac_ops,
-	.phy_ops		= &ich8_phy_ops,
-	.nvm_ops		= &spt_nvm_ops,
-};
-
-const struct e1000_info e1000_pch_mtp_info = {
-	.mac			= e1000_pch_mtp,
 	.flags			= FLAG_IS_ICH
 				  | FLAG_HAS_WOL
 				  | FLAG_HAS_HW_TIMESTAMP

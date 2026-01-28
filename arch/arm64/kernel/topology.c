@@ -22,6 +22,8 @@
 #include <asm/cputype.h>
 #include <asm/topology.h>
 
+#include <trace/hooks/topology.h>
+
 #ifdef CONFIG_ACPI
 static bool __init acpi_cpu_is_threaded(int cpu)
 {
@@ -49,6 +51,8 @@ int __init parse_acpi_topology(void)
 		return 0;
 
 	for_each_possible_cpu(cpu) {
+		int i, cache_id;
+
 		topology_id = find_acpi_cpu_topology(cpu, 0);
 		if (topology_id < 0)
 			return topology_id;
@@ -61,10 +65,20 @@ int __init parse_acpi_topology(void)
 			cpu_topology[cpu].thread_id  = -1;
 			cpu_topology[cpu].core_id    = topology_id;
 		}
-		topology_id = find_acpi_cpu_topology_cluster(cpu);
-		cpu_topology[cpu].cluster_id = topology_id;
 		topology_id = find_acpi_cpu_topology_package(cpu);
 		cpu_topology[cpu].package_id = topology_id;
+
+		i = acpi_find_last_cache_level(cpu);
+
+		if (i > 0) {
+			/*
+			 * this is the only part of cpu_topology that has
+			 * a direct relationship with the cache topology
+			 */
+			cache_id = find_acpi_cpu_cache_topology(cpu, i);
+			if (cache_id > 0)
+				cpu_topology[cpu].llc_id = cache_id;
+		}
 	}
 
 	return 0;
@@ -82,12 +96,7 @@ int __init parse_acpi_topology(void)
 #undef pr_fmt
 #define pr_fmt(fmt) "AMU: " fmt
 
-/*
- * Ensure that amu_scale_freq_tick() will return SCHED_CAPACITY_SCALE until
- * the CPU capacity and its associated frequency have been correctly
- * initialized.
- */
-static DEFINE_PER_CPU_READ_MOSTLY(unsigned long, arch_max_freq_scale) =  1UL << (2 * SCHED_CAPACITY_SHIFT);
+static DEFINE_PER_CPU_READ_MOSTLY(unsigned long, arch_max_freq_scale);
 static DEFINE_PER_CPU(u64, arch_const_cycles_prev);
 static DEFINE_PER_CPU(u64, arch_core_cycles_prev);
 static cpumask_var_t amu_fie_cpus;
@@ -117,14 +126,14 @@ static inline bool freq_counters_valid(int cpu)
 	return true;
 }
 
-void freq_inv_set_max_ratio(int cpu, u64 max_rate)
+static int freq_inv_set_max_ratio(int cpu, u64 max_rate, u64 ref_rate)
 {
-	u64 ratio, ref_rate = arch_timer_get_rate();
+	u64 ratio;
 
 	if (unlikely(!max_rate || !ref_rate)) {
-		WARN_ONCE(1, "CPU%d: invalid maximum or reference frequency.\n",
+		pr_debug("CPU%d: invalid maximum or reference frequency.\n",
 			 cpu);
-		return;
+		return -EINVAL;
 	}
 
 	/*
@@ -144,16 +153,23 @@ void freq_inv_set_max_ratio(int cpu, u64 max_rate)
 	ratio = div64_u64(ratio, max_rate);
 	if (!ratio) {
 		WARN_ONCE(1, "Reference frequency too low.\n");
-		return;
+		return -EINVAL;
 	}
 
-	WRITE_ONCE(per_cpu(arch_max_freq_scale, cpu), (unsigned long)ratio);
+	per_cpu(arch_max_freq_scale, cpu) = (unsigned long)ratio;
+
+	return 0;
 }
 
 static void amu_scale_freq_tick(void)
 {
 	u64 prev_core_cnt, prev_const_cnt;
 	u64 core_cnt, const_cnt, scale;
+	bool use_amu_fie = true;
+
+	trace_android_vh_use_amu_fie(&use_amu_fie);
+	if(!use_amu_fie)
+		return;
 
 	prev_const_cnt = this_cpu_read(arch_const_cycles_prev);
 	prev_core_cnt = this_cpu_read(arch_core_cycles_prev);
@@ -198,7 +214,10 @@ static void amu_fie_setup(const struct cpumask *cpus)
 		return;
 
 	for_each_cpu(cpu, cpus) {
-		if (!freq_counters_valid(cpu))
+		if (!freq_counters_valid(cpu) ||
+		    freq_inv_set_max_ratio(cpu,
+					   cpufreq_get_hw_max_freq(cpu) * 1000ULL,
+					   arch_timer_get_rate()))
 			return;
 	}
 

@@ -20,7 +20,6 @@
 #include <net/xfrm.h>
 #include <net/ip_tunnels.h>
 #include <net/ip6_tunnel.h>
-#include <net/dst_metadata.h>
 
 #include "xfrm_inout.h"
 
@@ -180,8 +179,6 @@ static int xfrm4_remove_beet_encap(struct xfrm_state *x, struct sk_buff *skb)
 	int optlen = 0;
 	int err = -EINVAL;
 
-	skb->protocol = htons(ETH_P_IP);
-
 	if (unlikely(XFRM_MODE_SKB_CB(skb)->protocol == IPPROTO_BEETPH)) {
 		struct ip_beet_phdr *ph;
 		int phlen;
@@ -234,7 +231,8 @@ static int xfrm4_remove_tunnel_encap(struct xfrm_state *x, struct sk_buff *skb)
 {
 	int err = -EINVAL;
 
-	skb->protocol = htons(ETH_P_IP);
+	if (XFRM_MODE_SKB_CB(skb)->protocol != IPPROTO_IPIP)
+		goto out;
 
 	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 		goto out;
@@ -271,8 +269,8 @@ static int xfrm6_remove_tunnel_encap(struct xfrm_state *x, struct sk_buff *skb)
 {
 	int err = -EINVAL;
 
-	skb->protocol = htons(ETH_P_IPV6);
-
+	if (XFRM_MODE_SKB_CB(skb)->protocol != IPPROTO_IPV6)
+		goto out;
 	if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
 		goto out;
 
@@ -301,8 +299,6 @@ static int xfrm6_remove_beet_encap(struct xfrm_state *x, struct sk_buff *skb)
 	struct ipv6hdr *ip6h;
 	int size = sizeof(struct ipv6hdr);
 	int err;
-
-	skb->protocol = htons(ETH_P_IPV6);
 
 	err = skb_cow_head(skb, size + skb->mac_len);
 	if (err)
@@ -335,26 +331,22 @@ out:
  */
 static int
 xfrm_inner_mode_encap_remove(struct xfrm_state *x,
+			     const struct xfrm_mode *inner_mode,
 			     struct sk_buff *skb)
 {
-	switch (x->props.mode) {
+	switch (inner_mode->encap) {
 	case XFRM_MODE_BEET:
-		switch (x->sel.family) {
-		case AF_INET:
+		if (inner_mode->family == AF_INET)
 			return xfrm4_remove_beet_encap(x, skb);
-		case AF_INET6:
+		if (inner_mode->family == AF_INET6)
 			return xfrm6_remove_beet_encap(x, skb);
-		}
 		break;
 	case XFRM_MODE_TUNNEL:
-		switch (XFRM_MODE_SKB_CB(skb)->protocol) {
-		case IPPROTO_IPIP:
+		if (inner_mode->family == AF_INET)
 			return xfrm4_remove_tunnel_encap(x, skb);
-		case IPPROTO_IPV6:
+		if (inner_mode->family == AF_INET6)
 			return xfrm6_remove_tunnel_encap(x, skb);
 		break;
-		}
-		return -EINVAL;
 	}
 
 	WARN_ON_ONCE(1);
@@ -363,7 +355,9 @@ xfrm_inner_mode_encap_remove(struct xfrm_state *x,
 
 static int xfrm_prepare_input(struct xfrm_state *x, struct sk_buff *skb)
 {
-	switch (x->props.family) {
+	const struct xfrm_mode *inner_mode = &x->inner_mode;
+
+	switch (x->outer_mode.family) {
 	case AF_INET:
 		xfrm4_extract_header(skb);
 		break;
@@ -375,7 +369,25 @@ static int xfrm_prepare_input(struct xfrm_state *x, struct sk_buff *skb)
 		return -EAFNOSUPPORT;
 	}
 
-	return xfrm_inner_mode_encap_remove(x, skb);
+	if (x->sel.family == AF_UNSPEC) {
+		inner_mode = xfrm_ip2inner_mode(x, XFRM_MODE_SKB_CB(skb)->protocol);
+		if (!inner_mode)
+			return -EAFNOSUPPORT;
+	}
+
+	switch (inner_mode->family) {
+	case AF_INET:
+		skb->protocol = htons(ETH_P_IP);
+		break;
+	case AF_INET6:
+		skb->protocol = htons(ETH_P_IPV6);
+		break;
+	default:
+		WARN_ON_ONCE(1);
+		break;
+	}
+
+	return xfrm_inner_mode_encap_remove(x, inner_mode, skb);
 }
 
 /* Remove encapsulation header.
@@ -421,16 +433,17 @@ static int xfrm6_transport_input(struct xfrm_state *x, struct sk_buff *skb)
 }
 
 static int xfrm_inner_mode_input(struct xfrm_state *x,
+				 const struct xfrm_mode *inner_mode,
 				 struct sk_buff *skb)
 {
-	switch (x->props.mode) {
+	switch (inner_mode->encap) {
 	case XFRM_MODE_BEET:
 	case XFRM_MODE_TUNNEL:
 		return xfrm_prepare_input(x, skb);
 	case XFRM_MODE_TRANSPORT:
-		if (x->props.family == AF_INET)
+		if (inner_mode->family == AF_INET)
 			return xfrm4_transport_input(x, skb);
-		if (x->props.family == AF_INET6)
+		if (inner_mode->family == AF_INET6)
 			return xfrm6_transport_input(x, skb);
 		break;
 	case XFRM_MODE_ROUTEOPTIMIZATION:
@@ -448,6 +461,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 {
 	const struct xfrm_state_afinfo *afinfo;
 	struct net *net = dev_net(skb->dev);
+	const struct xfrm_mode *inner_mode;
 	int err;
 	__be32 seq;
 	__be32 seq_hi;
@@ -462,7 +476,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 	struct xfrm_offload *xo = xfrm_offload(skb);
 	struct sec_path *sp;
 
-	if (encap_type < 0 || (xo && xo->flags & XFRM_GRO)) {
+	if (encap_type < 0) {
 		x = xfrm_input_state(skb);
 
 		if (unlikely(x->km.state != XFRM_STATE_VALID)) {
@@ -477,7 +491,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			goto drop;
 		}
 
-		family = x->props.family;
+		family = x->outer_mode.family;
 
 		/* An encap_type of -1 indicates async resumption. */
 		if (encap_type == -1) {
@@ -485,7 +499,9 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			seq = XFRM_SKB_CB(skb)->seq.input.low;
 			goto resume;
 		}
-		/* GRO call */
+
+		/* encap_type < -1 indicates a GRO call. */
+		encap_type = 0;
 		seq = XFRM_SPI_SKB_CB(skb)->seq;
 
 		if (xo && (xo->flags & CRYPTO_DONE)) {
@@ -515,7 +531,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 				goto drop;
 			}
 
-			if (xfrm_parse_spi(skb, nexthdr, &spi, &seq)) {
+			if ((err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0) {
 				XFRM_INC_STATS(net, LINUX_MIB_XFRMINHDRERROR);
 				goto drop;
 			}
@@ -545,7 +561,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 	}
 
 	seq = 0;
-	if (!spi && xfrm_parse_spi(skb, nexthdr, &spi, &seq)) {
+	if (!spi && (err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0) {
 		secpath_reset(skb);
 		XFRM_INC_STATS(net, LINUX_MIB_XFRMINHDRERROR);
 		goto drop;
@@ -567,6 +583,20 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			secpath_reset(skb);
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINNOSTATES);
 			xfrm_audit_state_notfound(skb, family, spi, seq);
+			goto drop;
+		}
+
+		/* If nested tunnel, check outer states before context is lost.
+		 * Only nested tunnels need to be checked, since IP addresses change
+		 * as a result of the tunnel mode decapsulation. Similarly, this check
+		 * is limited to nested tunnels to avoid performing another policy
+		 * check on non-nested tunnels. On success, this check also updates the
+		 * secpath's verified_cnt variable, skipping future verifications of
+		 * previously-verified secpath entries.
+		 */
+		if ((x->outer_mode.flags & XFRM_MODE_FLAG_TUNNEL) &&
+		    sp->verified_cnt < sp->len &&
+		    !xfrm_policy_check(NULL, XFRM_POLICY_IN, skb, family)) {
 			goto drop;
 		}
 
@@ -654,13 +684,22 @@ resume:
 
 		x->curlft.bytes += skb->len;
 		x->curlft.packets++;
-		x->lastused = ktime_get_real_seconds();
 
 		spin_unlock(&x->lock);
 
 		XFRM_MODE_SKB_CB(skb)->protocol = nexthdr;
 
-		if (xfrm_inner_mode_input(x, skb)) {
+		inner_mode = &x->inner_mode;
+
+		if (x->sel.family == AF_UNSPEC) {
+			inner_mode = xfrm_ip2inner_mode(x, XFRM_MODE_SKB_CB(skb)->protocol);
+			if (inner_mode == NULL) {
+				XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEMODEERROR);
+				goto drop;
+			}
+		}
+
+		if (xfrm_inner_mode_input(x, inner_mode, skb)) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEMODEERROR);
 			goto drop;
 		}
@@ -675,7 +714,7 @@ resume:
 		 * transport mode so the outer address is identical.
 		 */
 		daddr = &x->id.daddr;
-		family = x->props.family;
+		family = x->outer_mode.family;
 
 		err = xfrm_parse_spi(skb, nexthdr, &spi, &seq);
 		if (err < 0) {
@@ -695,8 +734,7 @@ resume:
 		sp = skb_sec_path(skb);
 		if (sp)
 			sp->olen = 0;
-		if (skb_valid_dst(skb))
-			skb_dst_drop(skb);
+		skb_dst_drop(skb);
 		gro_cells_receive(&gro_cells, skb);
 		return 0;
 	} else {
@@ -706,7 +744,7 @@ resume:
 
 		err = -EAFNOSUPPORT;
 		rcu_read_lock();
-		afinfo = xfrm_state_afinfo_get_rcu(x->props.family);
+		afinfo = xfrm_state_afinfo_get_rcu(x->inner_mode.family);
 		if (likely(afinfo))
 			err = afinfo->transport_finish(skb, xfrm_gro || async);
 		rcu_read_unlock();
@@ -714,8 +752,7 @@ resume:
 			sp = skb_sec_path(skb);
 			if (sp)
 				sp->olen = 0;
-			if (skb_valid_dst(skb))
-				skb_dst_drop(skb);
+			skb_dst_drop(skb);
 			gro_cells_receive(&gro_cells, skb);
 			return err;
 		}

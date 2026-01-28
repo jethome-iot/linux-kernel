@@ -12,7 +12,7 @@
 #include <linux/iopoll.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -82,9 +82,9 @@
  * struct mvebu_cp110_utmi - PHY driver data
  *
  * @regs: PHY registers
- * @syscon: Regmap with system controller registers
+ * @syscom: Regmap with system controller registers
  * @dev: device driver handle
- * @ops: phy ops
+ * @caps: PHY capabilities
  */
 struct mvebu_cp110_utmi {
 	void __iomem *regs;

@@ -813,7 +813,7 @@ int ni_init_microcode(struct radeon_device *rdev)
 			err = 0;
 		} else if (rdev->smc_fw->size != smc_req_size) {
 			pr_err("ni_mc: Bogus length %zu in firmware \"%s\"\n",
-			       rdev->mc_fw->size, fw_name);
+			       rdev->smc_fw->size, fw_name);
 			err = -EINVAL;
 		}
 	}
@@ -2323,8 +2323,8 @@ int cayman_suspend(struct radeon_device *rdev)
 	cayman_cp_enable(rdev, false);
 	cayman_dma_stop(rdev);
 	if (rdev->has_uvd) {
-		radeon_uvd_suspend(rdev);
 		uvd_v1_0_fini(rdev);
+		radeon_uvd_suspend(rdev);
 	}
 	evergreen_irq_suspend(rdev);
 	radeon_wb_disable(rdev);

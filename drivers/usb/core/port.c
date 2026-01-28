@@ -7,10 +7,8 @@
  * Author: Lan Tianyu <tianyu.lan@intel.com>
  */
 
-#include <linux/kstrtox.h>
 #include <linux/slab.h>
 #include <linux/pm_qos.h>
-#include <linux/component.h>
 
 #include "hub.h"
 
@@ -43,88 +41,6 @@ static ssize_t early_stop_store(struct device *dev, struct device_attribute *att
 	return count;
 }
 static DEVICE_ATTR_RW(early_stop);
-
-static ssize_t disable_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
-{
-	struct usb_port *port_dev = to_usb_port(dev);
-	struct usb_device *hdev = to_usb_device(dev->parent->parent);
-	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
-	struct usb_interface *intf = to_usb_interface(hub->intfdev);
-	int port1 = port_dev->portnum;
-	u16 portstatus, unused;
-	bool disabled;
-	int rc;
-
-	rc = usb_autopm_get_interface(intf);
-	if (rc < 0)
-		return rc;
-
-	usb_lock_device(hdev);
-	if (hub->disconnected) {
-		rc = -ENODEV;
-		goto out_hdev_lock;
-	}
-
-	usb_hub_port_status(hub, port1, &portstatus, &unused);
-	disabled = !usb_port_is_power_on(hub, portstatus);
-
-out_hdev_lock:
-	usb_unlock_device(hdev);
-	usb_autopm_put_interface(intf);
-
-	if (rc)
-		return rc;
-
-	return sysfs_emit(buf, "%s\n", disabled ? "1" : "0");
-}
-
-static ssize_t disable_store(struct device *dev, struct device_attribute *attr,
-			    const char *buf, size_t count)
-{
-	struct usb_port *port_dev = to_usb_port(dev);
-	struct usb_device *hdev = to_usb_device(dev->parent->parent);
-	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
-	struct usb_interface *intf = to_usb_interface(hub->intfdev);
-	int port1 = port_dev->portnum;
-	bool disabled;
-	int rc;
-
-	rc = kstrtobool(buf, &disabled);
-	if (rc)
-		return rc;
-
-	rc = usb_autopm_get_interface(intf);
-	if (rc < 0)
-		return rc;
-
-	usb_lock_device(hdev);
-	if (hub->disconnected) {
-		rc = -ENODEV;
-		goto out_hdev_lock;
-	}
-
-	if (disabled && port_dev->child)
-		usb_disconnect(&port_dev->child);
-
-	rc = usb_hub_set_port_power(hdev, hub, port1, !disabled);
-
-	if (disabled) {
-		usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_CONNECTION);
-		if (!port_dev->is_superspeed)
-			usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_ENABLE);
-	}
-
-	if (!rc)
-		rc = count;
-
-out_hdev_lock:
-	usb_unlock_device(hdev);
-	usb_autopm_put_interface(intf);
-
-	return rc;
-}
-static DEVICE_ATTR_RW(disable);
 
 static ssize_t location_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
@@ -273,7 +189,6 @@ static struct attribute *port_dev_attrs[] = {
 	&dev_attr_location.attr,
 	&dev_attr_quirks.attr,
 	&dev_attr_over_current_count.attr,
-	&dev_attr_disable.attr,
 	&dev_attr_early_stop.attr,
 	NULL,
 };
@@ -651,47 +566,6 @@ static void find_and_link_peer(struct usb_hub *hub, int port1)
 		link_peers_report(port_dev, peer);
 }
 
-static int connector_bind(struct device *dev, struct device *connector, void *data)
-{
-	struct usb_port *port_dev = to_usb_port(dev);
-	int ret;
-
-	ret = sysfs_create_link(&dev->kobj, &connector->kobj, "connector");
-	if (ret)
-		return ret;
-
-	ret = sysfs_create_link(&connector->kobj, &dev->kobj, dev_name(dev));
-	if (ret) {
-		sysfs_remove_link(&dev->kobj, "connector");
-		return ret;
-	}
-
-	port_dev->connector = data;
-
-	/*
-	 * If there is already USB device connected to the port, letting the
-	 * Type-C connector know about it immediately.
-	 */
-	if (port_dev->child)
-		typec_attach(port_dev->connector, &port_dev->child->dev);
-
-	return 0;
-}
-
-static void connector_unbind(struct device *dev, struct device *connector, void *data)
-{
-	struct usb_port *port_dev = to_usb_port(dev);
-
-	sysfs_remove_link(&connector->kobj, dev_name(dev));
-	sysfs_remove_link(&dev->kobj, "connector");
-	port_dev->connector = NULL;
-}
-
-static const struct component_ops connector_ops = {
-	.bind = connector_bind,
-	.unbind = connector_unbind,
-};
-
 int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 {
 	struct usb_port *port_dev;
@@ -713,7 +587,6 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 	set_bit(port1, hub->power_bits);
 	port_dev->dev.parent = hub->intfdev;
 	if (hub_is_superspeed(hdev)) {
-		port_dev->is_superspeed = 1;
 		port_dev->usb3_lpm_u1_permit = 1;
 		port_dev->usb3_lpm_u2_permit = 1;
 		port_dev->dev.groups = port_dev_usb3_group;
@@ -721,6 +594,8 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 		port_dev->dev.groups = port_dev_group;
 	port_dev->dev.type = &usb_port_device_type;
 	port_dev->dev.driver = &usb_port_driver;
+	if (hub_is_superspeed(hub->hdev))
+		port_dev->is_superspeed = 1;
 	dev_set_name(&port_dev->dev, "%s-port%d", dev_name(&hub->hdev->dev),
 			port1);
 	mutex_init(&port_dev->status_lock);
@@ -741,12 +616,6 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 	retval = dev_pm_qos_add_request(&port_dev->dev, port_dev->req,
 			DEV_PM_QOS_FLAGS, PM_QOS_FLAG_NO_POWER_OFF);
 	if (retval < 0) {
-		goto err_put_kn;
-	}
-
-	retval = component_add(&port_dev->dev, &connector_ops);
-	if (retval) {
-		dev_warn(&port_dev->dev, "failed to add component\n");
 		goto err_put_kn;
 	}
 
@@ -801,7 +670,6 @@ void usb_hub_remove_port_device(struct usb_hub *hub, int port1)
 	peer = port_dev->peer;
 	if (peer)
 		unlink_peers(port_dev, peer);
-	component_del(&port_dev->dev, &connector_ops);
 	sysfs_put(port_dev->state_kn);
 	device_unregister(&port_dev->dev);
 }

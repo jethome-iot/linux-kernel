@@ -568,11 +568,13 @@ out_restore_conf:
 	return ret;
 }
 
-static void ina209_remove(struct i2c_client *client)
+static int ina209_remove(struct i2c_client *client)
 {
 	struct ina209_data *data = i2c_get_clientdata(client);
 
 	ina209_restore_conf(client, data);
+
+	return 0;
 }
 
 static const struct i2c_device_id ina209_id[] = {
@@ -594,7 +596,7 @@ static struct i2c_driver ina209_driver = {
 		.name	= "ina209",
 		.of_match_table = of_match_ptr(ina209_of_match),
 	},
-	.probe		= ina209_probe,
+	.probe_new	= ina209_probe,
 	.remove		= ina209_remove,
 	.id_table	= ina209_id,
 };

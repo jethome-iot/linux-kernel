@@ -166,7 +166,7 @@ static void _rtl92ce_query_rxphystatus(struct ieee80211_hw *hw,
 				pstats->rx_mimo_signalstrength[i] = (u8) rssi;
 		}
 
-		/* (2)PWDB, Average PWDB calculated by
+		/* (2)PWDB, Average PWDB cacluated by
 		 * hardware (for rate adaptive)
 		 */
 		rx_pwr_all = ((p_drvinfo->pwdb_all >> 1) & 0x7f) - 110;
@@ -518,15 +518,16 @@ void rtl92ce_tx_fill_desc(struct ieee80211_hw *hw,
 	rtl_dbg(rtlpriv, COMP_SEND, DBG_TRACE, "\n");
 }
 
-void rtl92ce_tx_fill_cmddesc(struct ieee80211_hw *hw, u8 *pdesc8,
-			     struct sk_buff *skb)
+void rtl92ce_tx_fill_cmddesc(struct ieee80211_hw *hw,
+			     u8 *pdesc8, bool firstseg,
+			     bool lastseg, struct sk_buff *skb)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	u8 fw_queue = QSLT_BEACON;
 	__le32 *pdesc = (__le32 *)pdesc8;
 
-	struct ieee80211_hdr *hdr = rtl_get_hdr(skb);
+	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)(skb->data);
 	__le16 fc = hdr->frame_control;
 
 	dma_addr_t mapping = dma_map_single(&rtlpci->pdev->dev, skb->data,
@@ -539,7 +540,9 @@ void rtl92ce_tx_fill_cmddesc(struct ieee80211_hw *hw, u8 *pdesc8,
 	}
 	clear_pci_tx_desc_content(pdesc, TX_DESC_SIZE);
 
-	set_tx_desc_offset(pdesc, USB_HWDESC_HEADER_LEN);
+	if (firstseg)
+		set_tx_desc_offset(pdesc, USB_HWDESC_HEADER_LEN);
+
 	set_tx_desc_tx_rate(pdesc, DESC_RATE1M);
 
 	set_tx_desc_seq(pdesc, 0);

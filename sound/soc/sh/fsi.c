@@ -13,6 +13,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/scatterlist.h>
 #include <linux/sh_dma.h>
 #include <linux/slab.h>
@@ -405,9 +406,9 @@ static int fsi_is_play(struct snd_pcm_substream *substream)
 
 static struct snd_soc_dai *fsi_get_dai(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 
-	return  snd_soc_rtd_to_cpu(rtd, 0);
+	return  asoc_rtd_to_cpu(rtd, 0);
 }
 
 static struct fsi_priv *fsi_get_priv_frm_dai(struct snd_soc_dai *dai)
@@ -1379,9 +1380,7 @@ static int fsi_dma_probe(struct fsi_priv *fsi, struct fsi_stream *io, struct dev
 	io->chan = dma_request_channel(mask, shdma_chan_filter,
 				       (void *)io->dma_id);
 #else
-	io->chan = dma_request_chan(dev, is_play ? "tx" : "rx");
-	if (IS_ERR(io->chan))
-		io->chan = NULL;
+	io->chan = dma_request_slave_channel(dev, is_play ? "tx" : "rx");
 #endif
 	if (io->chan) {
 		struct dma_slave_config cfg = {};
@@ -1647,10 +1646,10 @@ static int fsi_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	int ret;
 
 	/* set clock master audio interface */
-	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_BC_FC:
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBM_CFM:
 		break;
-	case SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		fsi->clk_master = 1; /* cpu is master */
 		break;
 	default:
@@ -1856,7 +1855,7 @@ static void fsi_of_parse(char *name,
 
 	for (i = 0; i < ARRAY_SIZE(of_parse_property); i++) {
 		sprintf(prop, "%s,%s", name, of_parse_property[i].name);
-		if (of_property_present(np, prop))
+		if (of_get_property(np, prop, NULL))
 			flags |= of_parse_property[i].val;
 	}
 	info->flags = flags;
@@ -2031,7 +2030,7 @@ exit_fsia:
 	return ret;
 }
 
-static void fsi_remove(struct platform_device *pdev)
+static int fsi_remove(struct platform_device *pdev)
 {
 	struct fsi_master *master;
 
@@ -2041,6 +2040,8 @@ static void fsi_remove(struct platform_device *pdev)
 
 	fsi_stream_remove(&master->fsia);
 	fsi_stream_remove(&master->fsib);
+
+	return 0;
 }
 
 static void __fsi_suspend(struct fsi_priv *fsi,
@@ -2107,7 +2108,7 @@ static struct platform_driver fsi_driver = {
 		.of_match_table = fsi_of_match,
 	},
 	.probe		= fsi_probe,
-	.remove_new	= fsi_remove,
+	.remove		= fsi_remove,
 	.id_table	= fsi_id_table,
 };
 

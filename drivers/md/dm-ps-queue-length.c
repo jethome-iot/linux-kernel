@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2004-2005 IBM Corp.  All Rights Reserved.
  * Copyright (C) 2006-2009 NEC Corporation.
@@ -36,7 +35,7 @@ struct selector {
 struct path_info {
 	struct list_head	list;
 	struct dm_path		*path;
-	unsigned int		repeat_count;
+	unsigned		repeat_count;
 	atomic_t		qlen;	/* the number of in-flight I/Os */
 };
 
@@ -53,7 +52,7 @@ static struct selector *alloc_selector(void)
 	return s;
 }
 
-static int ql_create(struct path_selector *ps, unsigned int argc, char **argv)
+static int ql_create(struct path_selector *ps, unsigned argc, char **argv)
 {
 	struct selector *s = alloc_selector();
 
@@ -85,9 +84,9 @@ static void ql_destroy(struct path_selector *ps)
 }
 
 static int ql_status(struct path_selector *ps, struct dm_path *path,
-		     status_type_t type, char *result, unsigned int maxlen)
+		     status_type_t type, char *result, unsigned maxlen)
 {
-	unsigned int sz = 0;
+	unsigned sz = 0;
 	struct path_info *pi;
 
 	/* When called with NULL path, return selector status/args. */
@@ -117,14 +116,14 @@ static int ql_add_path(struct path_selector *ps, struct dm_path *path,
 {
 	struct selector *s = ps->context;
 	struct path_info *pi;
-	unsigned int repeat_count = QL_MIN_IO;
+	unsigned repeat_count = QL_MIN_IO;
 	char dummy;
 	unsigned long flags;
 
 	/*
 	 * Arguments: [<repeat_count>]
-	 *	<repeat_count>: The number of I/Os before switching path.
-	 *			If not given, default (QL_MIN_IO) is used.
+	 * 	<repeat_count>: The number of I/Os before switching path.
+	 * 			If not given, default (QL_MIN_IO) is used.
 	 */
 	if (argc > 1) {
 		*error = "queue-length ps: incorrect number of arguments";

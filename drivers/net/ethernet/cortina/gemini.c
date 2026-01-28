@@ -79,7 +79,8 @@ MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
 #define GMAC0_IRQ4_8 (GMAC0_MIB_INT_BIT | GMAC0_RX_OVERRUN_INT_BIT)
 
 #define GMAC_OFFLOAD_FEATURES (NETIF_F_SG | NETIF_F_IP_CSUM | \
-			       NETIF_F_IPV6_CSUM | NETIF_F_RXCSUM)
+		NETIF_F_IPV6_CSUM | NETIF_F_RXCSUM | \
+		NETIF_F_TSO | NETIF_F_TSO_ECN | NETIF_F_TSO6)
 
 /**
  * struct gmac_queue_page - page buffer per-page info
@@ -1142,12 +1143,22 @@ static int gmac_map_tx_bufs(struct net_device *netdev, struct sk_buff *skb,
 	struct gmac_txdesc *txd;
 	skb_frag_t *skb_frag;
 	dma_addr_t mapping;
+	unsigned short mtu;
 	void *buffer;
 	int ret;
 
-	/* TODO: implement proper TSO using MTU in word3 */
+	mtu  = ETH_HLEN;
+	mtu += netdev->mtu;
+	if (skb->protocol == htons(ETH_P_8021Q))
+		mtu += VLAN_HLEN;
+
 	word1 = skb->len;
 	word3 = SOF_BIT;
+
+	if (word1 > mtu) {
+		word1 |= TSS_MTU_ENABLE_BIT;
+		word3 |= mtu;
+	}
 
 	if (skb->len >= ETH_FRAME_LEN) {
 		/* Hardware offloaded checksumming isn't working on frames
@@ -1902,7 +1913,7 @@ static int gmac_set_mac_address(struct net_device *netdev, void *addr)
 {
 	struct sockaddr *sa = addr;
 
-	eth_hw_addr_set(netdev, sa->sa_data);
+	memcpy(netdev->dev_addr, sa->sa_data, ETH_ALEN);
 	gmac_write_mac_address(netdev);
 
 	return 0;
@@ -1930,7 +1941,7 @@ static void gmac_get_stats64(struct net_device *netdev,
 
 	/* Racing with RX NAPI */
 	do {
-		start = u64_stats_fetch_begin(&port->rx_stats_syncp);
+		start = u64_stats_fetch_begin_irq(&port->rx_stats_syncp);
 
 		stats->rx_packets = port->stats.rx_packets;
 		stats->rx_bytes = port->stats.rx_bytes;
@@ -1942,11 +1953,11 @@ static void gmac_get_stats64(struct net_device *netdev,
 		stats->rx_crc_errors = port->stats.rx_crc_errors;
 		stats->rx_frame_errors = port->stats.rx_frame_errors;
 
-	} while (u64_stats_fetch_retry(&port->rx_stats_syncp, start));
+	} while (u64_stats_fetch_retry_irq(&port->rx_stats_syncp, start));
 
 	/* Racing with MIB and TX completion interrupts */
 	do {
-		start = u64_stats_fetch_begin(&port->ir_stats_syncp);
+		start = u64_stats_fetch_begin_irq(&port->ir_stats_syncp);
 
 		stats->tx_errors = port->stats.tx_errors;
 		stats->tx_packets = port->stats.tx_packets;
@@ -1956,15 +1967,15 @@ static void gmac_get_stats64(struct net_device *netdev,
 		stats->rx_missed_errors = port->stats.rx_missed_errors;
 		stats->rx_fifo_errors = port->stats.rx_fifo_errors;
 
-	} while (u64_stats_fetch_retry(&port->ir_stats_syncp, start));
+	} while (u64_stats_fetch_retry_irq(&port->ir_stats_syncp, start));
 
 	/* Racing with hard_start_xmit */
 	do {
-		start = u64_stats_fetch_begin(&port->tx_stats_syncp);
+		start = u64_stats_fetch_begin_irq(&port->tx_stats_syncp);
 
 		stats->tx_dropped = port->stats.tx_dropped;
 
-	} while (u64_stats_fetch_retry(&port->tx_stats_syncp, start));
+	} while (u64_stats_fetch_retry_irq(&port->tx_stats_syncp, start));
 
 	stats->rx_dropped += stats->rx_missed_errors;
 }
@@ -2033,18 +2044,18 @@ static void gmac_get_ethtool_stats(struct net_device *netdev,
 	/* Racing with MIB interrupt */
 	do {
 		p = values;
-		start = u64_stats_fetch_begin(&port->ir_stats_syncp);
+		start = u64_stats_fetch_begin_irq(&port->ir_stats_syncp);
 
 		for (i = 0; i < RX_STATS_NUM; i++)
 			*p++ = port->hw_stats[i];
 
-	} while (u64_stats_fetch_retry(&port->ir_stats_syncp, start));
+	} while (u64_stats_fetch_retry_irq(&port->ir_stats_syncp, start));
 	values = p;
 
 	/* Racing with RX NAPI */
 	do {
 		p = values;
-		start = u64_stats_fetch_begin(&port->rx_stats_syncp);
+		start = u64_stats_fetch_begin_irq(&port->rx_stats_syncp);
 
 		for (i = 0; i < RX_STATUS_NUM; i++)
 			*p++ = port->rx_stats[i];
@@ -2052,13 +2063,13 @@ static void gmac_get_ethtool_stats(struct net_device *netdev,
 			*p++ = port->rx_csum_stats[i];
 		*p++ = port->rx_napi_exits;
 
-	} while (u64_stats_fetch_retry(&port->rx_stats_syncp, start));
+	} while (u64_stats_fetch_retry_irq(&port->rx_stats_syncp, start));
 	values = p;
 
 	/* Racing with TX start_xmit */
 	do {
 		p = values;
-		start = u64_stats_fetch_begin(&port->tx_stats_syncp);
+		start = u64_stats_fetch_begin_irq(&port->tx_stats_syncp);
 
 		for (i = 0; i < TX_MAX_FRAGS; i++) {
 			*values++ = port->tx_frag_stats[i];
@@ -2067,7 +2078,7 @@ static void gmac_get_ethtool_stats(struct net_device *netdev,
 		*values++ = port->tx_frags_linearized;
 		*values++ = port->tx_hw_csummed;
 
-	} while (u64_stats_fetch_retry(&port->tx_stats_syncp, start));
+	} while (u64_stats_fetch_retry_irq(&port->tx_stats_syncp, start));
 }
 
 static int gmac_get_ksettings(struct net_device *netdev,
@@ -2109,9 +2120,7 @@ static void gmac_get_pauseparam(struct net_device *netdev,
 }
 
 static void gmac_get_ringparam(struct net_device *netdev,
-			       struct ethtool_ringparam *rp,
-			       struct kernel_ethtool_ringparam *kernel_rp,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *rp)
 {
 	struct gemini_ethernet_port *port = netdev_priv(netdev);
 
@@ -2129,9 +2138,7 @@ static void gmac_get_ringparam(struct net_device *netdev,
 }
 
 static int gmac_set_ringparam(struct net_device *netdev,
-			      struct ethtool_ringparam *rp,
-			      struct kernel_ethtool_ringparam *kernel_rp,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_ringparam *rp)
 {
 	struct gemini_ethernet_port *port = netdev_priv(netdev);
 	int err = 0;
@@ -2363,13 +2370,11 @@ static void gemini_port_save_mac_addr(struct gemini_ethernet_port *port)
 static int gemini_ethernet_port_probe(struct platform_device *pdev)
 {
 	char *port_names[2] = { "ethernet0", "ethernet1" };
-	struct device_node *np = pdev->dev.of_node;
 	struct gemini_ethernet_port *port;
 	struct device *dev = &pdev->dev;
 	struct gemini_ethernet *geth;
 	struct net_device *netdev;
 	struct device *parent;
-	u8 mac[ETH_ALEN];
 	unsigned int id;
 	int irq;
 	int ret;
@@ -2416,8 +2421,8 @@ static int gemini_ethernet_port_probe(struct platform_device *pdev)
 
 	/* Interrupt */
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
+	if (irq <= 0)
+		return irq ? irq : -ENODEV;
 	port->irq = irq;
 
 	/* Clock the port */
@@ -2473,22 +2478,16 @@ static int gemini_ethernet_port_probe(struct platform_device *pdev)
 	netdev->max_mtu = MTU_SIZE_BIT_MASK - VLAN_ETH_HLEN;
 
 	port->freeq_refill = 0;
-	netif_napi_add(netdev, &port->napi, gmac_napi_poll);
-
-	ret = of_get_mac_address(np, mac);
-	if (!ret) {
-		dev_info(dev, "Setting macaddr from DT %pM\n", mac);
-		memcpy(port->mac_addr, mac, ETH_ALEN);
-	}
+	netif_napi_add(netdev, &port->napi, gmac_napi_poll, NAPI_POLL_WEIGHT);
 
 	if (is_valid_ether_addr((void *)port->mac_addr)) {
-		eth_hw_addr_set(netdev, (u8 *)port->mac_addr);
+		memcpy(netdev->dev_addr, port->mac_addr, ETH_ALEN);
 	} else {
 		dev_dbg(dev, "ethernet address 0x%08x%08x%08x invalid\n",
 			port->mac_addr[0], port->mac_addr[1],
 			port->mac_addr[2]);
 		dev_info(dev, "using a random ethernet address\n");
-		eth_hw_addr_random(netdev);
+		eth_random_addr(netdev->dev_addr);
 	}
 	gmac_write_mac_address(netdev);
 
@@ -2520,11 +2519,13 @@ unprepare:
 	return ret;
 }
 
-static void gemini_ethernet_port_remove(struct platform_device *pdev)
+static int gemini_ethernet_port_remove(struct platform_device *pdev)
 {
 	struct gemini_ethernet_port *port = platform_get_drvdata(pdev);
 
 	gemini_port_remove(port);
+
+	return 0;
 }
 
 static const struct of_device_id gemini_ethernet_port_of_match[] = {
@@ -2538,10 +2539,10 @@ MODULE_DEVICE_TABLE(of, gemini_ethernet_port_of_match);
 static struct platform_driver gemini_ethernet_port_driver = {
 	.driver = {
 		.name = "gemini-ethernet-port",
-		.of_match_table = gemini_ethernet_port_of_match,
+		.of_match_table = of_match_ptr(gemini_ethernet_port_of_match),
 	},
 	.probe = gemini_ethernet_port_probe,
-	.remove_new = gemini_ethernet_port_remove,
+	.remove = gemini_ethernet_port_remove,
 };
 
 static int gemini_ethernet_probe(struct platform_device *pdev)
@@ -2583,12 +2584,14 @@ static int gemini_ethernet_probe(struct platform_device *pdev)
 	return devm_of_platform_populate(dev);
 }
 
-static void gemini_ethernet_remove(struct platform_device *pdev)
+static int gemini_ethernet_remove(struct platform_device *pdev)
 {
 	struct gemini_ethernet *geth = platform_get_drvdata(pdev);
 
 	geth_cleanup_freeq(geth);
 	geth->initialized = false;
+
+	return 0;
 }
 
 static const struct of_device_id gemini_ethernet_of_match[] = {
@@ -2602,10 +2605,10 @@ MODULE_DEVICE_TABLE(of, gemini_ethernet_of_match);
 static struct platform_driver gemini_ethernet_driver = {
 	.driver = {
 		.name = DRV_NAME,
-		.of_match_table = gemini_ethernet_of_match,
+		.of_match_table = of_match_ptr(gemini_ethernet_of_match),
 	},
 	.probe = gemini_ethernet_probe,
-	.remove_new = gemini_ethernet_remove,
+	.remove = gemini_ethernet_remove,
 };
 
 static int __init gemini_ethernet_module_init(void)

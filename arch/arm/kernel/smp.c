@@ -48,7 +48,21 @@
 #include <asm/mach/arch.h>
 #include <asm/mpu.h>
 
+#if IS_ENABLED(CONFIG_AMLOGIC_FREERTOS)
+#include <linux/amlogic/freertos.h>
+#endif
+
+#define CREATE_TRACE_POINTS
 #include <trace/events/ipi.h>
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_raise);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_entry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_exit);
+
+#ifdef CONFIG_AMLOGIC_RAMDUMP
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/debug.h>
+#endif
 
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
@@ -66,6 +80,9 @@ enum ipi_msg_type {
 	IPI_IRQ_WORK,
 	IPI_COMPLETION,
 	NR_IPI,
+#if IS_ENABLED(CONFIG_AMLOGIC_FREERTOS)
+	IPI_FREERTOS = NR_IPI,
+#endif
 	/*
 	 * CPU_BACKTRACE is special and not included in NR_IPI
 	 * or tracable with trace_ipi_*
@@ -152,7 +169,6 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 	secondary_data.pgdir = virt_to_phys(idmap_pgd);
 	secondary_data.swapper_pg_dir = get_arch_pgd(swapper_pg_dir);
 #endif
-	secondary_data.task = idle;
 	sync_cache_w(&secondary_data);
 
 	/*
@@ -232,7 +248,11 @@ int platform_can_hotplug_cpu(unsigned int cpu)
 	 * since this is special on a lot of platforms, e.g. because
 	 * of clock tick interrupts.
 	 */
+#if IS_ENABLED(CONFIG_AMLOGIC_HOTPLUG_ARM_CPU0)
+	return 1;
+#else
 	return cpu != 0;
+#endif
 }
 
 static void ipi_teardown(int cpu)
@@ -288,11 +308,15 @@ int __cpu_disable(void)
 }
 
 /*
- * called on the thread which is asking for a CPU to be shutdown after the
- * shutdown completed.
+ * called on the thread which is asking for a CPU to be shutdown -
+ * waits until shutdown has completed, or it is timed out.
  */
-void arch_cpuhp_cleanup_dead_cpu(unsigned int cpu)
+void __cpu_die(unsigned int cpu)
 {
+	if (!cpu_wait_death(cpu, 5)) {
+		pr_err("CPU%u: cpu didn't die\n", cpu);
+		return;
+	}
 	pr_debug("CPU%u: shutdown\n", cpu);
 
 	clear_tasks_mm_cpumask(cpu);
@@ -315,7 +339,7 @@ void arch_cpuhp_cleanup_dead_cpu(unsigned int cpu)
  * of the other hotplug-cpu capable cores, so presumably coming
  * out of idle fixes this.
  */
-void __noreturn arch_cpu_idle_dead(void)
+void arch_cpu_idle_dead(void)
 {
 	unsigned int cpu = smp_processor_id();
 
@@ -332,11 +356,11 @@ void __noreturn arch_cpu_idle_dead(void)
 	flush_cache_louis();
 
 	/*
-	 * Tell cpuhp_bp_sync_dead() that this CPU is now safe to dispose
-	 * of. Once this returns, power and/or clocks can be removed at
-	 * any point from this CPU and its cache by platform_cpu_kill().
+	 * Tell __cpu_die() that this CPU is now safe to dispose of.  Once
+	 * this returns, power and/or clocks can be removed at any point
+	 * from this CPU and its cache by platform_cpu_kill().
 	 */
-	cpuhp_ap_report_dead();
+	(void)cpu_report_death();
 
 	/*
 	 * Ensure that the cache lines associated with that completion are
@@ -369,16 +393,20 @@ void __noreturn arch_cpu_idle_dead(void)
 	 * cpu initialisation.  There's some initialisation which needs
 	 * to be repeated to undo the effects of taking the CPU offline.
 	 */
+#ifdef CONFIG_AMLOGIC_VMAP
 	__asm__("mov	sp, %0\n"
 	"	mov	fp, #0\n"
-	"	mov	r0, %1\n"
 	"	b	secondary_start_kernel"
 		:
-		: "r" (task_stack_page(current) + THREAD_SIZE - 8),
-		  "r" (current)
-		: "r0");
-
-	unreachable();
+		: "r" (task_stack_page(current) + THREAD_SIZE - 8 -
+		       THREAD_INFO_SIZE));
+#else
+	__asm__("mov	sp, %0\n"
+	"	mov	fp, #0\n"
+	"	b	secondary_start_kernel"
+		:
+		: "r" (task_stack_page(current) + THREAD_SIZE - 8));
+#endif
 }
 #endif /* CONFIG_HOTPLUG_CPU */
 
@@ -397,22 +425,14 @@ static void smp_store_cpu_info(unsigned int cpuid)
 	check_cpu_icache_size(cpuid);
 }
 
-static void set_current(struct task_struct *cur)
-{
-	/* Set TPIDRURO */
-	asm("mcr p15, 0, %0, c13, c0, 3" :: "r"(cur) : "memory");
-}
-
 /*
  * This is the secondary CPU boot entry.  We're using this CPUs
  * idle thread stack, but a set of temporary page tables.
  */
-asmlinkage void secondary_start_kernel(struct task_struct *task)
+asmlinkage void secondary_start_kernel(void)
 {
 	struct mm_struct *mm = &init_mm;
 	unsigned int cpu;
-
-	set_current(task);
 
 	secondary_biglittle_init();
 
@@ -597,8 +617,6 @@ static DEFINE_RAW_SPINLOCK(stop_lock);
  */
 static void ipi_cpu_stop(unsigned int cpu)
 {
-	local_fiq_disable();
-
 	if (system_state <= SYSTEM_RUNNING) {
 		raw_spin_lock(&stop_lock);
 		pr_crit("CPU%u: stopping\n", cpu);
@@ -607,6 +625,9 @@ static void ipi_cpu_stop(unsigned int cpu)
 	}
 
 	set_cpu_online(cpu, false);
+
+	local_fiq_disable();
+	local_irq_disable();
 
 	while (1) {
 		cpu_relax();
@@ -635,7 +656,7 @@ static void do_handle_IPI(int ipinr)
 	unsigned int cpu = smp_processor_id();
 
 	if ((unsigned)ipinr < NR_IPI)
-		trace_ipi_entry(ipi_types[ipinr]);
+		trace_ipi_entry_rcuidle(ipi_types[ipinr]);
 
 	switch (ipinr) {
 	case IPI_WAKEUP:
@@ -656,6 +677,9 @@ static void do_handle_IPI(int ipinr)
 		break;
 
 	case IPI_CPU_STOP:
+#ifdef CONFIG_AMLOGIC_RAMDUMP
+		trace_android_vh_ipi_stop(get_irq_regs());
+#endif
 		ipi_cpu_stop(cpu);
 		break;
 
@@ -670,6 +694,13 @@ static void do_handle_IPI(int ipinr)
 		break;
 
 	case IPI_CPU_BACKTRACE:
+#if IS_ENABLED(CONFIG_AMLOGIC_FREERTOS)
+#if IS_ENABLED(CONFIG_AMLOGIC_FREERTOS_NOFITIER) && IS_ENABLED(CONFIG_AMLOGIC_FREERTOS_C3)
+		call_freertos_notifiers(1, NULL);
+#endif
+		if (!freertos_finish())
+			break;
+#endif
 		printk_deferred_enter();
 		nmi_cpu_backtrace(get_irq_regs());
 		printk_deferred_exit();
@@ -682,7 +713,7 @@ static void do_handle_IPI(int ipinr)
 	}
 
 	if ((unsigned)ipinr < NR_IPI)
-		trace_ipi_exit(ipi_types[ipinr]);
+		trace_ipi_exit_rcuidle(ipi_types[ipinr]);
 }
 
 /* Legacy version, should go away once all irqchips have been converted */
@@ -705,7 +736,7 @@ static irqreturn_t ipi_handler(int irq, void *data)
 
 static void smp_cross_call(const struct cpumask *target, unsigned int ipinr)
 {
-	trace_ipi_raise(target, ipi_types[ipinr]);
+	trace_ipi_raise_rcuidle(target, ipi_types[ipinr]);
 	__ipi_send_mask(ipi_desc[ipinr], target);
 }
 
@@ -735,7 +766,12 @@ void __init set_smp_ipi_range(int ipi_base, int n)
 		WARN_ON(err);
 
 		ipi_desc[i] = irq_to_desc(ipi_base + i);
-		irq_set_status_flags(ipi_base + i, IRQ_HIDDEN);
+
+		if (i != IPI_RESCHEDULE)
+			irq_set_status_flags(ipi_base + i, IRQ_HIDDEN);
+		else
+			/* The recheduling IPI is special... */
+			irq_set_status_flags(ipi_base + i, IRQ_HIDDEN|IRQ_RAW);
 	}
 
 	ipi_irq_base = ipi_base;
@@ -744,10 +780,18 @@ void __init set_smp_ipi_range(int ipi_base, int n)
 	ipi_setup(smp_processor_id());
 }
 
-void arch_smp_send_reschedule(int cpu)
+void smp_send_reschedule(int cpu)
 {
 	smp_cross_call(cpumask_of(cpu), IPI_RESCHEDULE);
 }
+
+#if IS_ENABLED(CONFIG_AMLOGIC_FREERTOS_IPI_SEND)
+void arch_send_ipi_rtos(int cpu)
+{
+	smp_cross_call(cpumask_of(cpu), IPI_FREERTOS);
+}
+EXPORT_SYMBOL(arch_send_ipi_rtos);
+#endif
 
 void smp_send_stop(void)
 {
@@ -774,13 +818,21 @@ void smp_send_stop(void)
  * kdump fails. So split out the panic_smp_self_stop() and add
  * set_cpu_online(smp_processor_id(), false).
  */
-void __noreturn panic_smp_self_stop(void)
+void panic_smp_self_stop(void)
 {
 	pr_debug("CPU %u will stop doing anything useful since another CPU has paniced\n",
 	         smp_processor_id());
 	set_cpu_online(smp_processor_id(), false);
 	while (1)
 		cpu_relax();
+}
+
+/*
+ * not supported here
+ */
+int setup_profiling_timer(unsigned int multiplier)
+{
+	return -EINVAL;
 }
 
 #ifdef CONFIG_CPU_FREQ
@@ -846,7 +898,7 @@ static void raise_nmi(cpumask_t *mask)
 	__ipi_send_mask(ipi_desc[IPI_CPU_BACKTRACE], mask);
 }
 
-void arch_trigger_cpumask_backtrace(const cpumask_t *mask, int exclude_cpu)
+void arch_trigger_cpumask_backtrace(const cpumask_t *mask, bool exclude_self)
 {
-	nmi_trigger_cpumask_backtrace(mask, exclude_cpu, raise_nmi);
+	nmi_trigger_cpumask_backtrace(mask, exclude_self, raise_nmi);
 }

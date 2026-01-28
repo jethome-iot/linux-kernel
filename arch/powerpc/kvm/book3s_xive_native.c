@@ -93,7 +93,8 @@ void kvmppc_xive_native_cleanup_vcpu(struct kvm_vcpu *vcpu)
 		/* Free the escalation irq */
 		if (xc->esc_virq[i]) {
 			if (kvmppc_xive_has_single_escalation(xc->xive))
-				xive_cleanup_single_escalation(vcpu, xc->esc_virq[i]);
+				xive_cleanup_single_escalation(vcpu, xc,
+							xc->esc_virq[i]);
 			free_irq(xc->esc_virq[i], vcpu);
 			irq_dispose_mapping(xc->esc_virq[i]);
 			kfree(xc->esc_virq_names[i]);
@@ -208,7 +209,7 @@ static int kvmppc_xive_native_reset_mapped(struct kvm *kvm, unsigned long irq)
 
 	/*
 	 * Clear the ESB pages of the IRQ number being mapped (or
-	 * unmapped) into the guest and let the VM fault handler
+	 * unmapped) into the guest and let the the VM fault handler
 	 * repopulate with the appropriate ESB pages (device or IC)
 	 */
 	pr_debug("clearing esb pages for girq 0x%lx\n", irq);
@@ -324,7 +325,7 @@ static int kvmppc_xive_native_mmap(struct kvm_device *dev,
 		return -EINVAL;
 	}
 
-	vm_flags_set(vma, VM_IO | VM_PFNMAP);
+	vma->vm_flags |= VM_IO | VM_PFNMAP;
 	vma->vm_page_prot = pgprot_noncached_wc(vma->vm_page_prot);
 
 	/*
@@ -567,7 +568,7 @@ static int kvmppc_xive_native_set_queue_config(struct kvmppc_xive *xive,
 	u8 priority;
 	struct kvm_ppc_xive_eq kvm_eq;
 	int rc;
-	__be32 *qaddr = NULL;
+	__be32 *qaddr = 0;
 	struct page *page;
 	struct xive_q *q;
 	gfn_t gfn;
@@ -1258,15 +1259,24 @@ DEFINE_SHOW_ATTRIBUTE(xive_native_debug);
 
 static void xive_native_debugfs_init(struct kvmppc_xive *xive)
 {
-	xive->dentry = debugfs_create_file("xive", 0444, xive->kvm->debugfs_dentry,
+	char *name;
+
+	name = kasprintf(GFP_KERNEL, "kvm-xive-%p", xive);
+	if (!name) {
+		pr_err("%s: no memory for name\n", __func__);
+		return;
+	}
+
+	xive->dentry = debugfs_create_file(name, 0444, arch_debugfs_dir,
 					   xive, &xive_native_debug_fops);
 
-	pr_debug("%s: created\n", __func__);
+	pr_debug("%s: created %s\n", __func__, name);
+	kfree(name);
 }
 
 static void kvmppc_xive_native_init(struct kvm_device *dev)
 {
-	struct kvmppc_xive *xive = dev->private;
+	struct kvmppc_xive *xive = (struct kvmppc_xive *)dev->private;
 
 	/* Register some debug interfaces */
 	xive_native_debugfs_init(xive);

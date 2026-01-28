@@ -114,9 +114,11 @@
 #include <linux/gfp.h>
 #include <linux/delay.h>
 #include <linux/io.h>
-#include <linux/comedi/comedidev.h>
-#include <linux/comedi/comedi_8254.h>
-#include <linux/comedi/comedi_isadma.h>
+
+#include "../comedidev.h"
+
+#include "comedi_isadma.h"
+#include "comedi_8254.h"
 
 /*
  * Register I/O map
@@ -1143,11 +1145,11 @@ static int pcl812_attach(struct comedi_device *dev, struct comedi_devconfig *it)
 		return ret;
 
 	if (board->irq_bits) {
-		dev->pacer =
-		    comedi_8254_io_alloc(dev->iobase + PCL812_TIMER_BASE,
-					 I8254_OSC_BASE_2MHZ, I8254_IO8, 0);
-		if (IS_ERR(dev->pacer))
-			return PTR_ERR(dev->pacer);
+		dev->pacer = comedi_8254_init(dev->iobase + PCL812_TIMER_BASE,
+					      I8254_OSC_BASE_2MHZ,
+					      I8254_IO8, 0);
+		if (!dev->pacer)
+			return -ENOMEM;
 
 		if ((1 << it->options[1]) & board->irq_bits) {
 			ret = request_irq(it->options[1], pcl812_interrupt, 0,

@@ -3,7 +3,6 @@
 
 . "$(dirname "${0}")/mptcp_lib.sh"
 
-sec=$(date +%s)
 rndh=$(printf %x $sec)-$(mktemp -u XXXXXX)
 ns1="ns1-$rndh"
 ns2="ns2-$rndh"
@@ -15,7 +14,6 @@ timeout_test=$((timeout_poll * 2 + 1))
 test_cnt=1
 ret=0
 bail=0
-slack=50
 
 usage() {
 	echo "Usage: $0 [ -b ] [ -c ] [ -d ]"
@@ -58,7 +56,6 @@ setup()
 	cout=$(mktemp)
 	capout=$(mktemp)
 	size=$((2 * 2048 * 4096))
-
 	dd if=/dev/zero of=$small bs=4096 count=20 >/dev/null 2>&1
 	dd if=/dev/zero of=$large bs=4096 count=$((size / 4096)) >/dev/null 2>&1
 
@@ -111,16 +108,23 @@ setup()
 	ip -net "$ns3" route add default via dead:beef:3::2
 
 	ip netns exec "$ns3" ./pm_nl_ctl limits 1 1
+}
 
-	# debug build can slow down measurably the test program
-	# we use quite tight time limit on the run-time, to ensure
-	# maximum B/W usage.
-	# Use kmemleak/lockdep/kasan/prove_locking presence as a rough
-	# estimate for this being a debug kernel and increase the
-	# maximum run-time accordingly. Observed run times for CI builds
-	# running selftests, including kbuild, were used to determine the
-	# amount of time to add.
-	grep -q ' kmemleak_init$\| lockdep_init$\| kasan_init$\| prove_locking$' /proc/kallsyms && slack=$((slack+550))
+# $1: ns, $2: port
+wait_local_port_listen()
+{
+	local listener_ns="${1}"
+	local port="${2}"
+
+	local port_hex i
+
+	port_hex="$(printf "%04X" "${port}")"
+	for i in $(seq 10); do
+		ip netns exec "${listener_ns}" cat /proc/net/tcp* | \
+			awk "BEGIN {rc=1} {if (\$2 ~ /:${port_hex}\$/ && \$4 ~ /0A/) {rc=0; exit}} END {exit rc}" &&
+			break
+		sleep 0.1
+	done
 }
 
 do_transfer()
@@ -135,6 +139,9 @@ do_transfer()
 	:> "$cout"
 	:> "$sout"
 	:> "$capout"
+
+	local addr_port
+	addr_port=$(printf "%s:%d" ${connect_addr} ${port})
 
 	if $capture; then
 		local capuser
@@ -158,15 +165,15 @@ do_transfer()
 
 	timeout ${timeout_test} \
 		ip netns exec ${ns3} \
-			./mptcp_connect -jt ${timeout_poll} -l -p $port -T $max_time \
+			./mptcp_connect -jt ${timeout_poll} -l -p $port -T $time \
 				0.0.0.0 < "$sin" > "$sout" &
 	local spid=$!
 
-	mptcp_lib_wait_local_port_listen "${ns3}" "${port}"
+	wait_local_port_listen "${ns3}" "${port}"
 
 	timeout ${timeout_test} \
 		ip netns exec ${ns1} \
-			./mptcp_connect -jt ${timeout_poll} -p $port -T $max_time \
+			./mptcp_connect -jt ${timeout_poll} -p $port -T $time \
 				10.0.3.3 < "$cin" > "$cout" &
 	local cpid=$!
 
@@ -239,12 +246,11 @@ run_test()
 
 	# mptcp_connect will do some sleeps to allow the mp_join handshake
 	# completion (see mptcp_connect): 200ms on each side, add some slack
-	time=$((time + 400 + slack))
+	time=$((time + 450))
 
 	printf "%-60s" "$msg"
 	do_transfer $small $large $time
 	lret=$?
-	mptcp_lib_result_code "${lret}" "${msg}"
 	if [ $lret -ne 0 ]; then
 		ret=$lret
 		[ $bail -eq 0 ] || exit $ret
@@ -253,7 +259,6 @@ run_test()
 	printf "%-60s" "$msg - reverse direction"
 	do_transfer $large $small $time
 	lret=$?
-	mptcp_lib_result_code "${lret}" "${msg}"
 	if [ $lret -ne 0 ]; then
 		ret=$lret
 		[ $bail -eq 0 ] || exit $ret
@@ -290,6 +295,4 @@ run_test 10 10 1 25 "balanced bwidth with unbalanced delay"
 run_test 10 3 0 0 "unbalanced bwidth"
 run_test 10 3 1 25 "unbalanced bwidth with unbalanced delay"
 run_test 10 3 25 1 "unbalanced bwidth with opposed, unbalanced delay"
-
-mptcp_lib_result_print_all_tap
 exit $ret

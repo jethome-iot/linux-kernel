@@ -1,0 +1,16 @@
+#
+# Amlogic mhu mailbox device configuration
+#
+
+menu "MESON MHU mailbox Support"
+
+config AMLOGIC_MHU_MBOX
+	tristate "MESON MHU Mailbox"
+	default n
+	depends on MAILBOX
+	help
+		MESON Mailbox driver.
+		.
+		.
+		.
+endmenu

@@ -2,8 +2,7 @@
  * Copyright 2006, Red Hat, Inc., Dave Jones
  * Released under the General Public License (GPL).
  *
- * This file contains the linked list validation and error reporting for
- * LIST_HARDENED and DEBUG_LIST.
+ * This file contains the linked list validation for DEBUG_LIST.
  */
 
 #include <linux/export.h>
@@ -18,9 +17,8 @@
  * attempt).
  */
 
-__list_valid_slowpath
-bool __list_add_valid_or_report(struct list_head *new, struct list_head *prev,
-				struct list_head *next)
+bool __list_add_valid(struct list_head *new, struct list_head *prev,
+		      struct list_head *next)
 {
 	if (CHECK_DATA_CORRUPTION(prev == NULL,
 			"list_add corruption. prev is NULL.\n") ||
@@ -39,10 +37,9 @@ bool __list_add_valid_or_report(struct list_head *new, struct list_head *prev,
 
 	return true;
 }
-EXPORT_SYMBOL(__list_add_valid_or_report);
+EXPORT_SYMBOL(__list_add_valid);
 
-__list_valid_slowpath
-bool __list_del_entry_valid_or_report(struct list_head *entry)
+bool __list_del_entry_valid(struct list_head *entry)
 {
 	struct list_head *prev, *next;
 
@@ -60,13 +57,14 @@ bool __list_del_entry_valid_or_report(struct list_head *entry)
 			"list_del corruption, %px->prev is LIST_POISON2 (%px)\n",
 			entry, LIST_POISON2) ||
 	    CHECK_DATA_CORRUPTION(prev->next != entry,
-			"list_del corruption. prev->next should be %px, but was %px. (prev=%px)\n",
-			entry, prev->next, prev) ||
+			"list_del corruption. prev->next should be %px, but was %px\n",
+			entry, prev->next) ||
 	    CHECK_DATA_CORRUPTION(next->prev != entry,
-			"list_del corruption. next->prev should be %px, but was %px. (next=%px)\n",
-			entry, next->prev, next))
+			"list_del corruption. next->prev should be %px, but was %px\n",
+			entry, next->prev))
 		return false;
 
 	return true;
+
 }
-EXPORT_SYMBOL(__list_del_entry_valid_or_report);
+EXPORT_SYMBOL(__list_del_entry_valid);

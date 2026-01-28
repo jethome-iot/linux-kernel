@@ -46,11 +46,6 @@
  * properties that specify how the pixels are positioned and blended, like
  * rotation or Z-position. All these properties are stored in &drm_plane_state.
  *
- * Unless explicitly specified (via CRTC property or otherwise), the active area
- * of a CRTC will be black by default. This means portions of the active area
- * which are not covered by a plane will be black, and alpha blending of any
- * planes with the CRTC background will blend with black at the lowest zpos.
- *
  * To create a plane, a KMS drivers allocates and zeroes an instances of
  * &struct drm_plane (possibly as part of a larger structure) and registers it
  * with a call to drm_universal_plane_init().
@@ -207,13 +202,17 @@ static int create_in_format_blob(struct drm_device *dev, struct drm_plane *plane
 
 	memcpy(formats_ptr(blob_data), plane->format_types, formats_size);
 
+	/* If we can't determine support, just bail */
+	if (!plane->funcs->format_mod_supported)
+		goto done;
+
 	mod = modifiers_ptr(blob_data);
 	for (i = 0; i < plane->modifier_count; i++) {
 		for (j = 0; j < plane->format_count; j++) {
-			if (!plane->funcs->format_mod_supported ||
-			    plane->funcs->format_mod_supported(plane,
+			if (plane->funcs->format_mod_supported(plane,
 							       plane->format_types[j],
 							       plane->modifiers[i])) {
+
 				mod->formats |= 1ULL << j;
 			}
 		}
@@ -224,105 +223,9 @@ static int create_in_format_blob(struct drm_device *dev, struct drm_plane *plane
 		mod++;
 	}
 
+done:
 	drm_object_attach_property(&plane->base, config->modifiers_property,
 				   blob->base.id);
-
-	return 0;
-}
-
-/**
- * DOC: hotspot properties
- *
- * HOTSPOT_X: property to set mouse hotspot x offset.
- * HOTSPOT_Y: property to set mouse hotspot y offset.
- *
- * When the plane is being used as a cursor image to display a mouse pointer,
- * the "hotspot" is the offset within the cursor image where mouse events
- * are expected to go.
- *
- * Positive values move the hotspot from the top-left corner of the cursor
- * plane towards the right and bottom.
- *
- * Most display drivers do not need this information because the
- * hotspot is not actually connected to anything visible on screen.
- * However, this is necessary for display drivers like the para-virtualized
- * drivers (eg qxl, vbox, virtio, vmwgfx), that are attached to a user console
- * with a mouse pointer.  Since these consoles are often being remoted over a
- * network, they would otherwise have to wait to display the pointer movement to
- * the user until a full network round-trip has occurred.  New mouse events have
- * to be sent from the user's console, over the network to the virtual input
- * devices, forwarded to the desktop for processing, and then the cursor plane's
- * position can be updated and sent back to the user's console over the network.
- * Instead, with the hotspot information, the console can anticipate the new
- * location, and draw the mouse cursor there before the confirmation comes in.
- * To do that correctly, the user's console must be able predict how the
- * desktop will process mouse events, which normally requires the desktop's
- * mouse topology information, ie where each CRTC sits in the mouse coordinate
- * space.  This is typically sent to the para-virtualized drivers using some
- * driver-specific method, and the driver then forwards it to the console by
- * way of the virtual display device or hypervisor.
- *
- * The assumption is generally made that there is only one cursor plane being
- * used this way at a time, and that the desktop is feeding all mouse devices
- * into the same global pointer.  Para-virtualized drivers that require this
- * should only be exposing a single cursor plane, or find some other way
- * to coordinate with a userspace desktop that supports multiple pointers.
- * If the hotspot properties are set, the cursor plane is therefore assumed to be
- * used only for displaying a mouse cursor image, and the position of the combined
- * cursor plane + offset can therefore be used for coordinating with input from a
- * mouse device.
- *
- * The cursor will then be drawn either at the location of the plane in the CRTC
- * console, or as a free-floating cursor plane on the user's console
- * corresponding to their desktop mouse position.
- *
- * DRM clients which would like to work correctly on drivers which expose
- * hotspot properties should advertise DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT.
- * Setting this property on drivers which do not special case
- * cursor planes will return EOPNOTSUPP, which can be used by userspace to
- * gauge requirements of the hardware/drivers they're running on. Advertising
- * DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT implies that the userspace client will be
- * correctly setting the hotspot properties.
- */
-
-/**
- * drm_plane_create_hotspot_properties - creates the mouse hotspot
- * properties and attaches them to the given cursor plane
- *
- * @plane: drm cursor plane
- *
- * This function enables the mouse hotspot property on a given
- * cursor plane. Look at the documentation for hotspot properties
- * to get a better understanding for what they're used for.
- *
- * RETURNS:
- * Zero for success or -errno
- */
-static int drm_plane_create_hotspot_properties(struct drm_plane *plane)
-{
-	struct drm_property *prop_x;
-	struct drm_property *prop_y;
-
-	drm_WARN_ON(plane->dev,
-		    !drm_core_check_feature(plane->dev,
-					    DRIVER_CURSOR_HOTSPOT));
-
-	prop_x = drm_property_create_signed_range(plane->dev, 0, "HOTSPOT_X",
-						  INT_MIN, INT_MAX);
-	if (IS_ERR(prop_x))
-		return PTR_ERR(prop_x);
-
-	prop_y = drm_property_create_signed_range(plane->dev, 0, "HOTSPOT_Y",
-						  INT_MIN, INT_MAX);
-	if (IS_ERR(prop_y)) {
-		drm_property_destroy(plane->dev, prop_x);
-		return PTR_ERR(prop_y);
-	}
-
-	drm_object_attach_property(&plane->base, prop_x, 0);
-	drm_object_attach_property(&plane->base, prop_y, 0);
-	plane->hotspot_x_property = prop_x;
-	plane->hotspot_y_property = prop_y;
 
 	return 0;
 }
@@ -339,9 +242,6 @@ static int __drm_universal_plane_init(struct drm_device *dev,
 				      const char *name, va_list ap)
 {
 	struct drm_mode_config *config = &dev->mode_config;
-	static const uint64_t default_modifiers[] = {
-		DRM_FORMAT_MOD_LINEAR,
-	};
 	unsigned int format_modifier_count = 0;
 	int ret;
 
@@ -382,16 +282,16 @@ static int __drm_universal_plane_init(struct drm_device *dev,
 
 		while (*temp_modifiers++ != DRM_FORMAT_MOD_INVALID)
 			format_modifier_count++;
-	} else {
-		if (!dev->mode_config.fb_modifiers_not_supported) {
-			format_modifiers = default_modifiers;
-			format_modifier_count = ARRAY_SIZE(default_modifiers);
-		}
 	}
 
 	/* autoset the cap and check for consistency across all planes */
-	drm_WARN_ON(dev, config->fb_modifiers_not_supported &&
-				format_modifier_count);
+	if (format_modifier_count) {
+		drm_WARN_ON(dev, !config->allow_fb_modifiers &&
+			    !list_empty(&config->plane_list));
+		config->allow_fb_modifiers = true;
+	} else {
+		drm_WARN_ON(dev, config->allow_fb_modifiers);
+	}
 
 	plane->modifier_count = format_modifier_count;
 	plane->modifiers = kmalloc_array(format_modifier_count,
@@ -445,12 +345,8 @@ static int __drm_universal_plane_init(struct drm_device *dev,
 		drm_object_attach_property(&plane->base, config->prop_src_w, 0);
 		drm_object_attach_property(&plane->base, config->prop_src_h, 0);
 	}
-	if (drm_core_check_feature(dev, DRIVER_CURSOR_HOTSPOT) &&
-	    type == DRM_PLANE_TYPE_CURSOR) {
-		drm_plane_create_hotspot_properties(plane);
-	}
 
-	if (format_modifier_count)
+	if (config->allow_fb_modifiers)
 		create_in_format_blob(dev, plane);
 
 	return 0;
@@ -477,8 +373,8 @@ static int __drm_universal_plane_init(struct drm_device *dev,
  * drm_universal_plane_init() to let the DRM managed resource infrastructure
  * take care of cleanup and deallocation.
  *
- * Drivers that only support the DRM_FORMAT_MOD_LINEAR modifier support may set
- * @format_modifiers to NULL. The plane will advertise the linear modifier.
+ * Drivers supporting modifiers must set @format_modifiers on all their planes,
+ * even those that only support DRM_FORMAT_MOD_LINEAR.
  *
  * Returns:
  * Zero on success, error code on failure.
@@ -554,44 +450,6 @@ void *__drmm_universal_plane_alloc(struct drm_device *dev, size_t size,
 }
 EXPORT_SYMBOL(__drmm_universal_plane_alloc);
 
-void *__drm_universal_plane_alloc(struct drm_device *dev, size_t size,
-				  size_t offset, uint32_t possible_crtcs,
-				  const struct drm_plane_funcs *funcs,
-				  const uint32_t *formats, unsigned int format_count,
-				  const uint64_t *format_modifiers,
-				  enum drm_plane_type type,
-				  const char *name, ...)
-{
-	void *container;
-	struct drm_plane *plane;
-	va_list ap;
-	int ret;
-
-	if (drm_WARN_ON(dev, !funcs))
-		return ERR_PTR(-EINVAL);
-
-	container = kzalloc(size, GFP_KERNEL);
-	if (!container)
-		return ERR_PTR(-ENOMEM);
-
-	plane = container + offset;
-
-	va_start(ap, name);
-	ret = __drm_universal_plane_init(dev, plane, possible_crtcs, funcs,
-					 formats, format_count, format_modifiers,
-					 type, name, ap);
-	va_end(ap);
-	if (ret)
-		goto err_kfree;
-
-	return container;
-
-err_kfree:
-	kfree(container);
-	return ERR_PTR(ret);
-}
-EXPORT_SYMBOL(__drm_universal_plane_alloc);
-
 int drm_plane_register_all(struct drm_device *dev)
 {
 	unsigned int num_planes = 0;
@@ -625,6 +483,38 @@ void drm_plane_unregister_all(struct drm_device *dev)
 			plane->funcs->early_unregister(plane);
 	}
 }
+
+/**
+ * drm_plane_init - Initialize a legacy plane
+ * @dev: DRM device
+ * @plane: plane object to init
+ * @possible_crtcs: bitmask of possible CRTCs
+ * @funcs: callbacks for the new plane
+ * @formats: array of supported formats (DRM_FORMAT\_\*)
+ * @format_count: number of elements in @formats
+ * @is_primary: plane type (primary vs overlay)
+ *
+ * Legacy API to initialize a DRM plane.
+ *
+ * New drivers should call drm_universal_plane_init() instead.
+ *
+ * Returns:
+ * Zero on success, error code on failure.
+ */
+int drm_plane_init(struct drm_device *dev, struct drm_plane *plane,
+		   uint32_t possible_crtcs,
+		   const struct drm_plane_funcs *funcs,
+		   const uint32_t *formats, unsigned int format_count,
+		   bool is_primary)
+{
+	enum drm_plane_type type;
+
+	type = is_primary ? DRM_PLANE_TYPE_PRIMARY : DRM_PLANE_TYPE_OVERLAY;
+	return drm_universal_plane_init(dev, plane, possible_crtcs, funcs,
+					formats, format_count,
+					NULL, type, NULL);
+}
+EXPORT_SYMBOL(drm_plane_init);
 
 /**
  * drm_plane_cleanup - Clean up the core plane usage
@@ -777,19 +667,6 @@ int drm_mode_getplane_res(struct drm_device *dev, void *data,
 		 */
 		if (plane->type != DRM_PLANE_TYPE_OVERLAY &&
 		    !file_priv->universal_planes)
-			continue;
-
-		/*
-		 * If we're running on a virtualized driver then,
-		 * unless userspace advertizes support for the
-		 * virtualized cursor plane, disable cursor planes
-		 * because they'll be broken due to missing cursor
-		 * hotspot info.
-		 */
-		if (plane->type == DRM_PLANE_TYPE_CURSOR &&
-		    drm_core_check_feature(dev, DRIVER_CURSOR_HOTSPOT) &&
-		    file_priv->atomic &&
-		    !file_priv->supports_virtualized_cursor_plane)
 			continue;
 
 		if (drm_lease_held(file_priv, plane->base.id)) {
@@ -1166,10 +1043,8 @@ static int drm_mode_cursor_universal(struct drm_crtc *crtc,
 				return PTR_ERR(fb);
 			}
 
-			if (plane->hotspot_x_property && plane->state)
-				plane->state->hotspot_x = req->hot_x;
-			if (plane->hotspot_y_property && plane->state)
-				plane->state->hotspot_y = req->hot_y;
+			fb->hot_x = req->hot_x;
+			fb->hot_y = req->hot_y;
 		} else {
 			fb = NULL;
 		}
@@ -1559,36 +1434,6 @@ out:
  * Drivers implementing damage can use drm_atomic_helper_damage_iter_init() and
  * drm_atomic_helper_damage_iter_next() helper iterator function to get damage
  * rectangles clipped to &drm_plane_state.src.
- *
- * Note that there are two types of damage handling: frame damage and buffer
- * damage, the type of damage handling implemented depends on a driver's upload
- * target. Drivers implementing a per-plane or per-CRTC upload target need to
- * handle frame damage, while drivers implementing a per-buffer upload target
- * need to handle buffer damage.
- *
- * The existing damage helpers only support the frame damage type, there is no
- * buffer age support or similar damage accumulation algorithm implemented yet.
- *
- * Only drivers handling frame damage can use the mentioned damage helpers to
- * iterate over the damaged regions. Drivers that handle buffer damage, must set
- * &drm_plane_state.ignore_damage_clips for drm_atomic_helper_damage_iter_init()
- * to know that damage clips should be ignored and return &drm_plane_state.src
- * as the damage rectangle, to force a full plane update.
- *
- * Drivers with a per-buffer upload target could compare the &drm_plane_state.fb
- * of the old and new plane states to determine if the framebuffer attached to a
- * plane has changed or not since the last plane update. If &drm_plane_state.fb
- * has changed, then &drm_plane_state.ignore_damage_clips must be set to true.
- *
- * That is because drivers with a per-plane upload target, expect the backing
- * storage buffer to not change for a given plane. If the upload buffer changes
- * between page flips, the new upload buffer has to be updated as a whole. This
- * can be improved in the future if support for frame damage is added to the DRM
- * damage helpers, similarly to how user-space already handle this case as it is
- * explained in the following documents:
- *
- *     https://registry.khronos.org/EGL/extensions/KHR/EGL_KHR_swap_buffers_with_damage.txt
- *     https://emersion.fr/blog/2019/intro-to-damage-tracking/
  */
 
 /**

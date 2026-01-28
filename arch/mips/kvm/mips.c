@@ -135,6 +135,16 @@ void kvm_arch_hardware_disable(void)
 	kvm_mips_callbacks->hardware_disable();
 }
 
+int kvm_arch_hardware_setup(void *opaque)
+{
+	return 0;
+}
+
+int kvm_arch_check_processor_compat(void *opaque)
+{
+	return 0;
+}
+
 extern void kvm_init_loongson_ipi(struct kvm *kvm);
 
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
@@ -199,24 +209,29 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 	/* Flush slot from GPA */
 	kvm_mips_flush_gpa_pt(kvm, slot->base_gfn,
 			      slot->base_gfn + slot->npages - 1);
-	kvm_flush_remote_tlbs_memslot(kvm, slot);
+	kvm_arch_flush_remote_tlbs_memslot(kvm, slot);
 	spin_unlock(&kvm->mmu_lock);
 }
 
 int kvm_arch_prepare_memory_region(struct kvm *kvm,
-				   const struct kvm_memory_slot *old,
-				   struct kvm_memory_slot *new,
+				   struct kvm_memory_slot *memslot,
+				   const struct kvm_userspace_memory_region *mem,
 				   enum kvm_mr_change change)
 {
 	return 0;
 }
 
 void kvm_arch_commit_memory_region(struct kvm *kvm,
+				   const struct kvm_userspace_memory_region *mem,
 				   struct kvm_memory_slot *old,
 				   const struct kvm_memory_slot *new,
 				   enum kvm_mr_change change)
 {
 	int needs_flush;
+
+	kvm_debug("%s: kvm: %p slot: %d, GPA: %llx, size: %llx, QVA: %llx\n",
+		  __func__, kvm, mem->slot, mem->guest_phys_addr,
+		  mem->memory_size, mem->userspace_addr);
 
 	/*
 	 * If dirty page logging is enabled, write protect all pages in the slot
@@ -235,7 +250,7 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
 		needs_flush = kvm_mips_mkclean_gpa_pt(kvm, new->base_gfn,
 					new->base_gfn + new->npages - 1);
 		if (needs_flush)
-			kvm_flush_remote_tlbs_memslot(kvm, new);
+			kvm_arch_flush_remote_tlbs_memslot(kvm, new);
 		spin_unlock(&kvm->mmu_lock);
 	}
 }
@@ -404,24 +419,6 @@ int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
 	return -ENOIOCTLCMD;
 }
 
-/*
- * Actually run the vCPU, entering an RCU extended quiescent state (EQS) while
- * the vCPU is running.
- *
- * This must be noinstr as instrumentation may make use of RCU, and this is not
- * safe during the EQS.
- */
-static int noinstr kvm_mips_vcpu_enter_exit(struct kvm_vcpu *vcpu)
-{
-	int ret;
-
-	guest_state_enter_irqoff();
-	ret = kvm_mips_callbacks->vcpu_run(vcpu);
-	guest_state_exit_irqoff();
-
-	return ret;
-}
-
 int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 {
 	int r = -EINTR;
@@ -442,7 +439,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 	lose_fpu(1);
 
 	local_irq_disable();
-	guest_timing_enter_irqoff();
+	guest_enter_irqoff();
 	trace_kvm_enter(vcpu);
 
 	/*
@@ -453,23 +450,10 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 	 */
 	smp_store_mb(vcpu->mode, IN_GUEST_MODE);
 
-	r = kvm_mips_vcpu_enter_exit(vcpu);
-
-	/*
-	 * We must ensure that any pending interrupts are taken before
-	 * we exit guest timing so that timer ticks are accounted as
-	 * guest time. Transiently unmask interrupts so that any
-	 * pending interrupts are taken.
-	 *
-	 * TODO: is there a barrier which ensures that pending interrupts are
-	 * recognised? Currently this just hopes that the CPU takes any pending
-	 * interrupts between the enable and disable.
-	 */
-	local_irq_enable();
-	local_irq_disable();
+	r = kvm_mips_callbacks->vcpu_run(vcpu);
 
 	trace_kvm_out(vcpu);
-	guest_timing_exit_irqoff();
+	guest_exit_irqoff();
 	local_irq_enable();
 
 out:
@@ -981,15 +965,21 @@ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
 
 }
 
-int kvm_arch_flush_remote_tlbs(struct kvm *kvm)
+int kvm_arch_flush_remote_tlb(struct kvm *kvm)
 {
 	kvm_mips_callbacks->prepare_flush_shadow(kvm);
 	return 1;
 }
 
-int kvm_arch_vm_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg)
+void kvm_arch_flush_remote_tlbs_memslot(struct kvm *kvm,
+					const struct kvm_memory_slot *memslot)
 {
-	int r;
+	kvm_flush_remote_tlbs(kvm);
+}
+
+long kvm_arch_vm_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg)
+{
+	long r;
 
 	switch (ioctl) {
 	default:
@@ -997,6 +987,21 @@ int kvm_arch_vm_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg)
 	}
 
 	return r;
+}
+
+int kvm_arch_init(void *opaque)
+{
+	if (kvm_mips_callbacks) {
+		kvm_err("kvm: module already exists\n");
+		return -EEXIST;
+	}
+
+	return kvm_mips_emulation_init(&kvm_mips_callbacks);
+}
+
+void kvm_arch_exit(void)
+{
+	kvm_mips_callbacks = NULL;
 }
 
 int kvm_arch_vcpu_ioctl_get_sregs(struct kvm_vcpu *vcpu,
@@ -1043,13 +1048,13 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 		r = 1;
 		break;
 	case KVM_CAP_NR_VCPUS:
-		r = min_t(unsigned int, num_online_cpus(), KVM_MAX_VCPUS);
+		r = num_online_cpus();
 		break;
 	case KVM_CAP_MAX_VCPUS:
 		r = KVM_MAX_VCPUS;
 		break;
 	case KVM_CAP_MAX_VCPU_ID:
-		r = KVM_MAX_VCPU_IDS;
+		r = KVM_MAX_VCPU_ID;
 		break;
 	case KVM_CAP_MIPS_FPU:
 		/* We don't handle systems with inconsistent cpu_has_fpu */
@@ -1168,7 +1173,7 @@ static void kvm_mips_set_c0_status(void)
 /*
  * Return value is in the form (errcode<<2 | RESUME_FLAG_HOST | RESUME_FLAG_NV)
  */
-static int __kvm_mips_handle_exit(struct kvm_vcpu *vcpu)
+int kvm_mips_handle_exit(struct kvm_vcpu *vcpu)
 {
 	struct kvm_run *run = vcpu->run;
 	u32 cause = vcpu->arch.host_cp0_cause;
@@ -1354,17 +1359,6 @@ static int __kvm_mips_handle_exit(struct kvm_vcpu *vcpu)
 		    read_c0_config5() & MIPS_CONF5_MSAEN)
 			__kvm_restore_msacsr(&vcpu->arch);
 	}
-	return ret;
-}
-
-int noinstr kvm_mips_handle_exit(struct kvm_vcpu *vcpu)
-{
-	int ret;
-
-	guest_state_exit_irqoff();
-	ret = __kvm_mips_handle_exit(vcpu);
-	guest_state_enter_irqoff();
-
 	return ret;
 }
 
@@ -1615,21 +1609,16 @@ static int __init kvm_mips_init(void)
 	if (ret)
 		return ret;
 
-	ret = kvm_mips_emulation_init();
+	ret = kvm_init(NULL, sizeof(struct kvm_vcpu), 0, THIS_MODULE);
+
 	if (ret)
 		return ret;
-
 
 	if (boot_cpu_type() == CPU_LOONGSON64)
 		kvm_priority_to_irq = kvm_loongson3_priority_to_irq;
 
 	register_die_notifier(&kvm_mips_csr_die_notifier);
 
-	ret = kvm_init(sizeof(struct kvm_vcpu), 0, THIS_MODULE);
-	if (ret) {
-		unregister_die_notifier(&kvm_mips_csr_die_notifier);
-		return ret;
-	}
 	return 0;
 }
 

@@ -1252,11 +1252,12 @@ long keyctl_instantiate_key(key_serial_t id,
 			    key_serial_t ringid)
 {
 	if (_payload && plen) {
+		struct iovec iov;
 		struct iov_iter from;
 		int ret;
 
-		ret = import_ubuf(ITER_SOURCE, (void __user *)_payload, plen,
-				  &from);
+		ret = import_single_range(WRITE, (void __user *)_payload, plen,
+					  &iov, &from);
 		if (unlikely(ret))
 			return ret;
 
@@ -1287,7 +1288,7 @@ long keyctl_instantiate_key_iov(key_serial_t id,
 	if (!_payload_iov)
 		ioc = 0;
 
-	ret = import_iovec(ITER_SOURCE, _payload_iov, ioc,
+	ret = import_iovec(WRITE, _payload_iov, ioc,
 				    ARRAY_SIZE(iovstack), &iov, &from);
 	if (ret < 0)
 		return ret;

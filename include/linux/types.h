@@ -10,11 +10,6 @@
 #define DECLARE_BITMAP(name,bits) \
 	unsigned long name[BITS_TO_LONGS(bits)]
 
-#ifdef __SIZEOF_INT128__
-typedef __s128 s128;
-typedef __u128 u128;
-#endif
-
 typedef u32 __kernel_dev_t;
 
 typedef __kernel_fd_set		fd_set;
@@ -40,7 +35,6 @@ typedef __kernel_uid16_t        uid16_t;
 typedef __kernel_gid16_t        gid16_t;
 
 typedef unsigned long		uintptr_t;
-typedef long			intptr_t;
 
 #ifdef CONFIG_HAVE_UID16
 /* This is defined by include/asm-{arch}/posix_types.h */
@@ -120,9 +114,6 @@ typedef s64			int64_t;
 #define aligned_be64		__aligned_be64
 #define aligned_le64		__aligned_le64
 
-/* Nanosecond scalar representation for kernel time values */
-typedef s64	ktime_t;
-
 /**
  * The type used for indexing onto a disc or disc partition.
  *
@@ -184,12 +175,6 @@ typedef struct {
 } atomic64_t;
 #endif
 
-typedef struct {
-	atomic_t refcnt;
-} rcuref_t;
-
-#define RCUREF_INIT(i)	{ .refcnt = ATOMIC_INIT(i - 1) }
-
 struct list_head {
 	struct list_head *next, *prev;
 };
@@ -241,7 +226,6 @@ struct callback_head {
 typedef void (*rcu_callback_t)(struct rcu_head *head);
 typedef void (*call_rcu_func_t)(struct rcu_head *head, rcu_callback_t func);
 
-typedef void (*swap_r_func_t)(void *a, void *b, int size, const void *priv);
 typedef void (*swap_func_t)(void *a, void *b, int size);
 
 typedef int (*cmp_r_func_t)(const void *a, const void *b, const void *priv);

@@ -8,7 +8,6 @@
  */
 
 #include <linux/kvm_para.h>
-#include <linux/rcu_notifier.h>
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -25,34 +24,6 @@ int sysctl_max_rcu_stall_to_panic __read_mostly;
 #endif
 #define RCU_STALL_MIGHT_DIV		8
 #define RCU_STALL_MIGHT_MIN		(2 * HZ)
-
-int rcu_exp_jiffies_till_stall_check(void)
-{
-	int cpu_stall_timeout = READ_ONCE(rcu_exp_cpu_stall_timeout);
-	int exp_stall_delay_delta = 0;
-	int till_stall_check;
-
-	// Zero says to use rcu_cpu_stall_timeout, but in milliseconds.
-	if (!cpu_stall_timeout)
-		cpu_stall_timeout = jiffies_to_msecs(rcu_jiffies_till_stall_check());
-
-	// Limit check must be consistent with the Kconfig limits for
-	// CONFIG_RCU_EXP_CPU_STALL_TIMEOUT, so check the allowed range.
-	// The minimum clamped value is "2UL", because at least one full
-	// tick has to be guaranteed.
-	till_stall_check = clamp(msecs_to_jiffies(cpu_stall_timeout), 2UL, 300UL * HZ);
-
-	if (cpu_stall_timeout && jiffies_to_msecs(till_stall_check) != cpu_stall_timeout)
-		WRITE_ONCE(rcu_exp_cpu_stall_timeout, jiffies_to_msecs(till_stall_check));
-
-#ifdef CONFIG_PROVE_RCU
-	/* Add extra ~25% out of till_stall_check. */
-	exp_stall_delay_delta = ((till_stall_check * 25) / 100) + 1;
-#endif
-
-	return till_stall_check + exp_stall_delay_delta;
-}
-EXPORT_SYMBOL_GPL(rcu_exp_jiffies_till_stall_check);
 
 /* Limit-check stall timeouts specified at boottime and runtime. */
 int rcu_jiffies_till_stall_check(void)
@@ -275,16 +246,16 @@ struct rcu_stall_chk_rdr {
  * Report out the state of a not-running task that is stalling the
  * current RCU grace period.
  */
-static int check_slow_task(struct task_struct *t, void *arg)
+static bool check_slow_task(struct task_struct *t, void *arg)
 {
 	struct rcu_stall_chk_rdr *rscrp = arg;
 
 	if (task_curr(t))
-		return -EBUSY; // It is running, so decline to inspect it.
+		return false; // It is running, so decline to inspect it.
 	rscrp->nesting = t->rcu_read_lock_nesting;
 	rscrp->rs = t->rcu_read_unlock_special;
 	rscrp->on_blkd_list = !list_empty(&t->rcu_node_entry);
-	return 0;
+	return true;
 }
 
 /*
@@ -318,7 +289,7 @@ static int rcu_print_task_stall(struct rcu_node *rnp, unsigned long flags)
 	raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 	while (i) {
 		t = ts[--i];
-		if (task_call_func(t, check_slow_task, &rscr))
+		if (!try_invoke_on_locked_down_task(t, check_slow_task, &rscr))
 			pr_cont(" P%d", t->pid);
 		else
 			pr_cont(" P%d/%d:%c%c%c%c",
@@ -375,12 +346,32 @@ static void rcu_dump_cpu_stacks(void)
 			if (rnp->qsmask & leaf_node_cpu_bit(rnp, cpu)) {
 				if (cpu_is_offline(cpu))
 					pr_err("Offline CPU %d blocking current GP.\n", cpu);
-				else
+				else if (!trigger_single_cpu_backtrace(cpu))
 					dump_cpu_task(cpu);
 			}
 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 	}
 }
+
+#ifdef CONFIG_RCU_FAST_NO_HZ
+
+static void print_cpu_stall_fast_no_hz(char *cp, int cpu)
+{
+	struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
+
+	sprintf(cp, "last_accelerate: %04lx/%04lx dyntick_enabled: %d",
+		rdp->last_accelerate & 0xffff, jiffies & 0xffff,
+		!!rdp->tick_nohz_enabled_snap);
+}
+
+#else /* #ifdef CONFIG_RCU_FAST_NO_HZ */
+
+static void print_cpu_stall_fast_no_hz(char *cp, int cpu)
+{
+	*cp = '\0';
+}
+
+#endif /* #else #ifdef CONFIG_RCU_FAST_NO_HZ */
 
 static const char * const gp_state_names[] = {
 	[RCU_GP_IDLE] = "RCU_GP_IDLE",
@@ -414,56 +405,6 @@ static bool rcu_is_gp_kthread_starving(unsigned long *jp)
 	return j > 2 * HZ;
 }
 
-static bool rcu_is_rcuc_kthread_starving(struct rcu_data *rdp, unsigned long *jp)
-{
-	int cpu;
-	struct task_struct *rcuc;
-	unsigned long j;
-
-	rcuc = rdp->rcu_cpu_kthread_task;
-	if (!rcuc)
-		return false;
-
-	cpu = task_cpu(rcuc);
-	if (cpu_is_offline(cpu) || idle_cpu(cpu))
-		return false;
-
-	j = jiffies - READ_ONCE(rdp->rcuc_activity);
-
-	if (jp)
-		*jp = j;
-	return j > 2 * HZ;
-}
-
-static void print_cpu_stat_info(int cpu)
-{
-	struct rcu_snap_record rsr, *rsrp;
-	struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
-	struct kernel_cpustat *kcsp = &kcpustat_cpu(cpu);
-
-	if (!rcu_cpu_stall_cputime)
-		return;
-
-	rsrp = &rdp->snap_record;
-	if (rsrp->gp_seq != rdp->gp_seq)
-		return;
-
-	rsr.cputime_irq     = kcpustat_field(kcsp, CPUTIME_IRQ, cpu);
-	rsr.cputime_softirq = kcpustat_field(kcsp, CPUTIME_SOFTIRQ, cpu);
-	rsr.cputime_system  = kcpustat_field(kcsp, CPUTIME_SYSTEM, cpu);
-
-	pr_err("\t         hardirqs   softirqs   csw/system\n");
-	pr_err("\t number: %8ld %10d %12lld\n",
-		kstat_cpu_irqs_sum(cpu) - rsrp->nr_hardirqs,
-		kstat_cpu_softirqs_sum(cpu) - rsrp->nr_softirqs,
-		nr_context_switches_cpu(cpu) - rsrp->nr_csw);
-	pr_err("\tcputime: %8lld %10lld %12lld   ==> %d(ms)\n",
-		div_u64(rsr.cputime_irq - rsrp->cputime_irq, NSEC_PER_MSEC),
-		div_u64(rsr.cputime_softirq - rsrp->cputime_softirq, NSEC_PER_MSEC),
-		div_u64(rsr.cputime_system - rsrp->cputime_system, NSEC_PER_MSEC),
-		jiffies_to_msecs(jiffies - rsrp->jiffies));
-}
-
 /*
  * Print out diagnostic information for the specified stalled CPU.
  *
@@ -473,18 +414,16 @@ static void print_cpu_stat_info(int cpu)
  * of RCU grace periods that this CPU is ignorant of, for example, "1"
  * if the CPU was aware of the previous grace period.
  *
- * Also print out idle info.
+ * Also print out idle and (if CONFIG_RCU_FAST_NO_HZ) idle-entry info.
  */
 static void print_cpu_stall_info(int cpu)
 {
 	unsigned long delta;
 	bool falsepositive;
+	char fast_no_hz[72];
 	struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
 	char *ticks_title;
 	unsigned long ticks_value;
-	bool rcuc_starved;
-	unsigned long j;
-	char buf[32];
 
 	/*
 	 * We could be printing a lot while holding a spinlock.  Avoid
@@ -499,13 +438,11 @@ static void print_cpu_stall_info(int cpu)
 		ticks_title = "ticks this GP";
 		ticks_value = rdp->ticks_this_gp;
 	}
+	print_cpu_stall_fast_no_hz(fast_no_hz, cpu);
 	delta = rcu_seq_ctr(rdp->mynode->gp_seq - rdp->rcu_iw_gp_seq);
 	falsepositive = rcu_is_gp_kthread_starving(NULL) &&
-			rcu_dynticks_in_eqs(rcu_dynticks_snap(cpu));
-	rcuc_starved = rcu_is_rcuc_kthread_starving(rdp, &j);
-	if (rcuc_starved)
-		sprintf(buf, " rcuc=%ld jiffies(starved)", j);
-	pr_err("\t%d-%c%c%c%c: (%lu %s) idle=%04x/%ld/%#lx softirq=%u/%u fqs=%ld%s%s\n",
+			rcu_dynticks_in_eqs(rcu_dynticks_snap(rdp));
+	pr_err("\t%d-%c%c%c%c: (%lu %s) idle=%03x/%ld/%#lx softirq=%u/%u fqs=%ld %s%s\n",
 	       cpu,
 	       "O."[!!cpu_online(cpu)],
 	       "o."[!!(rdp->grpmask & rdp->mynode->qsmaskinit)],
@@ -514,14 +451,12 @@ static void print_cpu_stall_info(int cpu)
 			rdp->rcu_iw_pending ? (int)min(delta, 9UL) + '0' :
 				"!."[!delta],
 	       ticks_value, ticks_title,
-	       rcu_dynticks_snap(cpu) & 0xffff,
-	       ct_dynticks_nesting_cpu(cpu), ct_dynticks_nmi_nesting_cpu(cpu),
+	       rcu_dynticks_snap(rdp) & 0xfff,
+	       rdp->dynticks_nesting, rdp->dynticks_nmi_nesting,
 	       rdp->softirq_snap, kstat_softirqs_cpu(RCU_SOFTIRQ, cpu),
 	       data_race(rcu_state.n_force_qs) - rcu_state.n_force_qs_gpstart,
-	       rcuc_starved ? buf : "",
+	       fast_no_hz,
 	       falsepositive ? " (false positive?)" : "");
-
-	print_cpu_stat_info(cpu);
 }
 
 /* Complain about starvation of grace-period kthread.  */
@@ -541,16 +476,17 @@ static void rcu_check_gp_kthread_starvation(void)
 		       data_race(READ_ONCE(rcu_state.gp_state)),
 		       gpk ? data_race(READ_ONCE(gpk->__state)) : ~0, cpu);
 		if (gpk) {
-			struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
-
 			pr_err("\tUnless %s kthread gets sufficient CPU time, OOM is now expected behavior.\n", rcu_state.name);
 			pr_err("RCU grace-period kthread stack dump:\n");
 			sched_show_task(gpk);
-			if (cpu_is_offline(cpu)) {
-				pr_err("RCU GP kthread last ran on offline CPU %d.\n", cpu);
-			} else if (!(data_race(READ_ONCE(rdp->mynode->qsmask)) & rdp->grpmask)) {
-				pr_err("Stack dump where RCU GP kthread last ran:\n");
-				dump_cpu_task(cpu);
+			if (cpu >= 0) {
+				if (cpu_is_offline(cpu)) {
+					pr_err("RCU GP kthread last ran on offline CPU %d.\n", cpu);
+				} else  {
+					pr_err("Stack dump where RCU GP kthread last ran:\n");
+					if (!trigger_single_cpu_backtrace(cpu))
+						dump_cpu_task(cpu);
+				}
 			}
 			wake_up_process(gpk);
 		}
@@ -626,9 +562,9 @@ static void print_other_cpu_stall(unsigned long gp_seq, unsigned long gps)
 
 	for_each_possible_cpu(cpu)
 		totqlen += rcu_get_n_cbs_cpu(cpu);
-	pr_err("\t(detected by %d, t=%ld jiffies, g=%ld, q=%lu ncpus=%d)\n",
+	pr_cont("\t(detected by %d, t=%ld jiffies, g=%ld, q=%lu)\n",
 	       smp_processor_id(), (long)(jiffies - gps),
-	       (long)rcu_seq_current(&rcu_state.gp_seq), totqlen, rcu_state.n_online_cpus);
+	       (long)rcu_seq_current(&rcu_state.gp_seq), totqlen);
 	if (ndetected) {
 		rcu_dump_cpu_stacks();
 
@@ -687,9 +623,9 @@ static void print_cpu_stall(unsigned long gps)
 	raw_spin_unlock_irqrestore_rcu_node(rdp->mynode, flags);
 	for_each_possible_cpu(cpu)
 		totqlen += rcu_get_n_cbs_cpu(cpu);
-	pr_err("\t(t=%lu jiffies g=%ld q=%lu ncpus=%d)\n",
+	pr_cont("\t(t=%lu jiffies g=%ld q=%lu)\n",
 		jiffies - gps,
-		(long)rcu_seq_current(&rcu_state.gp_seq), totqlen, rcu_state.n_online_cpus);
+		(long)rcu_seq_current(&rcu_state.gp_seq), totqlen);
 
 	rcu_check_gp_kthread_expired_fqs_timer();
 	rcu_check_gp_kthread_starvation();
@@ -718,7 +654,7 @@ static void print_cpu_stall(unsigned long gps)
 
 static void check_cpu_stall(struct rcu_data *rdp)
 {
-	bool self_detected;
+	bool didstall = false;
 	unsigned long gs1;
 	unsigned long gs2;
 	unsigned long gps;
@@ -775,10 +711,10 @@ static void check_cpu_stall(struct rcu_data *rdp)
 		return; /* No stall or GP completed since entering function. */
 	rnp = rdp->mynode;
 	jn = jiffies + ULONG_MAX / 2;
-	self_detected = READ_ONCE(rnp->qsmask) & rdp->grpmask;
 	if (rcu_gp_in_progress() &&
-	    (self_detected || ULONG_CMP_GE(j, js + RCU_STALL_RAT_DELAY)) &&
+	    (READ_ONCE(rnp->qsmask) & rdp->grpmask) &&
 	    cmpxchg(&rcu_state.jiffies_stall, js, jn) == js) {
+
 		/*
 		 * If a virtual machine is stopped by the host it can look to
 		 * the watchdog like an RCU stall. Check to see if the host
@@ -787,28 +723,39 @@ static void check_cpu_stall(struct rcu_data *rdp)
 		if (kvm_check_and_clear_guest_paused())
 			return;
 
-		rcu_stall_notifier_call_chain(RCU_STALL_NOTIFY_NORM, (void *)j - gps);
-		if (self_detected) {
-			/* We haven't checked in, so go dump stack. */
-			print_cpu_stall(gps);
-		} else {
-			/* They had a few time units to dump stack, so complain. */
-			print_other_cpu_stall(gs2, gps);
-		}
-
+		/* We haven't checked in, so go dump stack. */
+		print_cpu_stall(gps);
 		if (READ_ONCE(rcu_cpu_stall_ftrace_dump))
 			rcu_ftrace_dump(DUMP_ALL);
+		didstall = true;
 
-		if (READ_ONCE(rcu_state.jiffies_stall) == jn) {
-			jn = jiffies + 3 * rcu_jiffies_till_stall_check() + 3;
-			WRITE_ONCE(rcu_state.jiffies_stall, jn);
-		}
+	} else if (rcu_gp_in_progress() &&
+		   ULONG_CMP_GE(j, js + RCU_STALL_RAT_DELAY) &&
+		   cmpxchg(&rcu_state.jiffies_stall, js, jn) == js) {
+
+		/*
+		 * If a virtual machine is stopped by the host it can look to
+		 * the watchdog like an RCU stall. Check to see if the host
+		 * stopped the vm.
+		 */
+		if (kvm_check_and_clear_guest_paused())
+			return;
+
+		/* They had a few time units to dump stack, so complain. */
+		print_other_cpu_stall(gs2, gps);
+		if (READ_ONCE(rcu_cpu_stall_ftrace_dump))
+			rcu_ftrace_dump(DUMP_ALL);
+		didstall = true;
+	}
+	if (didstall && READ_ONCE(rcu_state.jiffies_stall) == jn) {
+		jn = jiffies + 3 * rcu_jiffies_till_stall_check() + 3;
+		WRITE_ONCE(rcu_state.jiffies_stall, jn);
 	}
 }
 
 //////////////////////////////////////////////////////////////////////////////
 //
-// RCU forward-progress mechanisms, including for callback invocation.
+// RCU forward-progress mechanisms, including of callback invocation.
 
 
 /*
@@ -1041,7 +988,7 @@ static bool sysrq_rcu;
 module_param(sysrq_rcu, bool, 0444);
 
 /* Dump grace-period-request information due to commandeered sysrq. */
-static void sysrq_show_rcu(u8 key)
+static void sysrq_show_rcu(int key)
 {
 	show_rcu_gp_kthreads();
 }
@@ -1060,67 +1007,3 @@ static int __init rcu_sysrq_init(void)
 	return 0;
 }
 early_initcall(rcu_sysrq_init);
-
-#ifdef CONFIG_RCU_CPU_STALL_NOTIFIER
-
-//////////////////////////////////////////////////////////////////////////////
-//
-// RCU CPU stall-warning notifiers
-
-static ATOMIC_NOTIFIER_HEAD(rcu_cpu_stall_notifier_list);
-
-/**
- * rcu_stall_chain_notifier_register - Add an RCU CPU stall notifier
- * @n: Entry to add.
- *
- * Adds an RCU CPU stall notifier to an atomic notifier chain.
- * The @action passed to a notifier will be @RCU_STALL_NOTIFY_NORM or
- * friends.  The @data will be the duration of the stalled grace period,
- * in jiffies, coerced to a void* pointer.
- *
- * Returns 0 on success, %-EEXIST on error.
- */
-int rcu_stall_chain_notifier_register(struct notifier_block *n)
-{
-	int rcsn = rcu_cpu_stall_notifiers;
-
-	WARN(1, "Adding %pS() to RCU stall notifier list (%s).\n", n->notifier_call,
-	     rcsn ? "possibly suppressing RCU CPU stall warnings" : "failed, so all is well");
-	if (rcsn)
-		return atomic_notifier_chain_register(&rcu_cpu_stall_notifier_list, n);
-	return -EEXIST;
-}
-EXPORT_SYMBOL_GPL(rcu_stall_chain_notifier_register);
-
-/**
- * rcu_stall_chain_notifier_unregister - Remove an RCU CPU stall notifier
- * @n: Entry to add.
- *
- * Removes an RCU CPU stall notifier from an atomic notifier chain.
- *
- * Returns zero on success, %-ENOENT on failure.
- */
-int rcu_stall_chain_notifier_unregister(struct notifier_block *n)
-{
-	return atomic_notifier_chain_unregister(&rcu_cpu_stall_notifier_list, n);
-}
-EXPORT_SYMBOL_GPL(rcu_stall_chain_notifier_unregister);
-
-/*
- * rcu_stall_notifier_call_chain - Call functions in an RCU CPU stall notifier chain
- * @val: Value passed unmodified to notifier function
- * @v: Pointer passed unmodified to notifier function
- *
- * Calls each function in the RCU CPU stall notifier chain in turn, which
- * is an atomic call chain.  See atomic_notifier_call_chain() for more
- * information.
- *
- * This is for use within RCU, hence the omission of the extra asterisk
- * to indicate a non-kerneldoc format header comment.
- */
-int rcu_stall_notifier_call_chain(unsigned long val, void *v)
-{
-	return atomic_notifier_call_chain(&rcu_cpu_stall_notifier_list, val, v);
-}
-
-#endif // #ifdef CONFIG_RCU_CPU_STALL_NOTIFIER

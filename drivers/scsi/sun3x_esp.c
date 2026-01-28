@@ -169,7 +169,7 @@ static const struct esp_driver_ops sun3x_esp_ops = {
 
 static int esp_sun3x_probe(struct platform_device *dev)
 {
-	const struct scsi_host_template *tpnt = &scsi_esp_template;
+	struct scsi_host_template *tpnt = &scsi_esp_template;
 	struct Scsi_Host *host;
 	struct esp *esp;
 	struct resource *res;
@@ -243,7 +243,7 @@ fail:
 	return err;
 }
 
-static void esp_sun3x_remove(struct platform_device *dev)
+static int esp_sun3x_remove(struct platform_device *dev)
 {
 	struct esp *esp = dev_get_drvdata(&dev->dev);
 	unsigned int irq = esp->host->irq;
@@ -261,11 +261,13 @@ static void esp_sun3x_remove(struct platform_device *dev)
 			  esp->command_block_dma);
 
 	scsi_host_put(esp->host);
+
+	return 0;
 }
 
 static struct platform_driver esp_sun3x_driver = {
 	.probe          = esp_sun3x_probe,
-	.remove_new     = esp_sun3x_remove,
+	.remove         = esp_sun3x_remove,
 	.driver = {
 		.name   = "sun3x_esp",
 	},

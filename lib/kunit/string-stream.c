@@ -6,36 +6,68 @@
  * Author: Brendan Higgins <brendanhiggins@google.com>
  */
 
-#include <kunit/static_stub.h>
 #include <kunit/test.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 
 #include "string-stream.h"
 
+struct string_stream_fragment_alloc_context {
+	struct kunit *test;
+	int len;
+	gfp_t gfp;
+};
 
-static struct string_stream_fragment *alloc_string_stream_fragment(int len, gfp_t gfp)
+static int string_stream_fragment_init(struct kunit_resource *res,
+				       void *context)
 {
+	struct string_stream_fragment_alloc_context *ctx = context;
 	struct string_stream_fragment *frag;
 
-	frag = kzalloc(sizeof(*frag), gfp);
+	frag = kunit_kzalloc(ctx->test, sizeof(*frag), ctx->gfp);
 	if (!frag)
-		return ERR_PTR(-ENOMEM);
+		return -ENOMEM;
 
-	frag->fragment = kmalloc(len, gfp);
-	if (!frag->fragment) {
-		kfree(frag);
-		return ERR_PTR(-ENOMEM);
-	}
+	frag->test = ctx->test;
+	frag->fragment = kunit_kmalloc(ctx->test, ctx->len, ctx->gfp);
+	if (!frag->fragment)
+		return -ENOMEM;
 
-	return frag;
+	res->data = frag;
+
+	return 0;
 }
 
-static void string_stream_fragment_destroy(struct string_stream_fragment *frag)
+static void string_stream_fragment_free(struct kunit_resource *res)
 {
+	struct string_stream_fragment *frag = res->data;
+
 	list_del(&frag->node);
-	kfree(frag->fragment);
-	kfree(frag);
+	kunit_kfree(frag->test, frag->fragment);
+	kunit_kfree(frag->test, frag);
+}
+
+static struct string_stream_fragment *alloc_string_stream_fragment(
+		struct kunit *test, int len, gfp_t gfp)
+{
+	struct string_stream_fragment_alloc_context context = {
+		.test = test,
+		.len = len,
+		.gfp = gfp
+	};
+
+	return kunit_alloc_resource(test,
+				    string_stream_fragment_init,
+				    string_stream_fragment_free,
+				    gfp,
+				    &context);
+}
+
+static int string_stream_fragment_destroy(struct string_stream_fragment *frag)
+{
+	return kunit_destroy_resource(frag->test,
+				      kunit_resource_instance_match,
+				      frag);
 }
 
 int string_stream_vadd(struct string_stream *stream,
@@ -43,44 +75,26 @@ int string_stream_vadd(struct string_stream *stream,
 		       va_list args)
 {
 	struct string_stream_fragment *frag_container;
-	int buf_len, result_len;
+	int len;
 	va_list args_for_counting;
 
 	/* Make a copy because `vsnprintf` could change it */
 	va_copy(args_for_counting, args);
 
-	/* Evaluate length of formatted string */
-	buf_len = vsnprintf(NULL, 0, fmt, args_for_counting);
+	/* Need space for null byte. */
+	len = vsnprintf(NULL, 0, fmt, args_for_counting) + 1;
 
 	va_end(args_for_counting);
 
-	if (buf_len == 0)
-		return 0;
+	frag_container = alloc_string_stream_fragment(stream->test,
+						      len,
+						      stream->gfp);
+	if (!frag_container)
+		return -ENOMEM;
 
-	/* Reserve one extra for possible appended newline. */
-	if (stream->append_newlines)
-		buf_len++;
-
-	/* Need space for null byte. */
-	buf_len++;
-
-	frag_container = alloc_string_stream_fragment(buf_len, stream->gfp);
-	if (IS_ERR(frag_container))
-		return PTR_ERR(frag_container);
-
-	if (stream->append_newlines) {
-		/* Don't include reserved newline byte in writeable length. */
-		result_len = vsnprintf(frag_container->fragment, buf_len - 1, fmt, args);
-
-		/* Append newline if necessary. */
-		if (frag_container->fragment[result_len - 1] != '\n')
-			result_len = strlcat(frag_container->fragment, "\n", buf_len);
-	} else {
-		result_len = vsnprintf(frag_container->fragment, buf_len, fmt, args);
-	}
-
+	len = vsnprintf(frag_container->fragment, len, fmt, args);
 	spin_lock(&stream->lock);
-	stream->length += result_len;
+	stream->length += len;
 	list_add_tail(&frag_container->node, &stream->fragments);
 	spin_unlock(&stream->lock);
 
@@ -99,7 +113,7 @@ int string_stream_add(struct string_stream *stream, const char *fmt, ...)
 	return result;
 }
 
-void string_stream_clear(struct string_stream *stream)
+static void string_stream_clear(struct string_stream *stream)
 {
 	struct string_stream_fragment *frag_container, *frag_container_safe;
 
@@ -120,7 +134,7 @@ char *string_stream_get_string(struct string_stream *stream)
 	size_t buf_len = stream->length + 1; /* +1 for null byte. */
 	char *buf;
 
-	buf = kzalloc(buf_len, stream->gfp);
+	buf = kunit_kzalloc(stream->test, buf_len, stream->gfp);
 	if (!buf)
 		return NULL;
 
@@ -136,17 +150,13 @@ int string_stream_append(struct string_stream *stream,
 			 struct string_stream *other)
 {
 	const char *other_content;
-	int ret;
 
 	other_content = string_stream_get_string(other);
 
 	if (!other_content)
 		return -ENOMEM;
 
-	ret = string_stream_add(stream, other_content);
-	kfree(other_content);
-
-	return ret;
+	return string_stream_add(stream, other_content);
 }
 
 bool string_stream_is_empty(struct string_stream *stream)
@@ -154,54 +164,53 @@ bool string_stream_is_empty(struct string_stream *stream)
 	return list_empty(&stream->fragments);
 }
 
-struct string_stream *alloc_string_stream(gfp_t gfp)
+struct string_stream_alloc_context {
+	struct kunit *test;
+	gfp_t gfp;
+};
+
+static int string_stream_init(struct kunit_resource *res, void *context)
 {
 	struct string_stream *stream;
+	struct string_stream_alloc_context *ctx = context;
 
-	stream = kzalloc(sizeof(*stream), gfp);
+	stream = kunit_kzalloc(ctx->test, sizeof(*stream), ctx->gfp);
 	if (!stream)
-		return ERR_PTR(-ENOMEM);
+		return -ENOMEM;
 
-	stream->gfp = gfp;
+	res->data = stream;
+	stream->gfp = ctx->gfp;
+	stream->test = ctx->test;
 	INIT_LIST_HEAD(&stream->fragments);
 	spin_lock_init(&stream->lock);
 
-	return stream;
+	return 0;
 }
 
-void string_stream_destroy(struct string_stream *stream)
+static void string_stream_free(struct kunit_resource *res)
 {
-	KUNIT_STATIC_STUB_REDIRECT(string_stream_destroy, stream);
-
-	if (IS_ERR_OR_NULL(stream))
-		return;
+	struct string_stream *stream = res->data;
 
 	string_stream_clear(stream);
-	kfree(stream);
 }
 
-static void resource_free_string_stream(void *p)
+struct string_stream *alloc_string_stream(struct kunit *test, gfp_t gfp)
 {
-	struct string_stream *stream = p;
+	struct string_stream_alloc_context context = {
+		.test = test,
+		.gfp = gfp
+	};
 
-	string_stream_destroy(stream);
+	return kunit_alloc_resource(test,
+				    string_stream_init,
+				    string_stream_free,
+				    gfp,
+				    &context);
 }
 
-struct string_stream *kunit_alloc_string_stream(struct kunit *test, gfp_t gfp)
+int string_stream_destroy(struct string_stream *stream)
 {
-	struct string_stream *stream;
-
-	stream = alloc_string_stream(gfp);
-	if (IS_ERR(stream))
-		return stream;
-
-	if (kunit_add_action_or_reset(test, resource_free_string_stream, stream) != 0)
-		return ERR_PTR(-ENOMEM);
-
-	return stream;
-}
-
-void kunit_free_string_stream(struct kunit *test, struct string_stream *stream)
-{
-	kunit_release_action(test, resource_free_string_stream, (void *)stream);
+	return kunit_destroy_resource(stream->test,
+				      kunit_resource_instance_match,
+				      stream);
 }

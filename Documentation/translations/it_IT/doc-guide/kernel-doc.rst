@@ -3,11 +3,8 @@
 .. note:: Per leggere la documentazione originale in inglese:
 	  :ref:`Documentation/doc-guide/index.rst <doc_guide>`
 
-.. title:: Commenti in kernel-doc
-
 .. _it_kernel_doc:
 
-=================================
 Scrivere i commenti in kernel-doc
 =================================
 
@@ -472,7 +469,6 @@ Il titolo che segue ``DOC:`` funziona da intestazione all'interno del file
 sorgente, ma anche come identificatore per l'estrazione di questi commenti di
 documentazione. Quindi, il titolo dev'essere unico all'interno del file.
 
-=======================================
 Includere i commenti di tipo kernel-doc
 =======================================
 

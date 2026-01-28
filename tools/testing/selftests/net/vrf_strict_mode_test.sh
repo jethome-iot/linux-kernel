@@ -3,7 +3,9 @@
 
 # This test is designed for testing the new VRF strict_mode functionality.
 
-source lib.sh
+# Kselftest framework requirement - SKIP code is 4.
+ksft_skip=4
+
 ret=0
 
 # identifies the "init" network namespace which is often called root network
@@ -11,8 +13,6 @@ ret=0
 INIT_NETNS_NAME="init"
 
 PAUSE_ON_FAIL=${PAUSE_ON_FAIL:=no}
-
-TESTS="init testns mix"
 
 log_test()
 {
@@ -245,12 +245,13 @@ setup()
 {
 	modprobe vrf
 
-	setup_ns testns
+	ip netns add testns
+	ip netns exec testns ip link set lo up
 }
 
 cleanup()
 {
-	ip netns del $testns 2>/dev/null
+	ip netns del testns 2>/dev/null
 
 	ip link del vrf100 2>/dev/null
 	ip link del vrf101 2>/dev/null
@@ -261,8 +262,6 @@ cleanup()
 
 vrf_strict_mode_tests_init()
 {
-	log_section "VRF strict_mode test on init network namespace"
-
 	vrf_strict_mode_check_support init
 
 	strict_mode_check_default init
@@ -293,82 +292,66 @@ vrf_strict_mode_tests_init()
 
 vrf_strict_mode_tests_testns()
 {
-	log_section "VRF strict_mode test on testns network namespace"
+	vrf_strict_mode_check_support testns
 
-	vrf_strict_mode_check_support $testns
+	strict_mode_check_default testns
 
-	strict_mode_check_default $testns
+	enable_strict_mode_and_check testns
 
-	enable_strict_mode_and_check $testns
+	add_vrf_and_check testns vrf100 100
+	config_vrf_and_check testns 10.0.100.1/24 vrf100
 
-	add_vrf_and_check $testns vrf100 100
-	config_vrf_and_check $testns 10.0.100.1/24 vrf100
+	add_vrf_and_check_fail testns vrf101 100
 
-	add_vrf_and_check_fail $testns vrf101 100
+	add_vrf_and_check_fail testns vrf102 100
 
-	add_vrf_and_check_fail $testns vrf102 100
+	add_vrf_and_check testns vrf200 200
 
-	add_vrf_and_check $testns vrf200 200
+	disable_strict_mode_and_check testns
 
-	disable_strict_mode_and_check $testns
+	add_vrf_and_check testns vrf101 100
 
-	add_vrf_and_check $testns vrf101 100
+	add_vrf_and_check testns vrf102 100
 
-	add_vrf_and_check $testns vrf102 100
-
-	#the strict_mode is disabled in the $testns
+	#the strict_mode is disabled in the testns
 }
 
 vrf_strict_mode_tests_mix()
 {
-	log_section "VRF strict_mode test mixing init and testns network namespaces"
-
 	read_strict_mode_compare_and_check init 1
 
-	read_strict_mode_compare_and_check $testns 0
+	read_strict_mode_compare_and_check testns 0
 
-	del_vrf_and_check $testns vrf101
+	del_vrf_and_check testns vrf101
 
-	del_vrf_and_check $testns vrf102
+	del_vrf_and_check testns vrf102
 
 	disable_strict_mode_and_check init
 
-	enable_strict_mode_and_check $testns
+	enable_strict_mode_and_check testns
 
 	enable_strict_mode_and_check init
 	enable_strict_mode_and_check init
 
-	disable_strict_mode_and_check $testns
-	disable_strict_mode_and_check $testns
+	disable_strict_mode_and_check testns
+	disable_strict_mode_and_check testns
 
 	read_strict_mode_compare_and_check init 1
 
-	read_strict_mode_compare_and_check $testns 0
+	read_strict_mode_compare_and_check testns 0
 }
 
-################################################################################
-# usage
-
-usage()
+vrf_strict_mode_tests()
 {
-	cat <<EOF
-usage: ${0##*/} OPTS
+	log_section "VRF strict_mode test on init network namespace"
+	vrf_strict_mode_tests_init
 
-	-t <test>	Test(s) to run (default: all)
-			(options: $TESTS)
-EOF
+	log_section "VRF strict_mode test on testns network namespace"
+	vrf_strict_mode_tests_testns
+
+	log_section "VRF strict_mode test mixing init and testns network namespaces"
+	vrf_strict_mode_tests_mix
 }
-
-################################################################################
-# main
-
-while getopts ":t:h" opt; do
-	case $opt in
-		t) TESTS=$OPTARG;;
-		h) usage; exit 0;;
-		*) usage; exit 1;;
-	esac
-done
 
 vrf_strict_mode_check_support()
 {
@@ -408,17 +391,7 @@ fi
 cleanup &> /dev/null
 
 setup
-for t in $TESTS
-do
-	case $t in
-	vrf_strict_mode_tests_init|init) vrf_strict_mode_tests_init;;
-	vrf_strict_mode_tests_testns|testns) vrf_strict_mode_tests_testns;;
-	vrf_strict_mode_tests_mix|mix) vrf_strict_mode_tests_mix;;
-
-	help) echo "Test names: $TESTS"; exit 0;;
-
-	esac
-done
+vrf_strict_mode_tests
 cleanup
 
 print_log_test_results

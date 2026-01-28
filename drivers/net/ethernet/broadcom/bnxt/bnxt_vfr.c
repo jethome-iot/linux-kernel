@@ -222,7 +222,7 @@ static int bnxt_vf_rep_get_phys_port_name(struct net_device *dev, char *buf,
 static void bnxt_vf_rep_get_drvinfo(struct net_device *dev,
 				    struct ethtool_drvinfo *info)
 {
-	strscpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
+	strlcpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
 }
 
 static int bnxt_vf_rep_get_port_parent_id(struct net_device *dev,
@@ -356,15 +356,10 @@ void bnxt_vf_reps_destroy(struct bnxt *bp)
 	/* un-publish cfa_code_map so that RX path can't see it anymore */
 	kfree(bp->cfa_code_map);
 	bp->cfa_code_map = NULL;
+	bp->eswitch_mode = DEVLINK_ESWITCH_MODE_LEGACY;
 
-	if (closed) {
-		/* Temporarily set legacy mode to avoid re-opening
-		 * representors and restore switchdev mode after that.
-		 */
-		bp->eswitch_mode = DEVLINK_ESWITCH_MODE_LEGACY;
+	if (closed)
 		bnxt_open_nic(bp, false, false);
-		bp->eswitch_mode = DEVLINK_ESWITCH_MODE_SWITCHDEV;
-	}
 	rtnl_unlock();
 
 	/* Need to call vf_reps_destroy() outside of rntl_lock
@@ -468,7 +463,6 @@ static void bnxt_vf_rep_netdev_init(struct bnxt *bp, struct bnxt_vf_rep *vf_rep,
 	struct net_device *pf_dev = bp->dev;
 	u16 max_mtu;
 
-	SET_NETDEV_DEV(dev, &bp->pdev->dev);
 	dev->netdev_ops = &bnxt_vf_rep_netdev_ops;
 	dev->ethtool_ops = &bnxt_vf_rep_ethtool_ops;
 	/* Just inherit all the featues of the parent PF as the VF-R
@@ -488,7 +482,7 @@ static void bnxt_vf_rep_netdev_init(struct bnxt *bp, struct bnxt_vf_rep *vf_rep,
 	dev->min_mtu = ETH_ZLEN;
 }
 
-int bnxt_vf_reps_create(struct bnxt *bp)
+static int bnxt_vf_reps_create(struct bnxt *bp)
 {
 	u16 *cfa_code_map = NULL, num_vfs = pci_num_vf(bp->pdev);
 	struct bnxt_vf_rep *vf_rep;
@@ -541,6 +535,7 @@ int bnxt_vf_reps_create(struct bnxt *bp)
 
 	/* publish cfa_code_map only after all VF-reps have been initialized */
 	bp->cfa_code_map = cfa_code_map;
+	bp->eswitch_mode = DEVLINK_ESWITCH_MODE_SWITCHDEV;
 	netif_keep_dst(bp->dev);
 	return 0;
 
@@ -564,13 +559,15 @@ int bnxt_dl_eswitch_mode_set(struct devlink *devlink, u16 mode,
 			     struct netlink_ext_ack *extack)
 {
 	struct bnxt *bp = bnxt_get_bp_from_dl(devlink);
-	int ret = 0;
+	int rc = 0;
 
+	mutex_lock(&bp->sriov_lock);
 	if (bp->eswitch_mode == mode) {
 		netdev_info(bp->dev, "already in %s eswitch mode\n",
 			    mode == DEVLINK_ESWITCH_MODE_LEGACY ?
 			    "legacy" : "switchdev");
-		return -EINVAL;
+		rc = -EINVAL;
+		goto done;
 	}
 
 	switch (mode) {
@@ -581,22 +578,25 @@ int bnxt_dl_eswitch_mode_set(struct devlink *devlink, u16 mode,
 	case DEVLINK_ESWITCH_MODE_SWITCHDEV:
 		if (bp->hwrm_spec_code < 0x10803) {
 			netdev_warn(bp->dev, "FW does not support SRIOV E-Switch SWITCHDEV mode\n");
-			return -ENOTSUPP;
+			rc = -ENOTSUPP;
+			goto done;
 		}
 
-		/* Create representors for existing VFs */
-		if (pci_num_vf(bp->pdev) > 0)
-			ret = bnxt_vf_reps_create(bp);
+		if (pci_num_vf(bp->pdev) == 0) {
+			netdev_info(bp->dev, "Enable VFs before setting switchdev mode\n");
+			rc = -EPERM;
+			goto done;
+		}
+		rc = bnxt_vf_reps_create(bp);
 		break;
 
 	default:
-		return -EINVAL;
+		rc = -EINVAL;
+		goto done;
 	}
-
-	if (!ret)
-		bp->eswitch_mode = mode;
-
-	return ret;
+done:
+	mutex_unlock(&bp->sriov_lock);
+	return rc;
 }
 
 #endif

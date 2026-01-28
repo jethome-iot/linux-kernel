@@ -1,0 +1,78 @@
+/*
+ * arch/arm64/boot/dts/amlogic/overlays/odroidc4/display_vu7c.dts
+ *
+ * Copyright (C) 2022 Hardkernel, Inc. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
+ *
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/meson-s7d-gpio.h>
+#include <dt-bindings/gpio/gpio.h>
+
+#include <dt-bindings/pwm/meson.h>
+#include <dt-bindings/pwm/pwm.h>
+
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/{
+	fragment@0 {
+		target = <&pwm_a>;
+		__overlay__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&pwm_a_gpio_x6>;
+		};
+	};
+	fragment@1 {
+		target = <&i2c3>;
+		__overlay__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&i2c3_pins1>;
+			clock-frequency = <300000>; /* default 100k */
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			lt8619c: hdmi-bridge@32 {
+				compatible = "lt8619c";
+				reg = <0x32>;
+				reset-gpios = <&gpio GPIOX_3 GPIO_ACTIVE_LOW>;
+				pwms = <&pwm_a MESON_PWM_0 40000 0>;
+				default-brightness-level = <100>;
+			};
+		};
+	};
+	fragment@2 {
+		target = <&i2c4>;
+		__overlay__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&i2c4_pins2>;
+			clock-frequency = <400000>; /* default 400k */
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			touch: gt9xx@14 {
+				compatible = "goodix,gt911";
+				status = "okay";
+				reg = <0x14>;
+				interrupt-parent = <&gpio_intc>;
+				interrupts = <33 IRQ_TYPE_EDGE_FALLING>;
+				reset-gpios = <&gpio GPIOH_5 GPIO_ACTIVE_HIGH>;
+				irq-gpios = <&gpio GPIOH_4 0>;
+			};
+		};
+	};
+};

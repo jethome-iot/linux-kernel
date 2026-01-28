@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Amlogic Watermark Configuration
+config AMLOGIC_WATERMARK
+	tristate "Amlogic Watermark Support"
+	help
+	  Amlogic REE Watermark Driver
+

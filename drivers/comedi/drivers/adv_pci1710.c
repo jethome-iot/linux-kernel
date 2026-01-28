@@ -30,9 +30,10 @@
 
 #include <linux/module.h>
 #include <linux/interrupt.h>
-#include <linux/comedi/comedi_pci.h>
-#include <linux/comedi/comedi_8254.h>
 
+#include "../comedi_pci.h"
+
+#include "comedi_8254.h"
 #include "amcc_s5933.h"
 
 /*
@@ -767,10 +768,10 @@ static int pci1710_auto_attach(struct comedi_device *dev,
 		return ret;
 	dev->iobase = pci_resource_start(pcidev, 2);
 
-	dev->pacer = comedi_8254_io_alloc(dev->iobase + PCI171X_TIMER_BASE,
-					  I8254_OSC_BASE_10MHZ, I8254_IO16, 0);
-	if (IS_ERR(dev->pacer))
-		return PTR_ERR(dev->pacer);
+	dev->pacer = comedi_8254_init(dev->iobase + PCI171X_TIMER_BASE,
+				      I8254_OSC_BASE_10MHZ, I8254_IO16, 0);
+	if (!dev->pacer)
+		return -ENOMEM;
 
 	n_subdevices = 1;	/* all boards have analog inputs */
 	if (board->has_ao)

@@ -26,8 +26,6 @@
  *   Yaozu (Eddie) Dong <Eddie.dong@intel.com>
  *   Port from Qemu.
  */
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/bitops.h>
@@ -37,7 +35,7 @@
 #include "trace.h"
 
 #define pr_pic_unimpl(fmt, ...)	\
-	pr_err_ratelimited("pic: " fmt, ## __VA_ARGS__)
+	pr_err_ratelimited("kvm: pic: " fmt, ## __VA_ARGS__)
 
 static void pic_irq_request(struct kvm *kvm, int level);
 
@@ -254,6 +252,7 @@ int kvm_pic_read_irq(struct kvm *kvm)
 				 */
 				irq2 = 7;
 			intno = s->pics[1].irq_base + irq2;
+			irq = irq2 + 8;
 		} else
 			intno = s->pics[0].irq_base + irq;
 	} else {
@@ -411,10 +410,7 @@ static u32 pic_poll_read(struct kvm_kpic_state *s, u32 addr1)
 		pic_clear_isr(s, ret);
 		if (addr1 >> 7 || ret != 2)
 			pic_update_irq(s->pics_state);
-		/* Bit 7 is 1, means there's an interrupt */
-		ret |= 0x80;
 	} else {
-		/* Bit 7 is 0, means there's no interrupt */
 		ret = 0x07;
 		pic_update_irq(s->pics_state);
 	}
@@ -441,13 +437,13 @@ static u32 pic_ioport_read(void *opaque, u32 addr)
 	return ret;
 }
 
-static void elcr_ioport_write(void *opaque, u32 val)
+static void elcr_ioport_write(void *opaque, u32 addr, u32 val)
 {
 	struct kvm_kpic_state *s = opaque;
 	s->elcr = val & s->elcr_mask;
 }
 
-static u32 elcr_ioport_read(void *opaque)
+static u32 elcr_ioport_read(void *opaque, u32 addr1)
 {
 	struct kvm_kpic_state *s = opaque;
 	return s->elcr;
@@ -478,7 +474,7 @@ static int picdev_write(struct kvm_pic *s,
 	case 0x4d0:
 	case 0x4d1:
 		pic_lock(s);
-		elcr_ioport_write(&s->pics[addr & 1], data);
+		elcr_ioport_write(&s->pics[addr & 1], addr, data);
 		pic_unlock(s);
 		break;
 	default:
@@ -509,7 +505,7 @@ static int picdev_read(struct kvm_pic *s,
 	case 0x4d0:
 	case 0x4d1:
 		pic_lock(s);
-		*data = elcr_ioport_read(&s->pics[addr & 1]);
+		*data = elcr_ioport_read(&s->pics[addr & 1], addr);
 		pic_unlock(s);
 		break;
 	default:

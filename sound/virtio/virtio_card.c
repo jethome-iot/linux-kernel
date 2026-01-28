@@ -91,6 +91,8 @@ static void virtsnd_event_notify_cb(struct virtqueue *vqueue)
 			virtsnd_event_dispatch(snd, event);
 			virtsnd_event_send(vqueue, event, true, GFP_ATOMIC);
 		}
+		if (unlikely(virtqueue_is_broken(vqueue)))
+			break;
 	} while (!virtqueue_enable_cb(vqueue));
 	spin_unlock_irqrestore(&queue->lock, flags);
 }
@@ -348,7 +350,7 @@ static void virtsnd_remove(struct virtio_device *vdev)
 		snd_card_free(snd->card);
 
 	vdev->config->del_vqs(vdev);
-	virtio_reset_device(vdev);
+	vdev->config->reset(vdev);
 
 	for (i = 0; snd->substreams && i < snd->nsubstreams; ++i) {
 		struct virtio_pcm_substream *vss = &snd->substreams[i];
@@ -377,7 +379,7 @@ static int virtsnd_freeze(struct virtio_device *vdev)
 	virtsnd_ctl_msg_cancel_all(snd);
 
 	vdev->config->del_vqs(vdev);
-	virtio_reset_device(vdev);
+	vdev->config->reset(vdev);
 
 	for (i = 0; i < snd->nsubstreams; ++i)
 		cancel_work_sync(&snd->substreams[i].elapsed_period);

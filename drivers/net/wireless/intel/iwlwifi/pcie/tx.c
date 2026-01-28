@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2003-2014, 2018-2021, 2023 Intel Corporation
+ * Copyright (C) 2003-2014, 2018-2021 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -132,6 +132,22 @@ void iwl_pcie_txq_check_wrptrs(struct iwl_trans *trans)
 	}
 }
 
+static inline void iwl_pcie_tfd_set_tb(struct iwl_trans *trans, void *tfd,
+				       u8 idx, dma_addr_t addr, u16 len)
+{
+	struct iwl_tfd *tfd_fh = (void *)tfd;
+	struct iwl_tfd_tb *tb = &tfd_fh->tbs[idx];
+
+	u16 hi_n_len = len << 4;
+
+	put_unaligned_le32(addr, &tb->lo);
+	hi_n_len |= iwl_get_dma_hi_addr(addr);
+
+	tb->hi_n_len = cpu_to_le16(hi_n_len);
+
+	tfd_fh->num_tbs = idx + 1;
+}
+
 static int iwl_pcie_txq_build_tfd(struct iwl_trans *trans, struct iwl_txq *txq,
 				  dma_addr_t addr, u16 len, bool reset)
 {
@@ -156,7 +172,7 @@ static int iwl_pcie_txq_build_tfd(struct iwl_trans *trans, struct iwl_txq *txq,
 		 "Unaligned address = %llx\n", (unsigned long long)addr))
 		return -EINVAL;
 
-	iwl_pcie_gen1_tfd_set_tb(trans, tfd, num_tbs, addr, len);
+	iwl_pcie_tfd_set_tb(trans, tfd, num_tbs, addr, len);
 
 	return num_tbs;
 }
@@ -348,7 +364,7 @@ void iwl_trans_pcie_tx_reset(struct iwl_trans *trans)
 	for (txq_id = 0; txq_id < trans->trans_cfg->base_params->num_of_queues;
 	     txq_id++) {
 		struct iwl_txq *txq = trans->txqs.txq[txq_id];
-		if (trans->trans_cfg->gen2)
+		if (trans->trans_cfg->use_tfh)
 			iwl_write_direct64(trans,
 					   FH_MEM_CBBC_QUEUE(trans, txq_id),
 					   txq->dma_addr);
@@ -524,7 +540,7 @@ static int iwl_pcie_tx_alloc(struct iwl_trans *trans)
 					  trans->cfg->min_txq_size);
 		else
 			slots_num = max_t(u32, IWL_DEFAULT_QUEUE_SIZE,
-					  trans->cfg->min_ba_txq_size);
+					  trans->cfg->min_256_ba_txq_size);
 		trans->txqs.txq[txq_id] = &trans_pcie->txq_memory[txq_id];
 		ret = iwl_txq_alloc(trans, trans->txqs.txq[txq_id], slots_num,
 				    cmd_queue);
@@ -578,7 +594,7 @@ int iwl_pcie_tx_init(struct iwl_trans *trans)
 					  trans->cfg->min_txq_size);
 		else
 			slots_num = max_t(u32, IWL_DEFAULT_QUEUE_SIZE,
-					  trans->cfg->min_ba_txq_size);
+					  trans->cfg->min_256_ba_txq_size);
 		ret = iwl_txq_init(trans, trans->txqs.txq[txq_id], slots_num,
 				   cmd_queue);
 		if (ret) {
@@ -861,7 +877,7 @@ void iwl_trans_pcie_txq_disable(struct iwl_trans *trans, int txq_id,
 	if (configure_scd) {
 		iwl_scd_txq_set_inactive(trans, txq_id);
 
-		iwl_trans_write_mem(trans, stts_addr, (const void *)zero_val,
+		iwl_trans_write_mem(trans, stts_addr, (void *)zero_val,
 				    ARRAY_SIZE(zero_val));
 	}
 
@@ -872,33 +888,6 @@ void iwl_trans_pcie_txq_disable(struct iwl_trans *trans, int txq_id,
 }
 
 /*************** HOST COMMAND QUEUE FUNCTIONS   *****/
-
-static void iwl_trans_pcie_block_txq_ptrs(struct iwl_trans *trans, bool block)
-{
-	int i;
-
-	for (i = 0; i < trans->trans_cfg->base_params->num_of_queues; i++) {
-		struct iwl_txq *txq = trans->txqs.txq[i];
-
-		if (i == trans->txqs.cmd.q_id)
-			continue;
-
-		/* we skip the command queue (obviously) so it's OK to nest */
-		spin_lock_nested(&txq->lock, 1);
-
-		if (!block && !(WARN_ON_ONCE(!txq->block))) {
-			txq->block--;
-			if (!txq->block) {
-				iwl_write32(trans, HBUS_TARG_WRPTR,
-					    txq->write_ptr | (i << 8));
-			}
-		} else if (block) {
-			txq->block++;
-		}
-
-		spin_unlock(&txq->lock);
-	}
-}
 
 /*
  * iwl_pcie_enqueue_hcmd - enqueue a uCode command
@@ -1125,7 +1114,7 @@ int iwl_pcie_enqueue_hcmd(struct iwl_trans *trans,
 
 	/* map the remaining (adjusted) nocopy/dup fragments */
 	for (i = 0; i < IWL_MAX_CMD_TBS_PER_TFD; i++) {
-		void *data = (void *)(uintptr_t)cmddata[i];
+		const void *data = cmddata[i];
 
 		if (!cmdlen[i])
 			continue;
@@ -1134,7 +1123,7 @@ int iwl_pcie_enqueue_hcmd(struct iwl_trans *trans,
 			continue;
 		if (cmd->dataflags[i] & IWL_HCMD_DFL_DUP)
 			data = dup_buf;
-		phys_addr = dma_map_single(trans->dev, data,
+		phys_addr = dma_map_single(trans->dev, (void *)data,
 					   cmdlen[i], DMA_TO_DEVICE);
 		if (dma_mapping_error(trans->dev, phys_addr)) {
 			iwl_txq_gen1_tfd_unmap(trans, out_meta, txq,
@@ -1163,9 +1152,6 @@ int iwl_pcie_enqueue_hcmd(struct iwl_trans *trans,
 		idx = ret;
 		goto out;
 	}
-
-	if (cmd->flags & CMD_BLOCK_TXQS)
-		iwl_trans_pcie_block_txq_ptrs(trans, true);
 
 	/* Increment and update queue's write index */
 	txq->write_ptr = iwl_txq_inc_wrap(trans, txq->write_ptr);
@@ -1215,13 +1201,9 @@ void iwl_pcie_hcmd_complete(struct iwl_trans *trans,
 	cmd = txq->entries[cmd_index].cmd;
 	meta = &txq->entries[cmd_index].meta;
 	group_id = cmd->hdr.group_id;
-	cmd_id = WIDE_ID(group_id, cmd->hdr.cmd);
+	cmd_id = iwl_cmd_id(cmd->hdr.cmd, group_id, 0);
 
-	if (trans->trans_cfg->gen2)
-		iwl_txq_gen2_tfd_unmap(trans, meta,
-				       iwl_txq_get_tfd(trans, txq, index));
-	else
-		iwl_txq_gen1_tfd_unmap(trans, meta, txq, index);
+	iwl_txq_gen1_tfd_unmap(trans, meta, txq, index);
 
 	/* Input error checking is done when commands are added to queue. */
 	if (meta->flags & CMD_WANT_SKB) {
@@ -1232,8 +1214,8 @@ void iwl_pcie_hcmd_complete(struct iwl_trans *trans,
 		meta->source->_rx_page_order = trans_pcie->rx_page_order;
 	}
 
-	if (meta->flags & CMD_BLOCK_TXQS)
-		iwl_trans_pcie_block_txq_ptrs(trans, false);
+	if (meta->flags & CMD_WANT_ASYNC_CALLBACK)
+		iwl_op_mode_async_cb(trans->op_mode, cmd);
 
 	iwl_pcie_cmdq_reclaim(trans, txq_id, index);
 
@@ -1565,9 +1547,6 @@ int iwl_trans_pcie_tx(struct iwl_trans *trans, struct sk_buff *skb,
 
 	/* there must be data left over for TB1 or this code must be changed */
 	BUILD_BUG_ON(sizeof(struct iwl_tx_cmd) < IWL_FIRST_TB_SIZE);
-	BUILD_BUG_ON(sizeof(struct iwl_cmd_header) +
-		     offsetofend(struct iwl_tx_cmd, scratch) >
-		     IWL_FIRST_TB_SIZE);
 
 	/* map the data for TB1 */
 	tb1_addr = ((u8 *)&dev_cmd->hdr) + IWL_FIRST_TB_SIZE;

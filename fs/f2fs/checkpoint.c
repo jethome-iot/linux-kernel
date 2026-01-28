@@ -30,9 +30,12 @@ void f2fs_stop_checkpoint(struct f2fs_sb_info *sbi, bool end_io,
 						unsigned char reason)
 {
 	f2fs_build_fault_attr(sbi, 0, 0);
-	if (!end_io)
+	set_ckpt_flags(sbi, CP_ERROR_FLAG);
+	if (!end_io) {
 		f2fs_flush_merged_writes(sbi);
-	f2fs_handle_critical_error(sbi, reason, end_io);
+
+		f2fs_handle_stop(sbi, reason);
+	}
 }
 
 /*
@@ -407,62 +410,59 @@ long f2fs_sync_meta_pages(struct f2fs_sb_info *sbi, enum page_type type,
 {
 	struct address_space *mapping = META_MAPPING(sbi);
 	pgoff_t index = 0, prev = ULONG_MAX;
-	struct folio_batch fbatch;
+	struct pagevec pvec;
 	long nwritten = 0;
-	int nr_folios;
+	int nr_pages;
 	struct writeback_control wbc = {
 		.for_reclaim = 0,
 	};
 	struct blk_plug plug;
 
-	folio_batch_init(&fbatch);
+	pagevec_init(&pvec);
 
 	blk_start_plug(&plug);
 
-	while ((nr_folios = filemap_get_folios_tag(mapping, &index,
-					(pgoff_t)-1,
-					PAGECACHE_TAG_DIRTY, &fbatch))) {
+	while ((nr_pages = pagevec_lookup_tag(&pvec, mapping, &index,
+				PAGECACHE_TAG_DIRTY))) {
 		int i;
 
-		for (i = 0; i < nr_folios; i++) {
-			struct folio *folio = fbatch.folios[i];
+		for (i = 0; i < nr_pages; i++) {
+			struct page *page = pvec.pages[i];
 
-			if (nr_to_write != LONG_MAX && i != 0 &&
-					folio->index != prev +
-					folio_nr_pages(fbatch.folios[i-1])) {
-				folio_batch_release(&fbatch);
+			if (prev == ULONG_MAX)
+				prev = page->index - 1;
+			if (nr_to_write != LONG_MAX && page->index != prev + 1) {
+				pagevec_release(&pvec);
 				goto stop;
 			}
 
-			folio_lock(folio);
+			lock_page(page);
 
-			if (unlikely(folio->mapping != mapping)) {
+			if (unlikely(page->mapping != mapping)) {
 continue_unlock:
-				folio_unlock(folio);
+				unlock_page(page);
 				continue;
 			}
-			if (!folio_test_dirty(folio)) {
+			if (!PageDirty(page)) {
 				/* someone wrote it for us */
 				goto continue_unlock;
 			}
 
-			f2fs_wait_on_page_writeback(&folio->page, META,
-					true, true);
+			f2fs_wait_on_page_writeback(page, META, true, true);
 
-			if (!folio_clear_dirty_for_io(folio))
+			if (!clear_page_dirty_for_io(page))
 				goto continue_unlock;
 
-			if (__f2fs_write_meta_page(&folio->page, &wbc,
-						io_type)) {
-				folio_unlock(folio);
+			if (__f2fs_write_meta_page(page, &wbc, io_type)) {
+				unlock_page(page);
 				break;
 			}
-			nwritten += folio_nr_pages(folio);
-			prev = folio->index;
+			nwritten++;
+			prev = page->index;
 			if (unlikely(nwritten >= nr_to_write))
 				break;
 		}
-		folio_batch_release(&fbatch);
+		pagevec_release(&pvec);
 		cond_resched();
 	}
 stop:
@@ -474,28 +474,29 @@ stop:
 	return nwritten;
 }
 
-static bool f2fs_dirty_meta_folio(struct address_space *mapping,
-		struct folio *folio)
+static int f2fs_set_meta_page_dirty(struct page *page)
 {
-	trace_f2fs_set_page_dirty(&folio->page, META);
+	trace_f2fs_set_page_dirty(page, META);
 
-	if (!folio_test_uptodate(folio))
-		folio_mark_uptodate(folio);
-	if (filemap_dirty_folio(mapping, folio)) {
-		inc_page_count(F2FS_M_SB(mapping), F2FS_DIRTY_META);
-		set_page_private_reference(&folio->page);
-		return true;
+	if (!PageUptodate(page))
+		SetPageUptodate(page);
+	if (__set_page_dirty_nobuffers(page)) {
+		inc_page_count(F2FS_P_SB(page), F2FS_DIRTY_META);
+		set_page_private_reference(page);
+		return 1;
 	}
-	return false;
+	return 0;
 }
 
 const struct address_space_operations f2fs_meta_aops = {
 	.writepage	= f2fs_write_meta_page,
 	.writepages	= f2fs_write_meta_pages,
-	.dirty_folio	= f2fs_dirty_meta_folio,
-	.invalidate_folio = f2fs_invalidate_folio,
-	.release_folio	= f2fs_release_folio,
-	.migrate_folio	= filemap_migrate_folio,
+	.set_page_dirty	= f2fs_set_meta_page_dirty,
+	.invalidatepage = f2fs_invalidate_page,
+	.releasepage	= f2fs_release_page,
+#ifdef CONFIG_MIGRATION
+	.migratepage    = f2fs_migrate_page,
+#endif
 };
 
 static void __add_ino_entry(struct f2fs_sb_info *sbi, nid_t ino,
@@ -1029,7 +1030,7 @@ static void __remove_dirty_inode(struct inode *inode, enum inode_type type)
 	stat_dec_dirty_inode(F2FS_I_SB(inode), type);
 }
 
-void f2fs_update_dirty_folio(struct inode *inode, struct folio *folio)
+void f2fs_update_dirty_page(struct inode *inode, struct page *page)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	enum inode_type type = S_ISDIR(inode->i_mode) ? DIR_INODE : FILE_INODE;
@@ -1044,7 +1045,7 @@ void f2fs_update_dirty_folio(struct inode *inode, struct folio *folio)
 	inode_inc_dirty_pages(inode);
 	spin_unlock(&sbi->inode_lock[type]);
 
-	set_page_private_reference(&folio->page);
+	set_page_private_reference(page);
 }
 
 void f2fs_remove_dirty_inode(struct inode *inode)
@@ -1398,7 +1399,7 @@ static void commit_checkpoint(struct f2fs_sb_info *sbi,
 	};
 
 	/*
-	 * filemap_get_folios_tag and lock_page again will take
+	 * pagevec_lookup_tag and lock_page again will take
 	 * some extra time. Therefore, f2fs_update_meta_pages and
 	 * f2fs_sync_meta_pages are combined in this function.
 	 */
@@ -1701,9 +1702,9 @@ int f2fs_write_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	}
 
 	f2fs_restore_inmem_curseg(sbi);
-	stat_inc_cp_count(sbi);
 stop:
 	unblock_operations(sbi);
+	stat_inc_cp_count(sbi->stat_info);
 
 	if (cpc->reason & CP_RECOVERY)
 		f2fs_notice(sbi, "checkpoint: version = %llx", ckpt_ver);

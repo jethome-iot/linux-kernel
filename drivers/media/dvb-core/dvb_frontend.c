@@ -234,8 +234,49 @@ static enum dvbv3_emulation_type dvbv3_type(u32 delivery_system)
 	}
 }
 
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+static struct dvb_adapter frontend_adapter;
+static int ref_count;
+DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
+struct dvb_adapter *aml_dvb_get_adapter(struct device *dev)
+{
+	mutex_lock(&frontend_mutex);
+	if (!ref_count) {
+		pr_err("%s need register adapter first.\n", __func__);
+		dvb_register_adapter(&frontend_adapter, "amlogic-dvb", THIS_MODULE,
+				dev, adapter_nr);
+	}
+	ref_count++;
+	mutex_unlock(&frontend_mutex);
+	return &frontend_adapter;
+}
+EXPORT_SYMBOL(aml_dvb_get_adapter);
+
+int aml_dvb_put_adapter(struct dvb_adapter *adapter)
+{
+	mutex_lock(&frontend_mutex);
+
+	if (ref_count > 0)
+		ref_count--;
+
+	if (!ref_count && adapter == &frontend_adapter) {
+		pr_err("%s dvb unregister adapter.\n", __func__);
+		dvb_unregister_adapter(&frontend_adapter);
+	}
+
+	mutex_unlock(&frontend_mutex);
+	return 0;
+}
+EXPORT_SYMBOL(aml_dvb_put_adapter);
+#endif
+
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+void dvb_frontend_add_event(struct dvb_frontend *fe,
+			    enum fe_status status)
+#else
 static void dvb_frontend_add_event(struct dvb_frontend *fe,
 				   enum fe_status status)
+#endif
 {
 	struct dvb_frontend_private *fepriv = fe->frontend_priv;
 	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
@@ -266,6 +307,10 @@ static void dvb_frontend_add_event(struct dvb_frontend *fe,
 
 	wake_up_interruptible(&events->wait_queue);
 }
+
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+EXPORT_SYMBOL(dvb_frontend_add_event);
+#endif
 
 static int dvb_frontend_test_event(struct dvb_frontend_private *fepriv,
 				   struct dvb_fe_events *events)
@@ -926,7 +971,6 @@ static void dvb_frontend_get_frequency_limits(struct dvb_frontend *fe,
 
 	/* If the standard is for satellite, convert frequencies to kHz */
 	switch (c->delivery_system) {
-	case SYS_DSS:
 	case SYS_DVBS:
 	case SYS_DVBS2:
 	case SYS_TURBO:
@@ -952,7 +996,6 @@ static u32 dvb_frontend_get_stepsize(struct dvb_frontend *fe)
 	u32 step = max(fe_step, tuner_step);
 
 	switch (c->delivery_system) {
-	case SYS_DSS:
 	case SYS_DVBS:
 	case SYS_DVBS2:
 	case SYS_TURBO:
@@ -984,7 +1027,6 @@ static int dvb_frontend_check_parameters(struct dvb_frontend *fe)
 
 	/* range check: symbol rate */
 	switch (c->delivery_system) {
-	case SYS_DSS:
 	case SYS_DVBS:
 	case SYS_DVBS2:
 	case SYS_TURBO:
@@ -1051,10 +1093,6 @@ static int dvb_frontend_clear_cache(struct dvb_frontend *fe)
 	c->scrambling_sequence_index = 0;/* default sequence */
 
 	switch (c->delivery_system) {
-	case SYS_DSS:
-		c->modulation = QPSK;
-		c->rolloff = ROLLOFF_20;
-		break;
 	case SYS_DVBS:
 	case SYS_DVBS2:
 	case SYS_TURBO:
@@ -1082,7 +1120,11 @@ static int dvb_frontend_clear_cache(struct dvb_frontend *fe)
 #define _DTV_CMD(n) \
 	[n] =  #n
 
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+static char *dtv_cmds[AML_DTV_MAX_COMMAND + 1] = {
+#else
 static char *dtv_cmds[DTV_MAX_COMMAND + 1] = {
+#endif
 	_DTV_CMD(DTV_TUNE),
 	_DTV_CMD(DTV_CLEAR),
 
@@ -1129,7 +1171,19 @@ static char *dtv_cmds[DTV_MAX_COMMAND + 1] = {
 	_DTV_CMD(DTV_DVBT2_PLP_ID_LEGACY),
 	_DTV_CMD(DTV_SCRAMBLING_SEQUENCE_INDEX),
 	_DTV_CMD(DTV_LNA),
-
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	/*set blind scan cmd*/
+	_DTV_CMD(DTV_START_BLIND_SCAN),
+	_DTV_CMD(DTV_CANCEL_BLIND_SCAN),
+	_DTV_CMD(DTV_BLIND_SCAN_MIN_FRE),
+	_DTV_CMD(DTV_BLIND_SCAN_MAX_FRE),
+	_DTV_CMD(DTV_BLIND_SCAN_MIN_SRATE),
+	_DTV_CMD(DTV_BLIND_SCAN_MAX_SRATE),
+	_DTV_CMD(DTV_BLIND_SCAN_FRE_RANGE),
+	_DTV_CMD(DTV_BLIND_SCAN_FRE_STEP),
+	_DTV_CMD(DTV_BLIND_SCAN_TIMEOUT),
+	/*set blind scan cmd end*/
+#endif
 	/* Get */
 	_DTV_CMD(DTV_DISEQC_SLAVE_REPLY),
 	_DTV_CMD(DTV_API_VERSION),
@@ -1166,7 +1220,11 @@ static char *dtv_cmds[DTV_MAX_COMMAND + 1] = {
 
 static char *dtv_cmd_name(u32 cmd)
 {
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	cmd = array_index_nospec(cmd, AML_DTV_MAX_COMMAND);
+#else
 	cmd = array_index_nospec(cmd, DTV_MAX_COMMAND);
+#endif
 	return dtv_cmds[cmd];
 }
 
@@ -1352,6 +1410,9 @@ static int dtv_property_process_get(struct dvb_frontend *fe,
 				    struct file *file)
 {
 	int ncaps;
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	int r = 0;
+#endif
 	unsigned int len = 1;
 
 	switch (tvp->cmd) {
@@ -1586,6 +1647,12 @@ static int dtv_property_process_get(struct dvb_frontend *fe,
 			tvp->u.buffer.len = MAX_DTV_STATS * sizeof(u32);
 		len = tvp->u.buffer.len;
 		break;
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	case DTV_DELIVERY_SUB_SYSTEM:
+	case DTV_TS_INPUT:
+		r = 0;
+		break;
+#endif
 	default:
 		dev_dbg(fe->dvb->device,
 			"%s: FE property %d doesn't exist\n",
@@ -1593,6 +1660,14 @@ static int dtv_property_process_get(struct dvb_frontend *fe,
 		return -EINVAL;
 	}
 
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	/* Allow the frontend to override outgoing properties */
+	if (fe->ops.get_property) {
+		r = fe->ops.get_property(fe, tvp);
+		if (r < 0)
+			return r;
+	}
+#endif
 	if (len < 1)
 		len = 1;
 
@@ -1608,8 +1683,17 @@ static int dtv_set_frontend(struct dvb_frontend *fe);
 
 static bool is_dvbv3_delsys(u32 delsys)
 {
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
 	return (delsys == SYS_DVBT) || (delsys == SYS_DVBC_ANNEX_A) ||
-	       (delsys == SYS_DVBS) || (delsys == SYS_ATSC);
+		 (delsys == SYS_DVBC_ANNEX_B) || (delsys == SYS_DVBC_ANNEX_C) ||
+		 (delsys == SYS_DVBS) || (delsys == SYS_ATSC) ||
+		 (delsys == SYS_DTMB) || (delsys == SYS_DVBS2) ||
+		 (delsys == SYS_DVBT2) || (delsys == SYS_ISDBC) ||
+		 (delsys == SYS_ISDBT) || (delsys == SYS_ISDBS);
+#else
+	return (delsys == SYS_DVBT) || (delsys == SYS_DVBC_ANNEX_A) ||
+		 (delsys == SYS_DVBS) || (delsys == SYS_ATSC);
+#endif
 }
 
 /**
@@ -1836,7 +1920,6 @@ static void prepare_tuning_algo_parameters(struct dvb_frontend *fe)
 	} else {
 		/* default values */
 		switch (c->delivery_system) {
-		case SYS_DSS:
 		case SYS_DVBS:
 		case SYS_DVBS2:
 		case SYS_ISDBS:
@@ -1891,8 +1974,26 @@ static int dtv_property_process_set(struct dvb_frontend *fe,
 	int r = 0;
 	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
 
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	struct dtv_property tvp;
+
+	tvp.cmd = cmd;
+	tvp.u.data = data;
+
+	/* Allow the frontend to validate incoming properties */
+	if (fe->ops.set_property) {
+		r = fe->ops.set_property(fe, &tvp);
+		if (r < 0)
+			return r;
+	}
+#endif
+
 	/** Dump DTV command name and value*/
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	if (!cmd || cmd > AML_DTV_MAX_COMMAND)
+#else
 	if (!cmd || cmd > DTV_MAX_COMMAND)
+#endif
 		dev_warn(fe->dvb->device, "%s: SET cmd 0x%08x undefined\n",
 			 __func__, cmd);
 	else
@@ -1945,6 +2046,11 @@ static int dtv_property_process_set(struct dvb_frontend *fe,
 	case DTV_DELIVERY_SYSTEM:
 		r = dvbv5_set_delivery_system(fe, data);
 		break;
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	case DTV_DELIVERY_SUB_SYSTEM:
+		r = 0;
+		break;
+#endif
 	case DTV_VOLTAGE:
 		c->voltage = data;
 		r = dvb_frontend_handle_ioctl(file, FE_SET_VOLTAGE,
@@ -2056,7 +2162,25 @@ static int dtv_property_process_set(struct dvb_frontend *fe,
 		if (r < 0)
 			c->lna = LNA_AUTO;
 		break;
-
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	case DTV_START_BLIND_SCAN:
+	case DTV_CANCEL_BLIND_SCAN:
+	case DTV_BLIND_SCAN_MIN_FRE:
+	case DTV_BLIND_SCAN_MAX_FRE:
+	case DTV_BLIND_SCAN_MIN_SRATE:
+	case DTV_BLIND_SCAN_MAX_SRATE:
+	case DTV_BLIND_SCAN_FRE_RANGE:
+	case DTV_BLIND_SCAN_FRE_STEP:
+	case DTV_BLIND_SCAN_TIMEOUT:
+	case DTV_SINGLE_CABLE_VER:
+	case DTV_SINGLE_CABLE_USER_BAND:
+	case DTV_SINGLE_CABLE_BAND_FRE:
+	case DTV_SINGLE_CABLE_BANK:
+	case DTV_SINGLE_CABLE_UNCOMMITTED:
+	case DTV_SINGLE_CABLE_COMMITTED:
+		r = 0;
+		break;
+#endif
 	default:
 		return -EINVAL;
 	}
@@ -2303,9 +2427,6 @@ static int dtv_set_frontend(struct dvb_frontend *fe)
 		break;
 	case SYS_DVBC_ANNEX_C:
 		rolloff = 113;
-		break;
-	case SYS_DSS:
-		rolloff = 120;
 		break;
 	case SYS_DVBS:
 	case SYS_TURBO:
@@ -2573,7 +2694,8 @@ static int dvb_frontend_handle_ioctl(struct file *file,
 
 	case FE_DISEQC_SEND_BURST:
 		if (fe->ops.diseqc_send_burst) {
-			err = fe->ops.diseqc_send_burst(fe, (long)parg);
+			err = fe->ops.diseqc_send_burst(fe,
+						(enum fe_sec_mini_cmd)parg);
 			fepriv->state = FESTATE_DISEQC;
 			fepriv->status = 0;
 		}
@@ -2581,8 +2703,9 @@ static int dvb_frontend_handle_ioctl(struct file *file,
 
 	case FE_SET_TONE:
 		if (fe->ops.set_tone) {
-			fepriv->tone = (long)parg;
-			err = fe->ops.set_tone(fe, fepriv->tone);
+			err = fe->ops.set_tone(fe,
+					       (enum fe_sec_tone_mode)parg);
+			fepriv->tone = (enum fe_sec_tone_mode)parg;
 			fepriv->state = FESTATE_DISEQC;
 			fepriv->status = 0;
 		}
@@ -2590,8 +2713,9 @@ static int dvb_frontend_handle_ioctl(struct file *file,
 
 	case FE_SET_VOLTAGE:
 		if (fe->ops.set_voltage) {
-			fepriv->voltage = (long)parg;
-			err = fe->ops.set_voltage(fe, fepriv->voltage);
+			err = fe->ops.set_voltage(fe,
+						  (enum fe_sec_voltage)parg);
+			fepriv->voltage = (enum fe_sec_voltage)parg;
 			fepriv->state = FESTATE_DISEQC;
 			fepriv->status = 0;
 		}
@@ -2773,17 +2897,7 @@ static int dvb_frontend_open(struct inode *inode, struct file *file)
 	if (fe->exit == DVB_FE_DEVICE_REMOVED)
 		return -ENODEV;
 
-	if (adapter->mfe_shared == 2) {
-		mutex_lock(&adapter->mfe_lock);
-		if ((file->f_flags & O_ACCMODE) != O_RDONLY) {
-			if (adapter->mfe_dvbdev &&
-			    !adapter->mfe_dvbdev->writers) {
-				mutex_unlock(&adapter->mfe_lock);
-				return -EBUSY;
-			}
-			adapter->mfe_dvbdev = dvbdev;
-		}
-	} else if (adapter->mfe_shared) {
+	if (adapter->mfe_shared) {
 		mutex_lock(&adapter->mfe_lock);
 
 		if (!adapter->mfe_dvbdev)
@@ -2961,9 +3075,7 @@ int dvb_frontend_suspend(struct dvb_frontend *fe)
 	else if (fe->ops.tuner_ops.sleep)
 		ret = fe->ops.tuner_ops.sleep(fe);
 
-	if (fe->ops.suspend)
-		ret = fe->ops.suspend(fe);
-	else if (fe->ops.sleep)
+	if (fe->ops.sleep)
 		ret = fe->ops.sleep(fe);
 
 	return ret;
@@ -2979,9 +3091,7 @@ int dvb_frontend_resume(struct dvb_frontend *fe)
 		fe->id);
 
 	fe->exit = DVB_FE_DEVICE_RESUME;
-	if (fe->ops.resume)
-		ret = fe->ops.resume(fe);
-	else if (fe->ops.init)
+	if (fe->ops.init)
 		ret = fe->ops.init(fe);
 
 	if (fe->ops.tuner_ops.resume)

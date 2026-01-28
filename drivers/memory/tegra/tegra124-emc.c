@@ -1351,13 +1351,15 @@ static int tegra_emc_interconnect_init(struct tegra_emc *emc)
 	emc->provider.aggregate = soc->icc_ops->aggregate;
 	emc->provider.xlate_extended = emc_of_icc_xlate_extended;
 
-	icc_provider_init(&emc->provider);
+	err = icc_provider_add(&emc->provider);
+	if (err)
+		goto err_msg;
 
 	/* create External Memory Controller node */
 	node = icc_node_create(TEGRA_ICC_EMC);
 	if (IS_ERR(node)) {
 		err = PTR_ERR(node);
-		goto err_msg;
+		goto del_provider;
 	}
 
 	node->name = "External Memory Controller";
@@ -1378,14 +1380,12 @@ static int tegra_emc_interconnect_init(struct tegra_emc *emc)
 	node->name = "External Memory (DRAM)";
 	icc_node_add(node, &emc->provider);
 
-	err = icc_provider_register(&emc->provider);
-	if (err)
-		goto remove_nodes;
-
 	return 0;
 
 remove_nodes:
 	icc_nodes_remove(&emc->provider);
+del_provider:
+	icc_provider_del(&emc->provider);
 err_msg:
 	dev_err(emc->dev, "failed to initialize ICC: %d\n", err);
 
@@ -1395,14 +1395,15 @@ err_msg:
 static int tegra_emc_opp_table_init(struct tegra_emc *emc)
 {
 	u32 hw_version = BIT(tegra_sku_info.soc_speedo_id);
-	int opp_token, err;
+	struct opp_table *hw_opp_table;
+	int err;
 
-	err = dev_pm_opp_set_supported_hw(emc->dev, &hw_version, 1);
-	if (err < 0) {
+	hw_opp_table = dev_pm_opp_set_supported_hw(emc->dev, &hw_version, 1);
+	err = PTR_ERR_OR_ZERO(hw_opp_table);
+	if (err) {
 		dev_err(emc->dev, "failed to set OPP supported HW: %d\n", err);
 		return err;
 	}
-	opp_token = err;
 
 	err = dev_pm_opp_of_add_table(emc->dev);
 	if (err) {
@@ -1429,7 +1430,7 @@ static int tegra_emc_opp_table_init(struct tegra_emc *emc)
 remove_table:
 	dev_pm_opp_of_remove_table(emc->dev);
 put_hw_table:
-	dev_pm_opp_put_supported_hw(opp_token);
+	dev_pm_opp_put_supported_hw(hw_opp_table);
 
 	return err;
 }

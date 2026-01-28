@@ -16,9 +16,9 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_debugfs.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fbdev_dma.h>
+#include <drm/drm_fb_helper.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_mm.h>
 #include <drm/drm_probe_helper.h>
@@ -59,6 +59,8 @@ void tilcdc_module_cleanup(struct tilcdc_module *mod)
 {
 	list_del(&mod->list);
 }
+
+static struct of_device_id tilcdc_of_match[];
 
 static int tilcdc_atomic_check(struct drm_device *dev,
 			       struct drm_atomic_state *state)
@@ -175,7 +177,6 @@ static void tilcdc_fini(struct drm_device *dev)
 		drm_dev_unregister(dev);
 
 	drm_kms_helper_poll_fini(dev);
-	drm_atomic_helper_shutdown(dev);
 	tilcdc_irq_uninstall(dev);
 	drm_mode_config_cleanup(dev);
 
@@ -185,8 +186,10 @@ static void tilcdc_fini(struct drm_device *dev)
 	if (priv->mmio)
 		iounmap(priv->mmio);
 
-	if (priv->wq)
+	if (priv->wq) {
+		flush_workqueue(priv->wq);
 		destroy_workqueue(priv->wq);
+	}
 
 	dev->dev_private = NULL;
 
@@ -385,12 +388,11 @@ static int tilcdc_init(const struct drm_driver *ddrv, struct device *dev)
 		goto init_failed;
 	priv->is_registered = true;
 
-	drm_fbdev_dma_setup(ddev, bpp);
+	drm_fbdev_generic_setup(ddev, bpp);
 	return 0;
 
 init_failed:
 	tilcdc_fini(ddev);
-	platform_set_drvdata(pdev, NULL);
 
 	return ret;
 }
@@ -478,11 +480,11 @@ static void tilcdc_debugfs_init(struct drm_minor *minor)
 }
 #endif
 
-DEFINE_DRM_GEM_DMA_FOPS(fops);
+DEFINE_DRM_GEM_CMA_FOPS(fops);
 
 static const struct drm_driver tilcdc_driver = {
 	.driver_features    = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
-	DRM_GEM_DMA_DRIVER_OPS,
+	DRM_GEM_CMA_DRIVER_OPS,
 #ifdef CONFIG_DEBUG_FS
 	.debugfs_init       = tilcdc_debugfs_init,
 #endif
@@ -498,6 +500,7 @@ static const struct drm_driver tilcdc_driver = {
  * Power management:
  */
 
+#ifdef CONFIG_PM_SLEEP
 static int tilcdc_pm_suspend(struct device *dev)
 {
 	struct drm_device *ddev = dev_get_drvdata(dev);
@@ -519,9 +522,11 @@ static int tilcdc_pm_resume(struct device *dev)
 	pinctrl_pm_select_default_state(dev);
 	return  drm_mode_config_helper_resume(ddev);
 }
+#endif
 
-static DEFINE_SIMPLE_DEV_PM_OPS(tilcdc_pm_ops,
-				tilcdc_pm_suspend, tilcdc_pm_resume);
+static const struct dev_pm_ops tilcdc_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(tilcdc_pm_suspend, tilcdc_pm_resume)
+};
 
 /*
  * Platform driver:
@@ -539,8 +544,7 @@ static void tilcdc_unbind(struct device *dev)
 	if (!ddev->dev_private)
 		return;
 
-	tilcdc_fini(ddev);
-	dev_set_drvdata(dev, NULL);
+	tilcdc_fini(dev_get_drvdata(dev));
 }
 
 static const struct component_master_ops tilcdc_comp_ops = {
@@ -570,26 +574,22 @@ static int tilcdc_pdev_probe(struct platform_device *pdev)
 						       match);
 }
 
-static void tilcdc_pdev_remove(struct platform_device *pdev)
+static int tilcdc_pdev_remove(struct platform_device *pdev)
 {
 	int ret;
 
 	ret = tilcdc_get_external_components(&pdev->dev, NULL);
 	if (ret < 0)
-		dev_err(&pdev->dev, "tilcdc_get_external_components() failed (%pe)\n",
-			ERR_PTR(ret));
+		return ret;
 	else if (ret == 0)
 		tilcdc_fini(platform_get_drvdata(pdev));
 	else
 		component_master_del(&pdev->dev, &tilcdc_comp_ops);
+
+	return 0;
 }
 
-static void tilcdc_pdev_shutdown(struct platform_device *pdev)
-{
-	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
-}
-
-static const struct of_device_id tilcdc_of_match[] = {
+static struct of_device_id tilcdc_of_match[] = {
 		{ .compatible = "ti,am33xx-tilcdc", },
 		{ .compatible = "ti,da850-tilcdc", },
 		{ },
@@ -598,20 +598,16 @@ MODULE_DEVICE_TABLE(of, tilcdc_of_match);
 
 static struct platform_driver tilcdc_platform_driver = {
 	.probe      = tilcdc_pdev_probe,
-	.remove_new = tilcdc_pdev_remove,
-	.shutdown   = tilcdc_pdev_shutdown,
+	.remove     = tilcdc_pdev_remove,
 	.driver     = {
 		.name   = "tilcdc",
-		.pm     = pm_sleep_ptr(&tilcdc_pm_ops),
+		.pm     = &tilcdc_pm_ops,
 		.of_match_table = tilcdc_of_match,
 	},
 };
 
 static int __init tilcdc_drm_init(void)
 {
-	if (drm_firmware_drivers_only())
-		return -ENODEV;
-
 	DBG("init");
 	tilcdc_panel_init();
 	return platform_driver_register(&tilcdc_platform_driver);

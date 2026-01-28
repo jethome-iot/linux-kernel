@@ -33,7 +33,6 @@
 #include <drm/drm_device.h>
 #include <drm/radeon_drm.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_framebuffer.h>
 
 #include "atom.h"
 #include "avivod.h"
@@ -136,7 +135,8 @@ int rv770_set_uvd_clocks(struct radeon_device *rdev, u32 vclk, u32 dclk)
 	return 0;
 }
 
-static const u32 r7xx_golden_registers[] = {
+static const u32 r7xx_golden_registers[] =
+{
 	0x8d00, 0xffffffff, 0x0e0e0074,
 	0x8d04, 0xffffffff, 0x013a2b34,
 	0x9508, 0xffffffff, 0x00000002,
@@ -151,7 +151,8 @@ static const u32 r7xx_golden_registers[] = {
 	0x7300, 0xffffffff, 0x001000f0
 };
 
-static const u32 r7xx_golden_dyn_gpr_registers[] = {
+static const u32 r7xx_golden_dyn_gpr_registers[] =
+{
 	0x8db0, 0xffffffff, 0x98989898,
 	0x8db4, 0xffffffff, 0x98989898,
 	0x8db8, 0xffffffff, 0x98989898,
@@ -163,7 +164,8 @@ static const u32 r7xx_golden_dyn_gpr_registers[] = {
 	0x88c4, 0xffffffff, 0x00000082
 };
 
-static const u32 rv770_golden_registers[] = {
+static const u32 rv770_golden_registers[] =
+{
 	0x562c, 0xffffffff, 0,
 	0x3f90, 0xffffffff, 0,
 	0x9148, 0xffffffff, 0,
@@ -172,7 +174,8 @@ static const u32 rv770_golden_registers[] = {
 	0x9698, 0x18000000, 0x18000000
 };
 
-static const u32 rv770ce_golden_registers[] = {
+static const u32 rv770ce_golden_registers[] =
+{
 	0x562c, 0xffffffff, 0,
 	0x3f90, 0xffffffff, 0x00cc0000,
 	0x9148, 0xffffffff, 0x00cc0000,
@@ -183,7 +186,8 @@ static const u32 rv770ce_golden_registers[] = {
 	0x9698, 0x18000000, 0x18000000
 };
 
-static const u32 rv770_mgcg_init[] = {
+static const u32 rv770_mgcg_init[] =
+{
 	0x8bcc, 0xffffffff, 0x130300f9,
 	0x5448, 0xffffffff, 0x100,
 	0x55e4, 0xffffffff, 0x100,
@@ -340,7 +344,8 @@ static const u32 rv770_mgcg_init[] = {
 	0x92a4, 0xffffffff, 0x00080007
 };
 
-static const u32 rv710_golden_registers[] = {
+static const u32 rv710_golden_registers[] =
+{
 	0x3f90, 0x00ff0000, 0x00fc0000,
 	0x9148, 0x00ff0000, 0x00fc0000,
 	0x3f94, 0x00ff0000, 0x00fc0000,
@@ -349,7 +354,8 @@ static const u32 rv710_golden_registers[] = {
 	0xa180, 0xffffffff, 0x00003f3f
 };
 
-static const u32 rv710_mgcg_init[] = {
+static const u32 rv710_mgcg_init[] =
+{
 	0x8bcc, 0xffffffff, 0x13030040,
 	0x5448, 0xffffffff, 0x100,
 	0x55e4, 0xffffffff, 0x100,
@@ -407,7 +413,8 @@ static const u32 rv710_mgcg_init[] = {
 	0x9150, 0xffffffff, 0x4d940000
 };
 
-static const u32 rv730_golden_registers[] = {
+static const u32 rv730_golden_registers[] =
+{
 	0x3f90, 0x00ff0000, 0x00f00000,
 	0x9148, 0x00ff0000, 0x00f00000,
 	0x3f94, 0x00ff0000, 0x00f00000,
@@ -417,7 +424,8 @@ static const u32 rv730_golden_registers[] = {
 	0xa180, 0xffffffff, 0x00003f3f
 };
 
-static const u32 rv730_mgcg_init[] = {
+static const u32 rv730_mgcg_init[] =
+{
 	0x8bcc, 0xffffffff, 0x130300f9,
 	0x5448, 0xffffffff, 0x100,
 	0x55e4, 0xffffffff, 0x100,
@@ -538,7 +546,8 @@ static const u32 rv730_mgcg_init[] = {
 	0x92a4, 0xffffffff, 0x00000005
 };
 
-static const u32 rv740_golden_registers[] = {
+static const u32 rv740_golden_registers[] =
+{
 	0x88c4, 0xffffffff, 0x00000082,
 	0x28a50, 0xfffffffc, 0x00000004,
 	0x2650, 0x00040000, 0,
@@ -574,7 +583,8 @@ static const u32 rv740_golden_registers[] = {
 	0x9698, 0x18000000, 0x18000000
 };
 
-static const u32 rv740_mgcg_init[] = {
+static const u32 rv740_mgcg_init[] =
+{
 	0x8bcc, 0xffffffff, 0x13030100,
 	0x5448, 0xffffffff, 0x100,
 	0x55e4, 0xffffffff, 0x100,
@@ -1884,8 +1894,8 @@ int rv770_suspend(struct radeon_device *rdev)
 	radeon_pm_suspend(rdev);
 	radeon_audio_fini(rdev);
 	if (rdev->has_uvd) {
-		radeon_uvd_suspend(rdev);
 		uvd_v1_0_fini(rdev);
+		radeon_uvd_suspend(rdev);
 	}
 	r700_cp_stop(rdev);
 	r600_dma_stop(rdev);

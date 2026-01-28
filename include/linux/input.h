@@ -7,6 +7,7 @@
 
 #include <linux/time.h>
 #include <linux/list.h>
+#include <linux/android_kabi.h>
 #include <uapi/linux/input.h>
 /* Implementation details, userspace should not care about these */
 #define ABS_MT_FIRST		ABS_MT_TOUCH_MAJOR
@@ -209,6 +210,11 @@ struct input_dev {
 	ktime_t timestamp[INPUT_CLK_MAX];
 
 	bool inhibited;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 #define to_input_dev(d) container_of(d, struct input_dev, dev)
 
@@ -328,6 +334,8 @@ struct input_handler {
 
 	struct list_head	h_list;
 	struct list_head	node;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -354,6 +362,8 @@ struct input_handle {
 
 	struct list_head	d_node;
 	struct list_head	h_node;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct input_dev __must_check *input_allocate_device(void);
@@ -475,8 +485,6 @@ static inline void input_set_events_per_packet(struct input_dev *dev, int n_even
 void input_alloc_absinfo(struct input_dev *dev);
 void input_set_abs_params(struct input_dev *dev, unsigned int axis,
 			  int min, int max, int fuzz, int flat);
-void input_copy_abs(struct input_dev *dst, unsigned int dst_axis,
-		    const struct input_dev *src, unsigned int src_axis);
 
 #define INPUT_GENERATE_ABS_ACCESSORS(_suffix, _item)			\
 static inline int input_abs_get_##_suffix(struct input_dev *dev,	\
@@ -562,7 +570,10 @@ struct ff_device {
 
 	int max_effects;
 	struct ff_effect *effects;
-	struct file *effect_owners[] __counted_by(max_effects);
+
+	ANDROID_KABI_RESERVE(1);
+
+	struct file *effect_owners[];
 };
 
 int input_ff_create(struct input_dev *dev, unsigned int max_effects);

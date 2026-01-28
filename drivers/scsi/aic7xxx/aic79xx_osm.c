@@ -194,7 +194,7 @@ struct ahd_linux_iocell_opts
 #define AIC79XX_PRECOMP_INDEX	0
 #define AIC79XX_SLEWRATE_INDEX	1
 #define AIC79XX_AMPLITUDE_INDEX	2
-static struct ahd_linux_iocell_opts aic79xx_iocell_info[] __ro_after_init =
+static const struct ahd_linux_iocell_opts aic79xx_iocell_info[] =
 {
 	AIC79XX_DEFAULT_IOOPTS,
 	AIC79XX_DEFAULT_IOOPTS,
@@ -536,18 +536,13 @@ ahd_linux_unmap_scb(struct ahd_softc *ahd, struct scb *scb)
 	struct scsi_cmnd *cmd;
 
 	cmd = scb->io_ctx;
-	if (cmd) {
-		ahd_sync_sglist(ahd, scb, BUS_DMASYNC_POSTWRITE);
-		scsi_dma_unmap(cmd);
-	}
+	ahd_sync_sglist(ahd, scb, BUS_DMASYNC_POSTWRITE);
+	scsi_dma_unmap(cmd);
 }
 
 /******************************** Macros **************************************/
-static inline unsigned int ahd_build_scsiid(struct ahd_softc *ahd,
-					    struct scsi_device *sdev)
-{
-	return ((sdev_id(sdev) << TID_SHIFT) & TID) | (ahd)->our_id;
-}
+#define BUILD_SCSIID(ahd, cmd)						\
+	(((scmd_id(cmd) << TID_SHIFT) & TID) | (ahd)->our_id)
 
 /*
  * Return a string describing the driver.
@@ -577,7 +572,8 @@ ahd_linux_info(struct Scsi_Host *host)
 /*
  * Queue an SCB to the controller.
  */
-static int ahd_linux_queue_lck(struct scsi_cmnd *cmd)
+static int
+ahd_linux_queue_lck(struct scsi_cmnd * cmd, void (*scsi_done) (struct scsi_cmnd *))
 {
 	struct	 ahd_softc *ahd;
 	struct	 ahd_linux_device *dev = scsi_transport_device_data(cmd->device);
@@ -585,6 +581,7 @@ static int ahd_linux_queue_lck(struct scsi_cmnd *cmd)
 
 	ahd = *(struct ahd_softc **)cmd->device->host->hostdata;
 
+	cmd->scsi_done = scsi_done;
 	cmd->result = CAM_REQ_INPROG << 16;
 	rtn = ahd_linux_run_command(ahd, dev, cmd);
 
@@ -760,7 +757,11 @@ ahd_linux_biosparam(struct scsi_device *sdev, struct block_device *bdev,
 static int
 ahd_linux_abort(struct scsi_cmnd *cmd)
 {
-	return ahd_linux_queue_abort_cmd(cmd);
+	int error;
+	
+	error = ahd_linux_queue_abort_cmd(cmd);
+
+	return error;
 }
 
 /*
@@ -816,14 +817,14 @@ ahd_linux_dev_reset(struct scsi_cmnd *cmd)
 
 	tinfo = ahd_fetch_transinfo(ahd, 'A', ahd->our_id,
 				    cmd->device->id, &tstate);
-	reset_scb->io_ctx = NULL;
+	reset_scb->io_ctx = cmd;
 	reset_scb->platform_data->dev = dev;
 	reset_scb->sg_count = 0;
 	ahd_set_residual(reset_scb, 0);
 	ahd_set_sense_residual(reset_scb, 0);
 	reset_scb->platform_data->xfer_len = 0;
 	reset_scb->hscb->control = 0;
-	reset_scb->hscb->scsiid = ahd_build_scsiid(ahd, cmd->device);
+	reset_scb->hscb->scsiid = BUILD_SCSIID(ahd,cmd);
 	reset_scb->hscb->lun = cmd->device->lun;
 	reset_scb->hscb->cdb_len = 0;
 	reset_scb->hscb->task_management = SIU_TASKMGMT_LUN_RESET;
@@ -1582,7 +1583,7 @@ ahd_linux_run_command(struct ahd_softc *ahd, struct ahd_linux_device *dev,
 	 * Fill out basics of the HSCB.
 	 */
 	hscb->control = 0;
-	hscb->scsiid = ahd_build_scsiid(ahd, cmd->device);
+	hscb->scsiid = BUILD_SCSIID(ahd, cmd);
 	hscb->lun = cmd->device->lun;
 	scb->hscb->task_management = 0;
 	mask = SCB_GET_TARGET_MASK(ahd, scb);
@@ -1771,16 +1772,9 @@ ahd_done(struct ahd_softc *ahd, struct scb *scb)
 	dev = scb->platform_data->dev;
 	dev->active--;
 	dev->openings++;
-	if (cmd) {
-		if ((cmd->result & (CAM_DEV_QFRZN << 16)) != 0) {
-			cmd->result &= ~(CAM_DEV_QFRZN << 16);
-			dev->qfrozen--;
-		}
-	} else if (scb->flags & SCB_DEVICE_RESET) {
-		if (ahd->platform_data->eh_done)
-			complete(ahd->platform_data->eh_done);
-		ahd_free_scb(ahd, scb);
-		return;
+	if ((cmd->result & (CAM_DEV_QFRZN << 16)) != 0) {
+		cmd->result &= ~(CAM_DEV_QFRZN << 16);
+		dev->qfrozen--;
 	}
 	ahd_linux_unmap_scb(ahd, scb);
 
@@ -1834,8 +1828,7 @@ ahd_done(struct ahd_softc *ahd, struct scb *scb)
 		} else {
 			ahd_set_transaction_status(scb, CAM_REQ_CMP);
 		}
-	} else if (cmd &&
-		   ahd_get_transaction_status(scb) == CAM_SCSI_STATUS_ERROR) {
+	} else if (ahd_get_transaction_status(scb) == CAM_SCSI_STATUS_ERROR) {
 		ahd_linux_handle_scsi_status(ahd, cmd->device, scb);
 	}
 
@@ -1869,8 +1862,7 @@ ahd_done(struct ahd_softc *ahd, struct scb *scb)
 	}
 
 	ahd_free_scb(ahd, scb);
-	if (cmd)
-		ahd_linux_queue_cmd_complete(ahd, cmd);
+	ahd_linux_queue_cmd_complete(ahd, cmd);
 }
 
 static void
@@ -2119,7 +2111,7 @@ ahd_linux_queue_cmd_complete(struct ahd_softc *ahd, struct scsi_cmnd *cmd)
 
 	ahd_cmd_set_transaction_status(cmd, new_status);
 
-	scsi_done(cmd);
+	cmd->scsi_done(cmd);
 }
 
 static void

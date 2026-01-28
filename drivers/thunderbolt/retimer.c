@@ -16,23 +16,8 @@
 
 #define TB_MAX_RETIMER_INDEX	6
 
-/**
- * tb_retimer_nvm_read() - Read contents of retimer NVM
- * @rt: Retimer device
- * @address: NVM address (in bytes) to start reading
- * @buf: Data read from NVM is stored here
- * @size: Number of bytes to read
- *
- * Reads retimer NVM and copies the contents to @buf. Returns %0 if the
- * read was successful and negative errno in case of failure.
- */
-int tb_retimer_nvm_read(struct tb_retimer *rt, unsigned int address, void *buf,
-			size_t size)
-{
-	return usb4_port_retimer_nvm_read(rt->port, rt->index, address, buf, size);
-}
-
-static int nvm_read(void *priv, unsigned int offset, void *val, size_t bytes)
+static int tb_retimer_nvm_read(void *priv, unsigned int offset, void *val,
+			       size_t bytes)
 {
 	struct tb_nvm *nvm = priv;
 	struct tb_retimer *rt = tb_to_retimer(nvm->dev);
@@ -45,7 +30,7 @@ static int nvm_read(void *priv, unsigned int offset, void *val, size_t bytes)
 		goto out;
 	}
 
-	ret = tb_retimer_nvm_read(rt, offset, val, bytes);
+	ret = usb4_port_retimer_nvm_read(rt->port, rt->index, offset, val, bytes);
 	mutex_unlock(&rt->tb->lock);
 
 out:
@@ -55,7 +40,8 @@ out:
 	return ret;
 }
 
-static int nvm_write(void *priv, unsigned int offset, void *val, size_t bytes)
+static int tb_retimer_nvm_write(void *priv, unsigned int offset, void *val,
+				size_t bytes)
 {
 	struct tb_nvm *nvm = priv;
 	struct tb_retimer *rt = tb_to_retimer(nvm->dev);
@@ -73,58 +59,94 @@ static int nvm_write(void *priv, unsigned int offset, void *val, size_t bytes)
 static int tb_retimer_nvm_add(struct tb_retimer *rt)
 {
 	struct tb_nvm *nvm;
+	u32 val, nvm_size;
 	int ret;
 
 	nvm = tb_nvm_alloc(&rt->dev);
-	if (IS_ERR(nvm)) {
-		ret = PTR_ERR(nvm) == -EOPNOTSUPP ? 0 : PTR_ERR(nvm);
-		goto err_nvm;
-	}
+	if (IS_ERR(nvm))
+		return PTR_ERR(nvm);
 
-	ret = tb_nvm_read_version(nvm);
+	ret = usb4_port_retimer_nvm_read(rt->port, rt->index, NVM_VERSION, &val,
+					 sizeof(val));
 	if (ret)
 		goto err_nvm;
 
-	ret = tb_nvm_add_active(nvm, nvm_read);
+	nvm->major = val >> 16;
+	nvm->minor = val >> 8;
+
+	ret = usb4_port_retimer_nvm_read(rt->port, rt->index, NVM_FLASH_SIZE,
+					 &val, sizeof(val));
 	if (ret)
 		goto err_nvm;
 
-	ret = tb_nvm_add_non_active(nvm, nvm_write);
+	nvm_size = (SZ_1M << (val & 7)) / 8;
+	nvm_size = (nvm_size - SZ_16K) / 2;
+
+	ret = tb_nvm_add_active(nvm, nvm_size, tb_retimer_nvm_read);
+	if (ret)
+		goto err_nvm;
+
+	ret = tb_nvm_add_non_active(nvm, NVM_MAX_SIZE, tb_retimer_nvm_write);
 	if (ret)
 		goto err_nvm;
 
 	rt->nvm = nvm;
-	dev_dbg(&rt->dev, "NVM version %x.%x\n", nvm->major, nvm->minor);
 	return 0;
 
 err_nvm:
-	dev_dbg(&rt->dev, "NVM upgrade disabled\n");
-	if (!IS_ERR(nvm))
-		tb_nvm_free(nvm);
-
+	tb_nvm_free(nvm);
 	return ret;
 }
 
 static int tb_retimer_nvm_validate_and_write(struct tb_retimer *rt)
 {
-	unsigned int image_size;
-	const u8 *buf;
+	unsigned int image_size, hdr_size;
+	const u8 *buf = rt->nvm->buf;
+	u16 ds_size, device;
 	int ret;
 
-	ret = tb_nvm_validate(rt->nvm);
-	if (ret)
-		return ret;
-
-	buf = rt->nvm->buf_data_start;
 	image_size = rt->nvm->buf_data_size;
+	if (image_size < NVM_MIN_SIZE || image_size > NVM_MAX_SIZE)
+		return -EINVAL;
+
+	/*
+	 * FARB pointer must point inside the image and must at least
+	 * contain parts of the digital section we will be reading here.
+	 */
+	hdr_size = (*(u32 *)buf) & 0xffffff;
+	if (hdr_size + NVM_DEVID + 2 >= image_size)
+		return -EINVAL;
+
+	/* Digital section start should be aligned to 4k page */
+	if (!IS_ALIGNED(hdr_size, SZ_4K))
+		return -EINVAL;
+
+	/*
+	 * Read digital section size and check that it also fits inside
+	 * the image.
+	 */
+	ds_size = *(u16 *)(buf + hdr_size);
+	if (ds_size >= image_size)
+		return -EINVAL;
+
+	/*
+	 * Make sure the device ID in the image matches the retimer
+	 * hardware.
+	 */
+	device = *(u16 *)(buf + hdr_size + NVM_DEVID);
+	if (device != rt->device)
+		return -EINVAL;
+
+	/* Skip headers in the image */
+	buf += hdr_size;
+	image_size -= hdr_size;
 
 	ret = usb4_port_retimer_nvm_write(rt->port, rt->index, 0, buf,
 					 image_size);
-	if (ret)
-		return ret;
+	if (!ret)
+		rt->nvm->flushed = true;
 
-	rt->nvm->flushed = true;
-	return 0;
+	return ret;
 }
 
 static int tb_retimer_nvm_authenticate(struct tb_retimer *rt, bool auth_only)
@@ -163,7 +185,7 @@ static ssize_t device_show(struct device *dev, struct device_attribute *attr,
 {
 	struct tb_retimer *rt = tb_to_retimer(dev);
 
-	return sysfs_emit(buf, "%#x\n", rt->device);
+	return sprintf(buf, "%#x\n", rt->device);
 }
 static DEVICE_ATTR_RO(device);
 
@@ -178,10 +200,8 @@ static ssize_t nvm_authenticate_show(struct device *dev,
 
 	if (!rt->nvm)
 		ret = -EAGAIN;
-	else if (rt->no_nvm_upgrade)
-		ret = -EOPNOTSUPP;
 	else
-		ret = sysfs_emit(buf, "%#x\n", rt->auth_status);
+		ret = sprintf(buf, "%#x\n", rt->auth_status);
 
 	mutex_unlock(&rt->tb->lock);
 
@@ -207,15 +227,6 @@ static void tb_retimer_set_inbound_sbtx(struct tb_port *port)
 {
 	int i;
 
-	/*
-	 * When USB4 port is online sideband communications are
-	 * already up.
-	 */
-	if (!usb4_port_device_is_offline(port->usb4))
-		return;
-
-	tb_port_dbg(port, "enabling sideband transactions\n");
-
 	for (i = 1; i <= TB_MAX_RETIMER_INDEX; i++)
 		usb4_port_retimer_set_inbound_sbtx(port, i);
 }
@@ -223,16 +234,6 @@ static void tb_retimer_set_inbound_sbtx(struct tb_port *port)
 static void tb_retimer_unset_inbound_sbtx(struct tb_port *port)
 {
 	int i;
-
-	/*
-	 * When USB4 port is offline we need to keep the sideband
-	 * communications up to make it possible to communicate with
-	 * the connected retimers.
-	 */
-	if (usb4_port_device_is_offline(port->usb4))
-		return;
-
-	tb_port_dbg(port, "disabling sideband transactions\n");
 
 	for (i = TB_MAX_RETIMER_INDEX; i >= 1; i--)
 		usb4_port_retimer_unset_inbound_sbtx(port, i);
@@ -264,13 +265,6 @@ static ssize_t nvm_authenticate_store(struct device *dev,
 	rt->auth_status = 0;
 
 	if (val) {
-		/*
-		 * When NVM authentication starts the retimer is not
-		 * accessible so calling tb_retimer_unset_inbound_sbtx()
-		 * will fail and therefore we do not call it. Exception
-		 * is when the validation fails or we only write the new
-		 * NVM image without authentication.
-		 */
 		tb_retimer_set_inbound_sbtx(rt->port);
 		if (val == AUTHENTICATE_ONLY) {
 			ret = tb_retimer_nvm_authenticate(rt, true);
@@ -291,8 +285,7 @@ static ssize_t nvm_authenticate_store(struct device *dev,
 	}
 
 exit_unlock:
-	if (ret || val == WRITE_ONLY)
-		tb_retimer_unset_inbound_sbtx(rt->port);
+	tb_retimer_unset_inbound_sbtx(rt->port);
 	mutex_unlock(&rt->tb->lock);
 exit_rpm:
 	pm_runtime_mark_last_busy(&rt->dev);
@@ -316,7 +309,7 @@ static ssize_t nvm_version_show(struct device *dev,
 	if (!rt->nvm)
 		ret = -EAGAIN;
 	else
-		ret = sysfs_emit(buf, "%x.%x\n", rt->nvm->major, rt->nvm->minor);
+		ret = sprintf(buf, "%x.%x\n", rt->nvm->major, rt->nvm->minor);
 
 	mutex_unlock(&rt->tb->lock);
 	return ret;
@@ -328,7 +321,7 @@ static ssize_t vendor_show(struct device *dev, struct device_attribute *attr,
 {
 	struct tb_retimer *rt = tb_to_retimer(dev);
 
-	return sysfs_emit(buf, "%#x\n", rt->vendor);
+	return sprintf(buf, "%#x\n", rt->vendor);
 }
 static DEVICE_ATTR_RO(vendor);
 
@@ -364,9 +357,14 @@ struct device_type tb_retimer_type = {
 
 static int tb_retimer_add(struct tb_port *port, u8 index, u32 auth_status)
 {
+	struct usb4_port *usb4;
 	struct tb_retimer *rt;
 	u32 vendor, device;
 	int ret;
+
+	usb4 = port->usb4;
+	if (!usb4)
+		return -EINVAL;
 
 	ret = usb4_port_retimer_read(port, index, USB4_SB_VENDOR_ID, &vendor,
 				     sizeof(vendor));
@@ -382,6 +380,12 @@ static int tb_retimer_add(struct tb_port *port, u8 index, u32 auth_status)
 		if (ret != -ENODEV)
 			tb_port_warn(port, "failed read retimer ProductId: %d\n", ret);
 		return ret;
+	}
+
+	if (vendor != PCI_VENDOR_ID_INTEL && vendor != 0x8087) {
+		tb_port_info(port, "retimer NVM format of vendor %#x is not supported\n",
+			     vendor);
+		return -EOPNOTSUPP;
 	}
 
 	/*
@@ -403,7 +407,7 @@ static int tb_retimer_add(struct tb_port *port, u8 index, u32 auth_status)
 	rt->port = port;
 	rt->tb = port->sw->tb;
 
-	rt->dev.parent = &port->usb4->dev;
+	rt->dev.parent = &usb4->dev;
 	rt->dev.bus = &tb_bus_type;
 	rt->dev.type = &tb_retimer_type;
 	dev_set_name(&rt->dev, "%s:%u.%u", dev_name(&port->sw->dev),
@@ -522,7 +526,6 @@ int tb_retimer_scan(struct tb_port *port, bool add)
 		return 0;
 
 	/* Add on-board retimers if they do not exist already */
-	ret = 0;
 	for (i = 1; i <= last_idx; i++) {
 		struct tb_retimer *rt;
 
@@ -536,7 +539,7 @@ int tb_retimer_scan(struct tb_port *port, bool add)
 		}
 	}
 
-	return ret;
+	return 0;
 }
 
 static int remove_retimer(struct device *dev, void *data)

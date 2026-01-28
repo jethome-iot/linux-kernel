@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2020 Red Hat GmbH
  *
@@ -62,8 +61,7 @@ static inline bool __ebs_check_bs(unsigned int bs)
  *
  * copy blocks between bufio blocks and bio vector's (partial/overlapping) pages.
  */
-static int __ebs_rw_bvec(struct ebs_c *ec, enum req_op op, struct bio_vec *bv,
-			 struct bvec_iter *iter)
+static int __ebs_rw_bvec(struct ebs_c *ec, int rw, struct bio_vec *bv, struct bvec_iter *iter)
 {
 	int r = 0;
 	unsigned char *ba, *pa;
@@ -83,7 +81,7 @@ static int __ebs_rw_bvec(struct ebs_c *ec, enum req_op op, struct bio_vec *bv,
 		cur_len = min(dm_bufio_get_block_size(ec->bufio) - buf_off, bv_len);
 
 		/* Avoid reading for writes in case bio vector's page overwrites block completely. */
-		if (op == REQ_OP_READ || buf_off || bv_len < dm_bufio_get_block_size(ec->bufio))
+		if (rw == READ || buf_off || bv_len < dm_bufio_get_block_size(ec->bufio))
 			ba = dm_bufio_read(ec->bufio, block, &b);
 		else
 			ba = dm_bufio_new(ec->bufio, block, &b);
@@ -97,7 +95,7 @@ static int __ebs_rw_bvec(struct ebs_c *ec, enum req_op op, struct bio_vec *bv,
 		} else {
 			/* Copy data to/from bio to buffer if read/new was successful above. */
 			ba += buf_off;
-			if (op == REQ_OP_READ) {
+			if (rw == READ) {
 				memcpy(pa, ba, cur_len);
 				flush_dcache_page(bv->bv_page);
 			} else {
@@ -119,14 +117,14 @@ static int __ebs_rw_bvec(struct ebs_c *ec, enum req_op op, struct bio_vec *bv,
 }
 
 /* READ/WRITE: iterate bio vector's copying between (partial) pages and bufio blocks. */
-static int __ebs_rw_bio(struct ebs_c *ec, enum req_op op, struct bio *bio)
+static int __ebs_rw_bio(struct ebs_c *ec, int rw, struct bio *bio)
 {
 	int r = 0, rr;
 	struct bio_vec bv;
 	struct bvec_iter iter;
 
 	bio_for_each_bvec(bv, bio, iter) {
-		rr = __ebs_rw_bvec(ec, op, &bv, &iter);
+		rr = __ebs_rw_bvec(ec, rw, &bv, &iter);
 		if (rr)
 			r = rr;
 	}
@@ -207,10 +205,10 @@ static void __ebs_process_bios(struct work_struct *ws)
 	bio_list_for_each(bio, &bios) {
 		r = -EIO;
 		if (bio_op(bio) == REQ_OP_READ)
-			r = __ebs_rw_bio(ec, REQ_OP_READ, bio);
+			r = __ebs_rw_bio(ec, READ, bio);
 		else if (bio_op(bio) == REQ_OP_WRITE) {
 			write = true;
-			r = __ebs_rw_bio(ec, REQ_OP_WRITE, bio);
+			r = __ebs_rw_bio(ec, WRITE, bio);
 		} else if (bio_op(bio) == REQ_OP_DISCARD) {
 			__ebs_forget_bio(ec, bio);
 			r = __ebs_discard_bio(ec, bio);
@@ -242,7 +240,7 @@ static void __ebs_process_bios(struct work_struct *ws)
  * <offset>: offset in 512 bytes sectors into <dev_path>
  * <ebs>: emulated block size in units of 512 bytes exposed to the upper layer
  * [<ubs>]: underlying block size in units of 512 bytes imposed on the lower layer;
- *	    optional, if not supplied, retrieve logical block size from underlying device
+ * 	    optional, if not supplied, retrieve logical block size from underlying device
  */
 static int ebs_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
@@ -314,8 +312,7 @@ static int ebs_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad;
 	}
 
-	ec->bufio = dm_bufio_client_create(ec->dev->bdev, to_bytes(ec->u_bs), 1,
-					   0, NULL, NULL, 0);
+	ec->bufio = dm_bufio_client_create(ec->dev->bdev, to_bytes(ec->u_bs), 1, 0, NULL, NULL);
 	if (IS_ERR(ec->bufio)) {
 		ti->error = "Cannot create dm bufio client";
 		r = PTR_ERR(ec->bufio);
@@ -338,6 +335,7 @@ static int ebs_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ti->num_flush_bios = 1;
 	ti->num_discard_bios = 1;
 	ti->num_secure_erase_bios = 0;
+	ti->num_write_same_bios = 0;
 	ti->num_write_zeroes_bios = 0;
 	return 0;
 bad:
@@ -391,7 +389,7 @@ static int ebs_map(struct dm_target *ti, struct bio *bio)
 }
 
 static void ebs_status(struct dm_target *ti, status_type_t type,
-		       unsigned int status_flags, char *result, unsigned int maxlen)
+		       unsigned status_flags, char *result, unsigned maxlen)
 {
 	struct ebs_c *ec = ti->private;
 
@@ -418,7 +416,7 @@ static int ebs_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
 	 * Only pass ioctls through if the device sizes match exactly.
 	 */
 	*bdev = dev->bdev;
-	return !!(ec->start || ti->len != bdev_nr_sectors(dev->bdev));
+	return !!(ec->start || ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT);
 }
 
 static void ebs_io_hints(struct dm_target *ti, struct queue_limits *limits)
@@ -452,7 +450,24 @@ static struct target_type ebs_target = {
 	.prepare_ioctl	 = ebs_prepare_ioctl,
 	.iterate_devices = ebs_iterate_devices,
 };
-module_dm(ebs);
+
+static int __init dm_ebs_init(void)
+{
+	int r = dm_register_target(&ebs_target);
+
+	if (r < 0)
+		DMERR("register failed %d", r);
+
+	return r;
+}
+
+static void dm_ebs_exit(void)
+{
+	dm_unregister_target(&ebs_target);
+}
+
+module_init(dm_ebs_init);
+module_exit(dm_ebs_exit);
 
 MODULE_AUTHOR("Heinz Mauelshagen <dm-devel@redhat.com>");
 MODULE_DESCRIPTION(DM_NAME " emulated block size target");

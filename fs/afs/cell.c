@@ -161,12 +161,13 @@ static struct afs_cell *afs_alloc_cell(struct afs_net *net,
 	refcount_set(&cell->ref, 1);
 	atomic_set(&cell->active, 0);
 	INIT_WORK(&cell->manager, afs_manage_cell_work);
-	init_rwsem(&cell->vs_lock);
 	cell->volumes = RB_ROOT;
 	INIT_HLIST_HEAD(&cell->proc_volumes);
 	seqlock_init(&cell->volume_lock);
 	cell->fs_servers = RB_ROOT;
 	seqlock_init(&cell->fs_lock);
+	INIT_LIST_HEAD(&cell->fs_open_mmaps);
+	init_rwsem(&cell->fs_open_mmaps_lock);
 	rwlock_init(&cell->vl_servers_lock);
 	cell->flags = (1 << AFS_CELL_FL_CHECK_ALIAS);
 
@@ -678,6 +679,13 @@ static int afs_activate_cell(struct afs_net *net, struct afs_cell *cell)
 			return ret;
 	}
 
+#ifdef CONFIG_AFS_FSCACHE
+	cell->cache = fscache_acquire_cookie(afs_cache_netfs.primary_index,
+					     &afs_cell_cache_index_def,
+					     cell->name, strlen(cell->name),
+					     NULL, 0,
+					     cell, 0, true);
+#endif
 	ret = afs_proc_cell_setup(cell);
 	if (ret < 0)
 		return ret;
@@ -713,6 +721,11 @@ static void afs_deactivate_cell(struct afs_net *net, struct afs_cell *cell)
 	hlist_del_rcu(&cell->proc_link);
 	afs_dynroot_rmdir(net, cell);
 	mutex_unlock(&net->proc_cells_lock);
+
+#ifdef CONFIG_AFS_FSCACHE
+	fscache_relinquish_cookie(cell->cache, NULL, false);
+	cell->cache = NULL;
+#endif
 
 	_leave("");
 }
@@ -816,7 +829,7 @@ done:
 
 final_destruction:
 	/* The root volume is pinning the cell */
-	afs_put_volume(cell->root_volume, afs_volume_trace_put_cell_root);
+	afs_put_volume(cell->net, cell->root_volume, afs_volume_trace_put_cell_root);
 	cell->root_volume = NULL;
 	afs_put_cell(cell, afs_cell_trace_put_destroy);
 }

@@ -11,7 +11,6 @@
 #include <linux/etherdevice.h>
 #include <linux/iommu.h>
 #include <linux/if_vlan.h>
-#include <net/xdp.h>
 
 #define LBK_CHAN_BASE	0x000
 #define SDP_CHAN_BASE	0x700
@@ -21,14 +20,10 @@
 #define OTX2_HEAD_ROOM		OTX2_ALIGN
 
 #define	OTX2_ETH_HLEN		(VLAN_ETH_HLEN + VLAN_HLEN)
-#define	OTX2_MIN_MTU		60
-
-#define OTX2_PAGE_POOL_SZ	2048
+#define	OTX2_MIN_MTU		64
 
 #define OTX2_MAX_GSO_SEGS	255
 #define OTX2_MAX_FRAGS_IN_SQE	9
-
-#define MAX_XDP_MTU	(1530 - OTX2_ETH_HLEN)
 
 /* Rx buffer size should be in multiples of 128bytes */
 #define RCV_FRAG_LEN1(x)				\
@@ -41,7 +36,9 @@
 #define RCV_FRAG_LEN(x)	\
 		((RCV_FRAG_LEN1(x) < 2048) ? 2048 : RCV_FRAG_LEN1(x))
 
-#define DMA_BUFFER_LEN(x)	((x) - OTX2_HEAD_ROOM)
+#define DMA_BUFFER_LEN(x)		\
+		((x) - OTX2_HEAD_ROOM - \
+		OTX2_DATA_ALIGN(sizeof(struct skb_shared_info)))
 
 /* IRQ triggered when NIX_LF_CINTX_CNT[ECOUNT]
  * is equal to this value.
@@ -81,7 +78,6 @@ struct sg_list {
 struct otx2_snd_queue {
 	u8			aura_id;
 	u16			head;
-	u16			cons_head;
 	u16			sqe_size;
 	u32			sqe_cnt;
 	u16			num_sqbs;
@@ -103,9 +99,7 @@ struct otx2_snd_queue {
 enum cq_type {
 	CQ_RX,
 	CQ_TX,
-	CQ_XDP,
-	CQ_QOS,
-	CQS_PER_CINT = 4, /* RQ + SQ + XDP + QOS_SQ */
+	CQS_PER_CINT = 2, /* RQ + SQ */
 };
 
 struct otx2_cq_poll {
@@ -113,14 +107,12 @@ struct otx2_cq_poll {
 #define CINT_INVALID_CQ		255
 	u8			cint_idx;
 	u8			cq_ids[CQS_PER_CINT];
-	struct dim		dim;
 	struct napi_struct	napi;
 };
 
 struct otx2_pool {
 	struct qmem		*stack;
 	struct qmem		*fc_addr;
-	struct page_pool	*page_pool;
 	u16			rbsize;
 };
 
@@ -138,7 +130,6 @@ struct otx2_cq_queue {
 	void			*cqe_base;
 	struct qmem		*cqe;
 	struct otx2_pool	*rbpool;
-	struct xdp_rxq_info xdp_rxq;
 } ____cacheline_aligned_in_smp;
 
 struct otx2_qset {
@@ -170,6 +161,6 @@ void cn10k_sqe_flush(void *dev, struct otx2_snd_queue *sq,
 		     int size, int qidx);
 void otx2_sqe_flush(void *dev, struct otx2_snd_queue *sq,
 		    int size, int qidx);
-int otx2_refill_pool_ptrs(void *dev, struct otx2_cq_queue *cq);
-int cn10k_refill_pool_ptrs(void *dev, struct otx2_cq_queue *cq);
+void otx2_refill_pool_ptrs(void *dev, struct otx2_cq_queue *cq);
+void cn10k_refill_pool_ptrs(void *dev, struct otx2_cq_queue *cq);
 #endif /* OTX2_TXRX_H */

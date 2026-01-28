@@ -105,11 +105,11 @@ int kvm_vgic_create(struct kvm *kvm, u32 type)
 	ret = 0;
 
 	if (type == KVM_DEV_TYPE_ARM_VGIC_V2)
-		kvm->max_vcpus = VGIC_V2_MAX_CPUS;
+		kvm->arch.max_vcpus = VGIC_V2_MAX_CPUS;
 	else
-		kvm->max_vcpus = VGIC_V3_MAX_CPUS;
+		kvm->arch.max_vcpus = VGIC_V3_MAX_CPUS;
 
-	if (atomic_read(&kvm->online_vcpus) > kvm->max_vcpus) {
+	if (atomic_read(&kvm->online_vcpus) > kvm->arch.max_vcpus) {
 		ret = -E2BIG;
 		goto out_unlock;
 	}
@@ -368,7 +368,7 @@ static void kvm_vgic_dist_destroy(struct kvm *kvm)
 		vgic_v4_teardown(kvm);
 }
 
-static void __kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu)
+void kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu)
 {
 	struct vgic_cpu *vgic_cpu = &vcpu->arch.vgic_cpu;
 
@@ -385,38 +385,31 @@ static void __kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu)
 	}
 }
 
-void kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu)
-{
-	struct kvm *kvm = vcpu->kvm;
-
-	mutex_lock(&kvm->slots_lock);
-	__kvm_vgic_vcpu_destroy(vcpu);
-	mutex_unlock(&kvm->slots_lock);
-}
-
-void kvm_vgic_destroy(struct kvm *kvm)
+static void __kvm_vgic_destroy(struct kvm *kvm)
 {
 	struct kvm_vcpu *vcpu;
 	unsigned long i;
 
-	mutex_lock(&kvm->slots_lock);
+	lockdep_assert_held(&kvm->arch.config_lock);
 
 	vgic_debug_destroy(kvm);
 
 	kvm_for_each_vcpu(i, vcpu, kvm)
-		__kvm_vgic_vcpu_destroy(vcpu);
-
-	mutex_lock(&kvm->arch.config_lock);
+		kvm_vgic_vcpu_destroy(vcpu);
 
 	kvm_vgic_dist_destroy(kvm);
+}
 
+void kvm_vgic_destroy(struct kvm *kvm)
+{
+	mutex_lock(&kvm->arch.config_lock);
+	__kvm_vgic_destroy(kvm);
 	mutex_unlock(&kvm->arch.config_lock);
-	mutex_unlock(&kvm->slots_lock);
 }
 
 /**
  * vgic_lazy_init: Lazy init is only allowed if the GIC exposed to the guest
- * is a GICv2. A GICv3 must be explicitly initialized by userspace using the
+ * is a GICv2. A GICv3 must be explicitly initialized by the guest using the
  * KVM_DEV_ARM_VGIC_GRP_CTRL KVM_DEVICE group.
  * @kvm: kvm struct pointer
  */
@@ -479,40 +472,41 @@ int kvm_vgic_map_resources(struct kvm *kvm)
 		type = VGIC_V3;
 	}
 
-	if (ret)
+	if (ret) {
+		__kvm_vgic_destroy(kvm);
 		goto out;
-
+	}
 	dist->ready = true;
 	dist_base = dist->vgic_dist_base;
 	mutex_unlock(&kvm->arch.config_lock);
 
 	ret = vgic_register_dist_iodev(kvm, dist_base, type);
-	if (ret)
+	if (ret) {
 		kvm_err("Unable to register VGIC dist MMIO regions\n");
+		kvm_vgic_destroy(kvm);
+	}
+	mutex_unlock(&kvm->slots_lock);
+	return ret;
 
-	goto out_slots;
 out:
 	mutex_unlock(&kvm->arch.config_lock);
-out_slots:
 	mutex_unlock(&kvm->slots_lock);
-
-	if (ret)
-		kvm_vgic_destroy(kvm);
-
 	return ret;
 }
 
 /* GENERIC PROBE */
 
-void kvm_vgic_cpu_up(void)
+static int vgic_init_cpu_starting(unsigned int cpu)
 {
 	enable_percpu_irq(kvm_vgic_global_state.maint_irq, 0);
+	return 0;
 }
 
 
-void kvm_vgic_cpu_down(void)
+static int vgic_init_cpu_dying(unsigned int cpu)
 {
 	disable_percpu_irq(kvm_vgic_global_state.maint_irq);
+	return 0;
 }
 
 static irqreturn_t vgic_maintenance_handler(int irq, void *data)
@@ -609,7 +603,7 @@ int kvm_vgic_hyp_init(void)
 	if (ret)
 		return ret;
 
-	if (!has_mask && !kvm_vgic_global_state.maint_irq)
+	if (!has_mask)
 		return 0;
 
 	ret = request_percpu_irq(kvm_vgic_global_state.maint_irq,
@@ -621,6 +615,19 @@ int kvm_vgic_hyp_init(void)
 		return ret;
 	}
 
+	ret = cpuhp_setup_state(CPUHP_AP_KVM_ARM_VGIC_INIT_STARTING,
+				"kvm/arm/vgic:starting",
+				vgic_init_cpu_starting, vgic_init_cpu_dying);
+	if (ret) {
+		kvm_err("Cannot register vgic CPU notifier\n");
+		goto out_free_irq;
+	}
+
 	kvm_info("vgic interrupt IRQ%d\n", kvm_vgic_global_state.maint_irq);
 	return 0;
+
+out_free_irq:
+	free_percpu_irq(kvm_vgic_global_state.maint_irq,
+			kvm_get_running_vcpus());
+	return ret;
 }

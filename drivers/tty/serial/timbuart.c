@@ -101,7 +101,8 @@ static void timbuart_tx_chars(struct uart_port *port)
 		!uart_circ_empty(xmit)) {
 		iowrite8(xmit->buf[xmit->tail],
 			port->membase + TIMBUART_TXFIFO);
-		uart_xmit_advance(port, 1);
+		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+		port->icount.tx++;
 	}
 
 	dev_dbg(port->dev,
@@ -174,7 +175,7 @@ static void timbuart_tasklet(struct tasklet_struct *t)
 	struct timbuart_port *uart = from_tasklet(uart, t, tasklet);
 	u32 isr, ier = 0;
 
-	uart_port_lock(&uart->port);
+	spin_lock(&uart->port.lock);
 
 	isr = ioread32(uart->port.membase + TIMBUART_ISR);
 	dev_dbg(uart->port.dev, "%s ISR: %x\n", __func__, isr);
@@ -189,7 +190,7 @@ static void timbuart_tasklet(struct tasklet_struct *t)
 
 	iowrite32(ier, uart->port.membase + TIMBUART_IER);
 
-	uart_port_unlock(&uart->port);
+	spin_unlock(&uart->port.lock);
 	dev_dbg(uart->port.dev, "%s leaving\n", __func__);
 }
 
@@ -274,8 +275,8 @@ static int get_bindex(int baud)
 }
 
 static void timbuart_set_termios(struct uart_port *port,
-				 struct ktermios *termios,
-				 const struct ktermios *old)
+	struct ktermios *termios,
+	struct ktermios *old)
 {
 	unsigned int baud;
 	short bindex;
@@ -295,10 +296,10 @@ static void timbuart_set_termios(struct uart_port *port,
 		tty_termios_copy_hw(termios, old);
 	tty_termios_encode_baud_rate(termios, baud, baud);
 
-	uart_port_lock_irqsave(port, &flags);
+	spin_lock_irqsave(&port->lock, flags);
 	iowrite8((u8)bindex, port->membase + TIMBUART_BAUDRATE);
 	uart_update_timeout(port, termios->c_cflag, baud);
-	uart_port_unlock_irqrestore(port, flags);
+	spin_unlock_irqrestore(&port->lock, flags);
 }
 
 static const char *timbuart_type(struct uart_port *port)
@@ -473,7 +474,7 @@ err_mem:
 	return err;
 }
 
-static void timbuart_remove(struct platform_device *dev)
+static int timbuart_remove(struct platform_device *dev)
 {
 	struct timbuart_port *uart = platform_get_drvdata(dev);
 
@@ -481,6 +482,8 @@ static void timbuart_remove(struct platform_device *dev)
 	uart_remove_one_port(&timbuart_driver, &uart->port);
 	uart_unregister_driver(&timbuart_driver);
 	kfree(uart);
+
+	return 0;
 }
 
 static struct platform_driver timbuart_platform_driver = {
@@ -488,7 +491,7 @@ static struct platform_driver timbuart_platform_driver = {
 		.name	= "timb-uart",
 	},
 	.probe		= timbuart_probe,
-	.remove_new	= timbuart_remove,
+	.remove		= timbuart_remove,
 };
 
 module_platform_driver(timbuart_platform_driver);

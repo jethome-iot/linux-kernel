@@ -60,6 +60,7 @@
 #include <linux/ktime.h>
 #include <linux/kthread.h>
 #include <asm/page.h>        /* To get host page size per arch */
+#include <linux/aer.h>
 
 
 #include "mpt3sas_base.h"
@@ -139,7 +140,7 @@ static void
 _base_clear_outstanding_commands(struct MPT3SAS_ADAPTER *ioc);
 
 static u32
-_base_readl_ext_retry(const void __iomem *addr);
+_base_readl_ext_retry(const volatile void __iomem *addr);
 
 /**
  * mpt3sas_base_check_cmd_timeout - Function
@@ -204,7 +205,7 @@ module_param_call(mpt3sas_fwfault_debug, _scsih_set_fwfault_debug,
  * while reading the system interface register.
  */
 static inline u32
-_base_readl_aero(const void __iomem *addr)
+_base_readl_aero(const volatile void __iomem *addr)
 {
 	u32 i = 0, ret_val;
 
@@ -217,7 +218,7 @@ _base_readl_aero(const void __iomem *addr)
 }
 
 static u32
-_base_readl_ext_retry(const void __iomem *addr)
+_base_readl_ext_retry(const volatile void __iomem *addr)
 {
 	u32 i, ret_val;
 
@@ -231,7 +232,7 @@ _base_readl_ext_retry(const void __iomem *addr)
 }
 
 static inline u32
-_base_readl(const void __iomem *addr)
+_base_readl(const volatile void __iomem *addr)
 {
 	return readl(addr);
 }
@@ -889,7 +890,7 @@ mpt3sas_base_stop_watchdog(struct MPT3SAS_ADAPTER *ioc)
  * @fault_code: fault code
  */
 void
-mpt3sas_base_fault_info(struct MPT3SAS_ADAPTER *ioc, u16 fault_code)
+mpt3sas_base_fault_info(struct MPT3SAS_ADAPTER *ioc , u16 fault_code)
 {
 	ioc_err(ioc, "fault_state(0x%04x)!\n", fault_code);
 }
@@ -1073,7 +1074,7 @@ _base_sas_ioc_info(struct MPT3SAS_ADAPTER *ioc, MPI2DefaultReply_t *mpi_reply,
 		desc = "config no defaults";
 		break;
 	case MPI2_IOCSTATUS_CONFIG_CANT_COMMIT:
-		desc = "config can't commit";
+		desc = "config cant commit";
 		break;
 
 /****************************************************************************
@@ -1337,7 +1338,7 @@ _base_display_event_data(struct MPT3SAS_ADAPTER *ioc,
  * @log_info: log info
  */
 static void
-_base_sas_log_info(struct MPT3SAS_ADAPTER *ioc, u32 log_info)
+_base_sas_log_info(struct MPT3SAS_ADAPTER *ioc , u32 log_info)
 {
 	union loginfo_type {
 		u32	loginfo;
@@ -1409,7 +1410,7 @@ _base_display_reply_info(struct MPT3SAS_ADAPTER *ioc, u16 smid, u8 msix_index,
 
 	if ((ioc_status & MPI2_IOCSTATUS_MASK) &&
 	    (ioc->logging_level & MPT_DEBUG_REPLY)) {
-		_base_sas_ioc_info(ioc, mpi_reply,
+		_base_sas_ioc_info(ioc , mpi_reply,
 		   mpt3sas_base_get_msg_frame(ioc, smid));
 	}
 
@@ -3097,7 +3098,6 @@ _base_check_enable_msix(struct MPT3SAS_ADAPTER *ioc)
 void
 mpt3sas_base_free_irq(struct MPT3SAS_ADAPTER *ioc)
 {
-	unsigned int irq;
 	struct adapter_reply_queue *reply_q, *next;
 
 	if (list_empty(&ioc->reply_queue_list))
@@ -3110,10 +3110,9 @@ mpt3sas_base_free_irq(struct MPT3SAS_ADAPTER *ioc)
 			continue;
 		}
 
-		if (ioc->smp_affinity_enable) {
-			irq = pci_irq_vector(ioc->pdev, reply_q->msix_index);
-			irq_update_affinity_hint(irq, NULL);
-		}
+		if (ioc->smp_affinity_enable)
+			irq_set_affinity_hint(pci_irq_vector(ioc->pdev,
+			    reply_q->msix_index), NULL);
 		free_irq(pci_irq_vector(ioc->pdev, reply_q->msix_index),
 			 reply_q);
 		kfree(reply_q);
@@ -3180,15 +3179,18 @@ out:
  * @ioc: per adapter object
  *
  * The enduser would need to set the affinity via /proc/irq/#/smp_affinity
+ *
+ * It would nice if we could call irq_set_affinity, however it is not
+ * an exported symbol
  */
 static void
 _base_assign_reply_queues(struct MPT3SAS_ADAPTER *ioc)
 {
-	unsigned int cpu, nr_cpus, nr_msix, index = 0, irq;
+	unsigned int cpu, nr_cpus, nr_msix, index = 0;
 	struct adapter_reply_queue *reply_q;
+	int local_numa_node;
 	int iopoll_q_count = ioc->reply_queue_count -
 	    ioc->iopoll_q_start_index;
-	const struct cpumask *mask;
 
 	if (!_base_is_controller_msix_enabled(ioc))
 		return;
@@ -3211,11 +3213,11 @@ _base_assign_reply_queues(struct MPT3SAS_ADAPTER *ioc)
 		 * corresponding to high iops queues.
 		 */
 		if (ioc->high_iops_queues) {
-			mask = cpumask_of_node(dev_to_node(&ioc->pdev->dev));
+			local_numa_node = dev_to_node(&ioc->pdev->dev);
 			for (index = 0; index < ioc->high_iops_queues;
 			    index++) {
-				irq = pci_irq_vector(ioc->pdev, index);
-				irq_set_affinity_and_hint(irq, mask);
+				irq_set_affinity_hint(pci_irq_vector(ioc->pdev,
+				    index), cpumask_of_node(local_numa_node));
 			}
 		}
 
@@ -3551,6 +3553,7 @@ mpt3sas_base_unmap_resources(struct MPT3SAS_ADAPTER *ioc)
 
 	if (pci_is_enabled(pdev)) {
 		pci_release_selected_regions(ioc->pdev, ioc->bars);
+		pci_disable_pcie_error_reporting(pdev);
 		pci_disable_device(pdev);
 	}
 }
@@ -3629,6 +3632,9 @@ mpt3sas_base_map_resources(struct MPT3SAS_ADAPTER *ioc)
 		r = -ENODEV;
 		goto out_fail;
 	}
+
+/* AER (Advanced Error Reporting) hooks */
+	pci_enable_pcie_error_reporting(pdev);
 
 	pci_set_master(pdev);
 
@@ -3710,11 +3716,10 @@ mpt3sas_base_map_resources(struct MPT3SAS_ADAPTER *ioc)
 		}
 
 		for (i = 0; i < ioc->combined_reply_index_count; i++) {
-			ioc->replyPostRegisterIndex[i] =
-				(resource_size_t __iomem *)
-				((u8 __force *)&ioc->chip->Doorbell +
-				 MPI25_SUP_REPLY_POST_HOST_INDEX_OFFSET +
-				 (i * MPT3_SUP_REPLY_POST_HOST_INDEX_REG_OFFSET));
+			ioc->replyPostRegisterIndex[i] = (resource_size_t *)
+			     ((u8 __force *)&ioc->chip->Doorbell +
+			     MPI25_SUP_REPLY_POST_HOST_INDEX_OFFSET +
+			     (i * MPT3_SUP_REPLY_POST_HOST_INDEX_REG_OFFSET));
 		}
 	}
 
@@ -4771,17 +4776,23 @@ static void
 _base_display_ioc_capabilities(struct MPT3SAS_ADAPTER *ioc)
 {
 	int i = 0;
-	char desc[17] = {0};
+	char desc[16];
 	u32 iounit_pg1_flags;
+	u32 bios_version;
 
+	bios_version = le32_to_cpu(ioc->bios_pg3.BiosVersion);
 	strncpy(desc, ioc->manu_pg0.ChipName, 16);
-	ioc_info(ioc, "%s: FWVersion(%02d.%02d.%02d.%02d), ChipRevision(0x%02x)\n",
+	ioc_info(ioc, "%s: FWVersion(%02d.%02d.%02d.%02d), ChipRevision(0x%02x), BiosVersion(%02d.%02d.%02d.%02d)\n",
 		 desc,
 		 (ioc->facts.FWVersion.Word & 0xFF000000) >> 24,
 		 (ioc->facts.FWVersion.Word & 0x00FF0000) >> 16,
 		 (ioc->facts.FWVersion.Word & 0x0000FF00) >> 8,
 		 ioc->facts.FWVersion.Word & 0x000000FF,
-		 ioc->pdev->revision);
+		 ioc->pdev->revision,
+		 (bios_version & 0xFF000000) >> 24,
+		 (bios_version & 0x00FF0000) >> 16,
+		 (bios_version & 0x0000FF00) >> 8,
+		 bios_version & 0x000000FF);
 
 	_base_display_OEMs_branding(ioc);
 
@@ -4893,7 +4904,8 @@ mpt3sas_base_update_missing_delay(struct MPT3SAS_ADAPTER *ioc,
 	if (!num_phys)
 		return;
 
-	sz = struct_size(sas_iounit_pg1, PhyData, num_phys);
+	sz = offsetof(Mpi2SasIOUnitPage1_t, PhyData) + (num_phys *
+	    sizeof(Mpi2SasIOUnit1PhyData_t));
 	sas_iounit_pg1 = kzalloc(sz, GFP_KERNEL);
 	if (!sas_iounit_pg1) {
 		ioc_err(ioc, "failure at %s:%d/%s()!\n",
@@ -5043,7 +5055,7 @@ _base_get_event_diag_triggers(struct MPT3SAS_ADAPTER *ioc)
 {
 	Mpi26DriverTriggerPage2_t trigger_pg2;
 	struct SL_WH_EVENT_TRIGGER_T *event_tg;
-	MPI26_DRIVER_MPI_EVENT_TRIGGER_ENTRY *mpi_event_tg;
+	MPI26_DRIVER_MPI_EVENT_TIGGER_ENTRY *mpi_event_tg;
 	Mpi2ConfigReply_t mpi_reply;
 	int r = 0, i = 0;
 	u16 count = 0;
@@ -5095,7 +5107,7 @@ _base_get_scsi_diag_triggers(struct MPT3SAS_ADAPTER *ioc)
 {
 	Mpi26DriverTriggerPage3_t trigger_pg3;
 	struct SL_WH_SCSI_TRIGGER_T *scsi_tg;
-	MPI26_DRIVER_SCSI_SENSE_TRIGGER_ENTRY *mpi_scsi_tg;
+	MPI26_DRIVER_SCSI_SENSE_TIGGER_ENTRY *mpi_scsi_tg;
 	Mpi2ConfigReply_t mpi_reply;
 	int r = 0, i = 0;
 	u16 count = 0;
@@ -5147,7 +5159,7 @@ _base_get_mpi_diag_triggers(struct MPT3SAS_ADAPTER *ioc)
 {
 	Mpi26DriverTriggerPage4_t trigger_pg4;
 	struct SL_WH_MPI_TRIGGER_T *status_tg;
-	MPI26_DRIVER_IOCSTATUS_LOGINFO_TRIGGER_ENTRY *mpi_status_tg;
+	MPI26_DRIVER_IOCSTATUS_LOGINFO_TIGGER_ENTRY *mpi_status_tg;
 	Mpi2ConfigReply_t mpi_reply;
 	int r = 0, i = 0;
 	u16 count = 0;
@@ -5378,9 +5390,10 @@ _base_update_diag_trigger_pages(struct MPT3SAS_ADAPTER *ioc)
 static int _base_assign_fw_reported_qd(struct MPT3SAS_ADAPTER *ioc)
 {
 	Mpi2ConfigReply_t mpi_reply;
-	Mpi2SasIOUnitPage1_t sas_iounit_pg1;
+	Mpi2SasIOUnitPage1_t *sas_iounit_pg1 = NULL;
 	Mpi26PCIeIOUnitPage1_t pcie_iounit_pg1;
 	u16 depth;
+	int sz;
 	int rc = 0;
 
 	ioc->max_wideport_qd = MPT3SAS_SAS_QUEUE_DEPTH;
@@ -5390,21 +5403,28 @@ static int _base_assign_fw_reported_qd(struct MPT3SAS_ADAPTER *ioc)
 	if (!ioc->is_gen35_ioc)
 		goto out;
 	/* sas iounit page 1 */
+	sz = offsetof(Mpi2SasIOUnitPage1_t, PhyData);
+	sas_iounit_pg1 = kzalloc(sizeof(Mpi2SasIOUnitPage1_t), GFP_KERNEL);
+	if (!sas_iounit_pg1) {
+		pr_err("%s: failure at %s:%d/%s()!\n",
+		    ioc->name, __FILE__, __LINE__, __func__);
+		return rc;
+	}
 	rc = mpt3sas_config_get_sas_iounit_pg1(ioc, &mpi_reply,
-	    &sas_iounit_pg1, sizeof(Mpi2SasIOUnitPage1_t));
+	    sas_iounit_pg1, sz);
 	if (rc) {
 		pr_err("%s: failure at %s:%d/%s()!\n",
 		    ioc->name, __FILE__, __LINE__, __func__);
 		goto out;
 	}
 
-	depth = le16_to_cpu(sas_iounit_pg1.SASWideMaxQueueDepth);
+	depth = le16_to_cpu(sas_iounit_pg1->SASWideMaxQueueDepth);
 	ioc->max_wideport_qd = (depth ? depth : MPT3SAS_SAS_QUEUE_DEPTH);
 
-	depth = le16_to_cpu(sas_iounit_pg1.SASNarrowMaxQueueDepth);
+	depth = le16_to_cpu(sas_iounit_pg1->SASNarrowMaxQueueDepth);
 	ioc->max_narrowport_qd = (depth ? depth : MPT3SAS_SAS_QUEUE_DEPTH);
 
-	depth = sas_iounit_pg1.SATAMaxQDepth;
+	depth = sas_iounit_pg1->SATAMaxQDepth;
 	ioc->max_sata_qd = (depth ? depth : MPT3SAS_SATA_QUEUE_DEPTH);
 
 	/* pcie iounit page 1 */
@@ -5423,152 +5443,8 @@ out:
 	    "MaxWidePortQD: 0x%x MaxNarrowPortQD: 0x%x MaxSataQD: 0x%x MaxNvmeQD: 0x%x\n",
 	    ioc->max_wideport_qd, ioc->max_narrowport_qd,
 	    ioc->max_sata_qd, ioc->max_nvme_qd));
+	kfree(sas_iounit_pg1);
 	return rc;
-}
-
-/**
- * mpt3sas_atto_validate_nvram - validate the ATTO nvram read from mfg pg1
- *
- * @ioc : per adapter object
- * @n   : ptr to the ATTO nvram structure
- * Return: 0 for success, non-zero for failure.
- */
-static int
-mpt3sas_atto_validate_nvram(struct MPT3SAS_ADAPTER *ioc,
-			    struct ATTO_SAS_NVRAM *n)
-{
-	int r = -EINVAL;
-	union ATTO_SAS_ADDRESS *s1;
-	u32 len;
-	u8 *pb;
-	u8 ckSum;
-
-	/* validate nvram checksum */
-	pb = (u8 *) n;
-	ckSum = ATTO_SASNVR_CKSUM_SEED;
-	len = sizeof(struct ATTO_SAS_NVRAM);
-
-	while (len--)
-		ckSum = ckSum + pb[len];
-
-	if (ckSum) {
-		ioc_err(ioc, "Invalid ATTO NVRAM checksum\n");
-		return r;
-	}
-
-	s1 = (union ATTO_SAS_ADDRESS *) n->SasAddr;
-
-	if (n->Signature[0] != 'E'
-	|| n->Signature[1] != 'S'
-	|| n->Signature[2] != 'A'
-	|| n->Signature[3] != 'S')
-		ioc_err(ioc, "Invalid ATTO NVRAM signature\n");
-	else if (n->Version > ATTO_SASNVR_VERSION)
-		ioc_info(ioc, "Invalid ATTO NVRAM version");
-	else if ((n->SasAddr[7] & (ATTO_SAS_ADDR_ALIGN - 1))
-			|| s1->b[0] != 0x50
-			|| s1->b[1] != 0x01
-			|| s1->b[2] != 0x08
-			|| (s1->b[3] & 0xF0) != 0x60
-			|| ((s1->b[3] & 0x0F) | le32_to_cpu(s1->d[1])) == 0) {
-		ioc_err(ioc, "Invalid ATTO SAS address\n");
-	} else
-		r = 0;
-	return r;
-}
-
-/**
- * mpt3sas_atto_get_sas_addr - get the ATTO SAS address from mfg page 1
- *
- * @ioc : per adapter object
- * @*sas_addr : return sas address
- * Return: 0 for success, non-zero for failure.
- */
-static int
-mpt3sas_atto_get_sas_addr(struct MPT3SAS_ADAPTER *ioc, union ATTO_SAS_ADDRESS *sas_addr)
-{
-	Mpi2ManufacturingPage1_t mfg_pg1;
-	Mpi2ConfigReply_t mpi_reply;
-	struct ATTO_SAS_NVRAM *nvram;
-	int r;
-	__be64 addr;
-
-	r = mpt3sas_config_get_manufacturing_pg1(ioc, &mpi_reply, &mfg_pg1);
-	if (r) {
-		ioc_err(ioc, "Failed to read manufacturing page 1\n");
-		return r;
-	}
-
-	/* validate nvram */
-	nvram = (struct ATTO_SAS_NVRAM *) mfg_pg1.VPD;
-	r = mpt3sas_atto_validate_nvram(ioc, nvram);
-	if (r)
-		return r;
-
-	addr = *((__be64 *) nvram->SasAddr);
-	sas_addr->q = cpu_to_le64(be64_to_cpu(addr));
-	return r;
-}
-
-/**
- * mpt3sas_atto_init - perform initializaion for ATTO branded
- *					adapter.
- * @ioc : per adapter object
- *5
- * Return: 0 for success, non-zero for failure.
- */
-static int
-mpt3sas_atto_init(struct MPT3SAS_ADAPTER *ioc)
-{
-	int sz = 0;
-	Mpi2BiosPage4_t *bios_pg4 = NULL;
-	Mpi2ConfigReply_t mpi_reply;
-	int r;
-	int ix;
-	union ATTO_SAS_ADDRESS sas_addr;
-	union ATTO_SAS_ADDRESS temp;
-	union ATTO_SAS_ADDRESS bias;
-
-	r = mpt3sas_atto_get_sas_addr(ioc, &sas_addr);
-	if (r)
-		return r;
-
-	/* get header first to get size */
-	r = mpt3sas_config_get_bios_pg4(ioc, &mpi_reply, NULL, 0);
-	if (r) {
-		ioc_err(ioc, "Failed to read ATTO bios page 4 header.\n");
-		return r;
-	}
-
-	sz = mpi_reply.Header.PageLength * sizeof(u32);
-	bios_pg4 = kzalloc(sz, GFP_KERNEL);
-	if (!bios_pg4) {
-		ioc_err(ioc, "Failed to allocate memory for ATTO bios page.\n");
-		return -ENOMEM;
-	}
-
-	/* read bios page 4 */
-	r = mpt3sas_config_get_bios_pg4(ioc, &mpi_reply, bios_pg4, sz);
-	if (r) {
-		ioc_err(ioc, "Failed to read ATTO bios page 4\n");
-		goto out;
-	}
-
-	/* Update bios page 4 with the ATTO WWID */
-	bias.q = sas_addr.q;
-	bias.b[7] += ATTO_SAS_ADDR_DEVNAME_BIAS;
-
-	for (ix = 0; ix < bios_pg4->NumPhys; ix++) {
-		temp.q = sas_addr.q;
-		temp.b[7] += ix;
-		bios_pg4->Phy[ix].ReassignmentWWID = temp.q;
-		bios_pg4->Phy[ix].ReassignmentDeviceName = bias.q;
-	}
-	r = mpt3sas_config_set_bios_pg4(ioc, &mpi_reply, bios_pg4, sz);
-
-out:
-	kfree(bios_pg4);
-	return r;
 }
 
 /**
@@ -5578,7 +5454,6 @@ out:
 static int
 _base_static_config_pages(struct MPT3SAS_ADAPTER *ioc)
 {
-	Mpi2IOUnitPage8_t iounit_pg8;
 	Mpi2ConfigReply_t mpi_reply;
 	u32 iounit_pg1_flags;
 	int tg_flags = 0;
@@ -5595,13 +5470,6 @@ _base_static_config_pages(struct MPT3SAS_ADAPTER *ioc)
 		if (rc)
 			return rc;
 	}
-
-	if (ioc->pdev->vendor == MPI2_MFGPAGE_VENDORID_ATTO) {
-		rc = mpt3sas_atto_init(ioc);
-		if (rc)
-			return rc;
-	}
-
 	/*
 	 * Ensure correct T10 PI operation if vendor left EEDPTagMode
 	 * flag unset in NVDATA.
@@ -5651,21 +5519,12 @@ _base_static_config_pages(struct MPT3SAS_ADAPTER *ioc)
 	rc = _base_assign_fw_reported_qd(ioc);
 	if (rc)
 		return rc;
-
-	/*
-	 * ATTO doesn't use bios page 2 and 3 for bios settings.
-	 */
-	if (ioc->pdev->vendor ==  MPI2_MFGPAGE_VENDORID_ATTO)
-		ioc->bios_pg3.BiosVersion = 0;
-	else {
-		rc = mpt3sas_config_get_bios_pg2(ioc, &mpi_reply, &ioc->bios_pg2);
-		if (rc)
-			return rc;
-		rc = mpt3sas_config_get_bios_pg3(ioc, &mpi_reply, &ioc->bios_pg3);
-		if (rc)
-			return rc;
-	}
-
+	rc = mpt3sas_config_get_bios_pg2(ioc, &mpi_reply, &ioc->bios_pg2);
+	if (rc)
+		return rc;
+	rc = mpt3sas_config_get_bios_pg3(ioc, &mpi_reply, &ioc->bios_pg3);
+	if (rc)
+		return rc;
 	rc = mpt3sas_config_get_ioc_pg8(ioc, &mpi_reply, &ioc->ioc_pg8);
 	if (rc)
 		return rc;
@@ -5675,7 +5534,7 @@ _base_static_config_pages(struct MPT3SAS_ADAPTER *ioc)
 	rc = mpt3sas_config_get_iounit_pg1(ioc, &mpi_reply, &ioc->iounit_pg1);
 	if (rc)
 		return rc;
-	rc = mpt3sas_config_get_iounit_pg8(ioc, &mpi_reply, &iounit_pg8);
+	rc = mpt3sas_config_get_iounit_pg8(ioc, &mpi_reply, &ioc->iounit_pg8);
 	if (rc)
 		return rc;
 	_base_display_ioc_capabilities(ioc);
@@ -5697,8 +5556,8 @@ _base_static_config_pages(struct MPT3SAS_ADAPTER *ioc)
 	if (rc)
 		return rc;
 
-	if (iounit_pg8.NumSensors)
-		ioc->temp_sensors_count = iounit_pg8.NumSensors;
+	if (ioc->iounit_pg8.NumSensors)
+		ioc->temp_sensors_count = ioc->iounit_pg8.NumSensors;
 	if (ioc->is_aero_ioc) {
 		rc = _base_update_ioc_page1_inlinewith_perf_mode(ioc);
 		if (rc)
@@ -5885,12 +5744,13 @@ _base_release_memory_pools(struct MPT3SAS_ADAPTER *ioc)
 /**
  * mpt3sas_check_same_4gb_region - checks whether all reply queues in a set are
  *	having same upper 32bits in their base memory address.
- * @start_address: Base address of a reply queue set
+ * @reply_pool_start_address: Base address of a reply queue set
  * @pool_sz: Size of single Reply Descriptor Post Queues pool size
  *
  * Return: 1 if reply queues in a set have a same upper 32bits in their base
  * memory address, else 0.
  */
+
 static int
 mpt3sas_check_same_4gb_region(dma_addr_t start_address, u32 pool_sz)
 {
@@ -7378,7 +7238,9 @@ _base_wait_for_iocstate(struct MPT3SAS_ADAPTER *ioc, int timeout)
 		return -EFAULT;
 	}
 
- issue_diag_reset:
+	return 0;
+
+issue_diag_reset:
 	rc = _base_diag_reset(ioc);
 	return rc;
 }

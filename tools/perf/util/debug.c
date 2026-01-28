@@ -19,18 +19,11 @@
 #include "debug.h"
 #include "print_binary.h"
 #include "target.h"
-#include "trace-event.h"
 #include "ui/helpline.h"
 #include "ui/ui.h"
 #include "util/parse-sublevel-options.h"
 
 #include <linux/ctype.h>
-
-#ifdef HAVE_LIBTRACEEVENT
-#include <traceevent/event-parse.h>
-#else
-#define LIBTRACEEVENT_VERSION 0
-#endif
 
 int verbose;
 int debug_peo_args;
@@ -38,21 +31,12 @@ bool dump_trace = false, quiet = false;
 int debug_ordered_events;
 static int redirect_to_stderr;
 int debug_data_convert;
-static FILE *_debug_file;
+static FILE *debug_file;
 bool debug_display_time;
-
-FILE *debug_file(void)
-{
-	if (!_debug_file) {
-		pr_warning_once("debug_file not set");
-		debug_set_file(stderr);
-	}
-	return _debug_file;
-}
 
 void debug_set_file(FILE *file)
 {
-	_debug_file = file;
+	debug_file = file;
 }
 
 void debug_set_display_time(bool set)
@@ -87,8 +71,8 @@ int veprintf(int level, int var, const char *fmt, va_list args)
 		if (use_browser >= 1 && !redirect_to_stderr) {
 			ui_helpline__vshow(fmt, args);
 		} else {
-			ret = fprintf_time(debug_file());
-			ret += vfprintf(debug_file(), fmt, args);
+			ret = fprintf_time(debug_file);
+			ret += vfprintf(debug_file, fmt, args);
 		}
 	}
 
@@ -116,8 +100,9 @@ static int veprintf_time(u64 t, const char *fmt, va_list args)
 	nsecs -= secs  * NSEC_PER_SEC;
 	usecs  = nsecs / NSEC_PER_USEC;
 
-	ret = fprintf(debug_file(), "[%13" PRIu64 ".%06" PRIu64 "] ", secs, usecs);
-	ret += vfprintf(debug_file(), fmt, args);
+	ret = fprintf(stderr, "[%13" PRIu64 ".%06" PRIu64 "] ",
+		      secs, usecs);
+	ret += vfprintf(stderr, fmt, args);
 	return ret;
 }
 
@@ -243,14 +228,6 @@ int perf_debug_option(const char *str)
 	/* Allow only verbose value in range (0, 10), otherwise set 0. */
 	verbose = (verbose < 0) || (verbose > 10) ? 0 : verbose;
 
-#if LIBTRACEEVENT_VERSION >= MAKE_LIBTRACEEVENT_VERSION(1, 3, 0)
-	if (verbose == 1)
-		tep_set_loglevel(TEP_LOG_INFO);
-	else if (verbose == 2)
-		tep_set_loglevel(TEP_LOG_DEBUG);
-	else if (verbose >= 3)
-		tep_set_loglevel(TEP_LOG_ALL);
-#endif
 	return 0;
 }
 

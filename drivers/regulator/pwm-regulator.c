@@ -10,13 +10,19 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/err.h>
-#include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/pwm.h>
 #include <linux/gpio/consumer.h>
+
+#ifdef CONFIG_AMLOGIC_PWM_REGULATOR
+#include <linux/delay.h>
+#define USLEEP_TIME 200
+int usleep_time;
+#endif
 
 struct pwm_continuous_reg_data {
 	unsigned int min_uV_dutycycle;
@@ -51,6 +57,35 @@ struct pwm_voltages {
 /*
  * Voltage table call-backs
  */
+#ifdef CONFIG_AMLOGIC_PWM_REGULATOR
+static void pwm_regulator_init_state(struct regulator_dev *rdev)
+{
+	struct pwm_regulator_data *drvdata = rdev_get_drvdata(rdev);
+	struct pwm_state pwm_state;
+	unsigned int dutycycle;
+	int i;
+
+	pwm_get_state(drvdata->pwm, &pwm_state);
+	dutycycle = pwm_get_relative_duty_cycle(&pwm_state, 100);
+
+	pr_debug("[%s] Default drvdata->state: %d\n", __func__, drvdata->state);
+	for (i = 0; i < rdev->desc->n_voltages; i++) {
+		pr_debug("[%s] i:%d n_voltages:%d, dutycycle:%d = [i].dutycycle:%d\n",
+			__func__, i, rdev->desc->n_voltages, dutycycle,
+			drvdata->duty_cycle_table[i].dutycycle);
+		if (dutycycle == drvdata->duty_cycle_table[i].dutycycle) {
+			drvdata->state = i;
+			pr_info("[%s] Get return == i: %d\n", __func__, drvdata->state);
+			return;
+		} else if (dutycycle < drvdata->duty_cycle_table[i].dutycycle) {
+			drvdata->state = i - 1;
+			pr_info("[%s] Get return < i-1:%d\n", __func__, drvdata->state);
+			return;
+		}
+	}
+	pr_info("[%s] Get drvdata->state: %d\n", __func__, drvdata->state);
+}
+#else /* CONFIG_AMLOGIC_PWM_REGULATOR */
 static void pwm_regulator_init_state(struct regulator_dev *rdev)
 {
 	struct pwm_regulator_data *drvdata = rdev_get_drvdata(rdev);
@@ -68,6 +103,7 @@ static void pwm_regulator_init_state(struct regulator_dev *rdev)
 		}
 	}
 }
+#endif /* CONFIG_AMLOGIC_PWM_REGULATOR */
 
 static int pwm_regulator_get_voltage_sel(struct regulator_dev *rdev)
 {
@@ -90,13 +126,18 @@ static int pwm_regulator_set_voltage_sel(struct regulator_dev *rdev,
 	pwm_set_relative_duty_cycle(&pstate,
 			drvdata->duty_cycle_table[selector].dutycycle, 100);
 
-	ret = pwm_apply_might_sleep(drvdata->pwm, &pstate);
+	ret = pwm_apply_state(drvdata->pwm, &pstate);
 	if (ret) {
 		dev_err(&rdev->dev, "Failed to configure PWM: %d\n", ret);
 		return ret;
 	}
 
 	drvdata->state = selector;
+
+#ifdef CONFIG_AMLOGIC_PWM_REGULATOR
+	if (drvdata->desc.vsel_step)
+		usleep_range(usleep_time - 10, usleep_time);
+#endif
 
 	return 0;
 }
@@ -156,13 +197,6 @@ static int pwm_regulator_get_voltage(struct regulator_dev *rdev)
 	unsigned int voltage;
 
 	pwm_get_state(drvdata->pwm, &pstate);
-
-	if (!pstate.enabled) {
-		if (pstate.polarity == PWM_POLARITY_INVERSED)
-			pstate.duty_cycle = pstate.period;
-		else
-			pstate.duty_cycle = 0;
-	}
 
 	voltage = pwm_get_relative_duty_cycle(&pstate, duty_unit);
 	if (voltage < min(max_uV_duty, min_uV_duty) ||
@@ -226,7 +260,7 @@ static int pwm_regulator_set_voltage(struct regulator_dev *rdev,
 
 	pwm_set_relative_duty_cycle(&pstate, dutycycle, duty_unit);
 
-	ret = pwm_apply_might_sleep(drvdata->pwm, &pstate);
+	ret = pwm_apply_state(drvdata->pwm, &pstate);
 	if (ret) {
 		dev_err(&rdev->dev, "Failed to configure PWM: %d\n", ret);
 		return ret;
@@ -294,6 +328,13 @@ static int pwm_regulator_init_table(struct platform_device *pdev,
 	drvdata->desc.ops = &pwm_regulator_voltage_table_ops;
 	drvdata->desc.n_voltages	= length / sizeof(*duty_cycle_table);
 
+#ifdef CONFIG_AMLOGIC_PWM_REGULATOR
+	of_property_read_u32(np, "amlogic,vsel-step", &drvdata->desc.vsel_step);
+	ret = of_property_read_u32(np, "amlogic,usleep-time", &usleep_time);
+	if (ret || usleep_time < 10)
+		usleep_time = USLEEP_TIME;
+#endif
+
 	return 0;
 }
 
@@ -323,32 +364,6 @@ static int pwm_regulator_init_continuous(struct platform_device *pdev,
 	return 0;
 }
 
-static int pwm_regulator_init_boot_on(struct platform_device *pdev,
-				      struct pwm_regulator_data *drvdata,
-				      const struct regulator_init_data *init_data)
-{
-	struct pwm_state pstate;
-
-	if (!init_data->constraints.boot_on || drvdata->enb_gpio)
-		return 0;
-
-	pwm_get_state(drvdata->pwm, &pstate);
-	if (pstate.enabled)
-		return 0;
-
-	/*
-	 * Update the duty cycle so the output does not change
-	 * when the regulator core enables the regulator (and
-	 * thus the PWM channel).
-	 */
-	if (pstate.polarity == PWM_POLARITY_INVERSED)
-		pstate.duty_cycle = pstate.period;
-	else
-		pstate.duty_cycle = 0;
-
-	return pwm_apply_might_sleep(drvdata->pwm, &pstate);
-}
-
 static int pwm_regulator_probe(struct platform_device *pdev)
 {
 	const struct regulator_init_data *init_data;
@@ -370,7 +385,7 @@ static int pwm_regulator_probe(struct platform_device *pdev)
 
 	memcpy(&drvdata->desc, &pwm_regulator_desc, sizeof(drvdata->desc));
 
-	if (of_property_present(np, "voltage-table"))
+	if (of_find_property(np, "voltage-table", NULL))
 		ret = pwm_regulator_init_table(pdev, drvdata);
 	else
 		ret = pwm_regulator_init_continuous(pdev, drvdata);
@@ -388,9 +403,15 @@ static int pwm_regulator_probe(struct platform_device *pdev)
 	config.init_data = init_data;
 
 	drvdata->pwm = devm_pwm_get(&pdev->dev, NULL);
-	if (IS_ERR(drvdata->pwm))
-		return dev_err_probe(&pdev->dev, PTR_ERR(drvdata->pwm),
-				     "Failed to get PWM\n");
+	if (IS_ERR(drvdata->pwm)) {
+		ret = PTR_ERR(drvdata->pwm);
+		if (ret == -EPROBE_DEFER)
+			dev_dbg(&pdev->dev,
+				"Failed to get PWM, deferring probe\n");
+		else
+			dev_err(&pdev->dev, "Failed to get PWM: %d\n", ret);
+		return ret;
+	}
 
 	if (init_data->constraints.boot_on || init_data->constraints.always_on)
 		gpio_flags = GPIOD_OUT_HIGH;
@@ -407,13 +428,6 @@ static int pwm_regulator_probe(struct platform_device *pdev)
 	ret = pwm_adjust_config(drvdata->pwm);
 	if (ret)
 		return ret;
-
-	ret = pwm_regulator_init_boot_on(pdev, drvdata, init_data);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to apply boot_on settings: %d\n",
-			ret);
-		return ret;
-	}
 
 	regulator = devm_regulator_register(&pdev->dev,
 					    &drvdata->desc, &config);
@@ -436,7 +450,6 @@ MODULE_DEVICE_TABLE(of, pwm_of_match);
 static struct platform_driver pwm_regulator_driver = {
 	.driver = {
 		.name		= "pwm-regulator",
-		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(pwm_of_match),
 	},
 	.probe = pwm_regulator_probe,

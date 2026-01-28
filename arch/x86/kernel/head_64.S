@@ -9,7 +9,7 @@
  *  Copyright (C) 2005 Eric Biederman <ebiederm@xmission.com>
  */
 
-#include <linux/export.h>
+
 #include <linux/linkage.h>
 #include <linux/threads.h>
 #include <linux/init.h>
@@ -22,10 +22,9 @@
 #include <asm/percpu.h>
 #include <asm/nops.h>
 #include "../entry/calling.h"
+#include <asm/export.h>
 #include <asm/nospec-branch.h>
-#include <asm/apicdef.h>
 #include <asm/fixmap.h>
-#include <asm/smp.h>
 
 /*
  * We are not able to switch in one step to the final KERNEL ADDRESS SPACE
@@ -43,16 +42,14 @@ L3_START_KERNEL = pud_index(__START_KERNEL_map)
 	__HEAD
 	.code64
 SYM_CODE_START_NOALIGN(startup_64)
-	UNWIND_HINT_END_OF_STACK
+	UNWIND_HINT_EMPTY
 	/*
 	 * At this point the CPU runs in 64bit mode CS.L = 1 CS.D = 0,
 	 * and someone has loaded an identity mapped page table
 	 * for us.  These identity mapped page tables map all of the
 	 * kernel pages and possibly all of memory.
 	 *
-	 * %RSI holds the physical address of the boot_params structure
-	 * provided by the bootloader. Preserve it in %R15 so C function calls
-	 * will not clobber it.
+	 * %rsi holds a physical pointer to real_mode_data.
 	 *
 	 * We come here either directly from a 64bit bootloader, or from
 	 * arch/x86/boot/compressed/head_64.S.
@@ -63,21 +60,14 @@ SYM_CODE_START_NOALIGN(startup_64)
 	 * compiled to run at we first fixup the physical addresses in our page
 	 * tables and then reload them.
 	 */
-	mov	%rsi, %r15
 
-	/* Set up the stack for verify_cpu() */
-	leaq	(__end_init_task - PTREGS_SIZE)(%rip), %rsp
+	/* Set up the stack for verify_cpu(), similar to initial_stack below */
+	leaq	(__end_init_task - FRAME_SIZE)(%rip), %rsp
 
 	leaq	_text(%rip), %rdi
-
-	/* Setup GSBASE to allow stack canary access for C code */
-	movl	$MSR_GS_BASE, %ecx
-	leaq	INIT_PER_CPU_VAR(fixed_percpu_data)(%rip), %rdx
-	movl	%edx, %eax
-	shrq	$32,  %rdx
-	wrmsr
-
+	pushq	%rsi
 	call	startup_64_setup_env
+	popq	%rsi
 
 	/* Now switch to __KERNEL_CS so IRET works reliably */
 	pushq	$__KERNEL_CS
@@ -86,18 +76,7 @@ SYM_CODE_START_NOALIGN(startup_64)
 	lretq
 
 .Lon_kernel_cs:
-	UNWIND_HINT_END_OF_STACK
-
-#ifdef CONFIG_AMD_MEM_ENCRYPT
-	/*
-	 * Activate SEV/SME memory encryption if supported/enabled. This needs to
-	 * be done now, since this also includes setup of the SEV-SNP CPUID table,
-	 * which needs to be done before any CPUID instructions are executed in
-	 * subsequent code. Pass the boot_params pointer as the first argument.
-	 */
-	movq	%r15, %rdi
-	call	sme_enable
-#endif
+	UNWIND_HINT_EMPTY
 
 	/* Sanitize CPU configuration */
 	call verify_cpu
@@ -109,42 +88,22 @@ SYM_CODE_START_NOALIGN(startup_64)
 	 * programmed into CR3.
 	 */
 	leaq	_text(%rip), %rdi
-	movq	%r15, %rsi
+	pushq	%rsi
 	call	__startup_64
+	popq	%rsi
 
 	/* Form the CR3 value being sure to include the CR3 modifier */
 	addq	$(early_top_pgt - __START_KERNEL_map), %rax
-
-#ifdef CONFIG_AMD_MEM_ENCRYPT
-	mov	%rax, %rdi
-	mov	%rax, %r14
-
-	addq	phys_base(%rip), %rdi
-
-	/*
-	 * For SEV guests: Verify that the C-bit is correct. A malicious
-	 * hypervisor could lie about the C-bit position to perform a ROP
-	 * attack on the guest by writing to the unencrypted stack and wait for
-	 * the next RET instruction.
-	 */
-	call	sev_verify_cbit
-
-	/*
-	 * Restore CR3 value without the phys_base which will be added
-	 * below, before writing %cr3.
-	 */
-	 mov	%r14, %rax
-#endif
-
 	jmp 1f
 SYM_CODE_END(startup_64)
 
 SYM_CODE_START(secondary_startup_64)
-	UNWIND_HINT_END_OF_STACK
-	ANNOTATE_NOENDBR
+	UNWIND_HINT_EMPTY
 	/*
 	 * At this point the CPU runs in 64bit mode CS.L = 1 CS.D = 0,
 	 * and someone has loaded a mapped page table.
+	 *
+	 * %rsi holds a physical pointer to real_mode_data.
 	 *
 	 * We come here either from startup_64 (using physical addresses)
 	 * or from trampoline.S (using virtual addresses).
@@ -167,44 +126,24 @@ SYM_CODE_START(secondary_startup_64)
 	 * verify_cpu() above to make sure NX is enabled.
 	 */
 SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
-	UNWIND_HINT_END_OF_STACK
-	ANNOTATE_NOENDBR
-
-	/* Clear %R15 which holds the boot_params pointer on the boot CPU */
-	xorq	%r15, %r15
+	UNWIND_HINT_EMPTY
 
 	/*
 	 * Retrieve the modifier (SME encryption mask if SME is active) to be
 	 * added to the initial pgdir entry that will be programmed into CR3.
 	 */
-#ifdef CONFIG_AMD_MEM_ENCRYPT
-	movq	sme_me_mask, %rax
-#else
-	xorq	%rax, %rax
-#endif
+	pushq	%rsi
+	call	__startup_secondary_64
+	popq	%rsi
 
 	/* Form the CR3 value being sure to include the CR3 modifier */
 	addq	$(init_top_pgt - __START_KERNEL_map), %rax
 1:
 
-#ifdef CONFIG_X86_MCE
-	/*
-	 * Preserve CR4.MCE if the kernel will enable #MC support.
-	 * Clearing MCE may fault in some environments (that also force #MC
-	 * support). Any machine check that occurs before #MC support is fully
-	 * configured will crash the system regardless of the CR4.MCE value set
-	 * here.
-	 */
-	movq	%cr4, %rcx
-	andl	$X86_CR4_MCE, %ecx
-#else
-	movl	$0, %ecx
-#endif
-
-	/* Enable PAE mode, PSE, PGE and LA57 */
-	orl	$(X86_CR4_PAE | X86_CR4_PSE | X86_CR4_PGE), %ecx
+	/* Enable PAE mode, PGE and LA57 */
+	movl	$(X86_CR4_PAE | X86_CR4_PGE), %ecx
 #ifdef CONFIG_X86_5LEVEL
-	testb	$1, __pgtable_l5_enabled(%rip)
+	testl	$1, __pgtable_l5_enabled(%rip)
 	jz	1f
 	orl	$X86_CR4_LA57, %ecx
 1:
@@ -215,148 +154,35 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	addq	phys_base(%rip), %rax
 
 	/*
-	 * Switch to new page-table
-	 *
-	 * For the boot CPU this switches to early_top_pgt which still has the
-	 * identity mappings present. The secondary CPUs will switch to the
-	 * init_top_pgt here, away from the trampoline_pgd and unmap the
-	 * identity mapped ranges.
+	 * For SEV guests: Verify that the C-bit is correct. A malicious
+	 * hypervisor could lie about the C-bit position to perform a ROP
+	 * attack on the guest by writing to the unencrypted stack and wait for
+	 * the next RET instruction.
+	 * %rsi carries pointer to realmode data and is callee-clobbered. Save
+	 * and restore it.
 	 */
-	movq	%rax, %cr3
+	pushq	%rsi
+	movq	%rax, %rdi
+	call	sev_verify_cbit
+	popq	%rsi
 
-	/*
-	 * Do a global TLB flush after the CR3 switch to make sure the TLB
-	 * entries from the identity mapping are flushed.
-	 */
-	movq	%cr4, %rcx
-	movq	%rcx, %rax
-	xorq	$X86_CR4_PGE, %rcx
-	movq	%rcx, %cr4
-	movq	%rax, %cr4
+	/* Switch to new page-table */
+	movq	%rax, %cr3
 
 	/* Ensure I am executing from virtual addresses */
 	movq	$1f, %rax
 	ANNOTATE_RETPOLINE_SAFE
 	jmp	*%rax
 1:
-	UNWIND_HINT_END_OF_STACK
-	ANNOTATE_NOENDBR // above
+	UNWIND_HINT_EMPTY
 
-#ifdef CONFIG_SMP
-	/*
-	 * For parallel boot, the APIC ID is read from the APIC, and then
-	 * used to look up the CPU number.  For booting a single CPU, the
-	 * CPU number is encoded in smpboot_control.
-	 *
-	 * Bit 31	STARTUP_READ_APICID (Read APICID from APIC)
-	 * Bit 0-23	CPU# if STARTUP_xx flags are not set
-	 */
-	movl	smpboot_control(%rip), %ecx
-	testl	$STARTUP_READ_APICID, %ecx
-	jnz	.Lread_apicid
-	/*
-	 * No control bit set, single CPU bringup. CPU number is provided
-	 * in bit 0-23. This is also the boot CPU case (CPU number 0).
-	 */
-	andl	$(~STARTUP_PARALLEL_MASK), %ecx
-	jmp	.Lsetup_cpu
-
-.Lread_apicid:
-	/* Check whether X2APIC mode is already enabled */
-	mov	$MSR_IA32_APICBASE, %ecx
-	rdmsr
-	testl	$X2APIC_ENABLE, %eax
-	jnz	.Lread_apicid_msr
-
-#ifdef CONFIG_X86_X2APIC
-	/*
-	 * If system is in X2APIC mode then MMIO base might not be
-	 * mapped causing the MMIO read below to fault. Faults can't
-	 * be handled at that point.
-	 */
-	cmpl	$0, x2apic_mode(%rip)
-	jz	.Lread_apicid_mmio
-
-	/* Force the AP into X2APIC mode. */
-	orl	$X2APIC_ENABLE, %eax
-	wrmsr
-	jmp	.Lread_apicid_msr
-#endif
-
-.Lread_apicid_mmio:
-	/* Read the APIC ID from the fix-mapped MMIO space. */
-	movq	apic_mmio_base(%rip), %rcx
-	addq	$APIC_ID, %rcx
-	movl	(%rcx), %eax
-	shr	$24, %eax
-	jmp	.Llookup_AP
-
-.Lread_apicid_msr:
-	mov	$APIC_X2APIC_ID_MSR, %ecx
-	rdmsr
-
-.Llookup_AP:
-	/* EAX contains the APIC ID of the current CPU */
-	xorq	%rcx, %rcx
-	leaq	cpuid_to_apicid(%rip), %rbx
-
-.Lfind_cpunr:
-	cmpl	(%rbx,%rcx,4), %eax
-	jz	.Lsetup_cpu
-	inc	%ecx
-#ifdef CONFIG_FORCE_NR_CPUS
-	cmpl	$NR_CPUS, %ecx
-#else
-	cmpl	nr_cpu_ids(%rip), %ecx
-#endif
-	jb	.Lfind_cpunr
-
-	/*  APIC ID not found in the table. Drop the trampoline lock and bail. */
-	movq	trampoline_lock(%rip), %rax
-	movl	$0, (%rax)
-
-1:	cli
-	hlt
-	jmp	1b
-
-.Lsetup_cpu:
-	/* Get the per cpu offset for the given CPU# which is in ECX */
-	movq	__per_cpu_offset(,%rcx,8), %rdx
-#else
-	xorl	%edx, %edx /* zero-extended to clear all of RDX */
-#endif /* CONFIG_SMP */
-
-	/*
-	 * Setup a boot time stack - Any secondary CPU will have lost its stack
-	 * by now because the cr3-switch above unmaps the real-mode stack.
-	 *
-	 * RDX contains the per-cpu offset
-	 */
-	movq	pcpu_hot + X86_current_task(%rdx), %rax
-	movq	TASK_threadsp(%rax), %rsp
-
-	/*
-	 * Now that this CPU is running on its own stack, drop the realmode
-	 * protection. For the boot CPU the pointer is NULL!
-	 */
-	movq	trampoline_lock(%rip), %rax
-	testq	%rax, %rax
-	jz	.Lsetup_gdt
-	movl	$0, (%rax)
-
-.Lsetup_gdt:
 	/*
 	 * We must switch to a new descriptor in kernel space for the GDT
 	 * because soon the kernel won't have access anymore to the userspace
 	 * addresses where we're currently running on. We have to do that here
 	 * because in 32bit we couldn't load a 64bit linear address.
 	 */
-	subq	$16, %rsp
-	movw	$(GDT_SIZE-1), (%rsp)
-	leaq	gdt_page(%rdx), %rax
-	movq	%rax, 2(%rsp)
-	lgdt	(%rsp)
-	addq	$16, %rsp
+	lgdt	early_gdt_descr(%rip)
 
 	/* set up data segments */
 	xorl %eax,%eax
@@ -380,15 +206,20 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	 * the per cpu areas are set up.
 	 */
 	movl	$MSR_GS_BASE,%ecx
-#ifndef CONFIG_SMP
-	leaq	INIT_PER_CPU_VAR(fixed_percpu_data)(%rip), %rdx
-#endif
-	movl	%edx, %eax
-	shrq	$32, %rdx
+	movl	initial_gs(%rip),%eax
+	movl	initial_gs+4(%rip),%edx
 	wrmsr
 
+	/*
+	 * Setup a boot time stack - Any secondary CPU will have lost its stack
+	 * by now because the cr3-switch above unmaps the real-mode stack
+	 */
+	movq initial_stack(%rip), %rsp
+
 	/* Setup and Load IDT */
+	pushq	%rsi
 	call	early_setup_idt
+	popq	%rsi
 
 	/* Check if nx is implemented */
 	movl	$0x80000001, %eax
@@ -398,23 +229,13 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	/* Setup EFER (Extended Feature Enable Register) */
 	movl	$MSR_EFER, %ecx
 	rdmsr
-	/*
-	 * Preserve current value of EFER for comparison and to skip
-	 * EFER writes if no change was made (for TDX guest)
-	 */
-	movl    %eax, %edx
 	btsl	$_EFER_SCE, %eax	/* Enable System Call */
 	btl	$20,%edi		/* No Execute supported? */
 	jnc     1f
 	btsl	$_EFER_NX, %eax
 	btsq	$_PAGE_BIT_NX,early_pmd_flags(%rip)
+1:	wrmsr				/* Make changes effective */
 
-	/* Avoid writing EFER if no change was made (for TDX guest) */
-1:	cmpl	%edx, %eax
-	je	1f
-	xor	%edx, %edx
-	wrmsr				/* Make changes effective */
-1:
 	/* Setup cr0 */
 	movl	$CR0_STATE, %eax
 	/* Make changes effective */
@@ -424,8 +245,9 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	pushq $0
 	popfq
 
-	/* Pass the boot_params pointer as first argument */
-	movq	%r15, %rdi
+	/* rsi is pointer to real mode structure with interesting info.
+	   pass it to C */
+	movq	%rsi, %rdi
 
 .Ljump_to_C_code:
 	/*
@@ -460,28 +282,22 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	pushq	%rax		# target address in negative space
 	lretq
 .Lafter_lret:
-	ANNOTATE_NOENDBR
 SYM_CODE_END(secondary_startup_64)
 
 #include "verify_cpu.S"
 #include "sev_verify_cbit.S"
 
-#if defined(CONFIG_HOTPLUG_CPU) && defined(CONFIG_AMD_MEM_ENCRYPT)
+#ifdef CONFIG_HOTPLUG_CPU
 /*
- * Entry point for soft restart of a CPU. Invoked from xxx_play_dead() for
- * restarting the boot CPU or for restarting SEV guest CPUs after CPU hot
- * unplug. Everything is set up already except the stack.
+ * Boot CPU0 entry point. It's called from play_dead(). Everything has been set
+ * up already except stack. We just set up stack here. Then call
+ * start_secondary() via .Ljump_to_C_code.
  */
-SYM_CODE_START(soft_restart_cpu)
-	ANNOTATE_NOENDBR
-	UNWIND_HINT_END_OF_STACK
-
-	/* Find the idle task stack */
-	movq	PER_CPU_VAR(pcpu_hot) + X86_current_task, %rcx
-	movq	TASK_threadsp(%rcx), %rsp
-
+SYM_CODE_START(start_cpu0)
+	UNWIND_HINT_EMPTY
+	movq	initial_stack(%rip), %rsp
 	jmp	.Ljump_to_C_code
-SYM_CODE_END(soft_restart_cpu)
+SYM_CODE_END(start_cpu0)
 #endif
 
 #ifdef CONFIG_AMD_MEM_ENCRYPT
@@ -495,7 +311,8 @@ SYM_CODE_END(soft_restart_cpu)
  */
 SYM_CODE_START_NOALIGN(vc_boot_ghcb)
 	UNWIND_HINT_IRET_REGS offset=8
-	ENDBR
+
+	ANNOTATE_UNRET_END
 
 	/* Build pt_regs */
 	PUSH_AND_CLEAR_REGS
@@ -513,6 +330,7 @@ SYM_CODE_START_NOALIGN(vc_boot_ghcb)
 	/* Remove Error Code */
 	addq    $8, %rsp
 
+	/* Pure iret required here - don't use INTERRUPT_RETURN */
 	iretq
 SYM_CODE_END(vc_boot_ghcb)
 #endif
@@ -521,11 +339,16 @@ SYM_CODE_END(vc_boot_ghcb)
 	__REFDATA
 	.balign	8
 SYM_DATA(initial_code,	.quad x86_64_start_kernel)
+SYM_DATA(initial_gs,	.quad INIT_PER_CPU_VAR(fixed_percpu_data))
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 SYM_DATA(initial_vc_handler,	.quad handle_vc_boot_ghcb)
 #endif
 
-SYM_DATA(trampoline_lock, .quad 0);
+/*
+ * The FRAME_SIZE gap is a convention which helps the in-kernel unwinder
+ * reliably detect the end of the stack.
+ */
+SYM_DATA(initial_stack, .quad init_thread_union + THREAD_SIZE - FRAME_SIZE)
 	__FINITDATA
 
 	__INIT
@@ -534,11 +357,9 @@ SYM_CODE_START(early_idt_handler_array)
 	.rept NUM_EXCEPTION_VECTORS
 	.if ((EXCEPTION_ERRCODE_MASK >> i) & 1) == 0
 		UNWIND_HINT_IRET_REGS
-		ENDBR
 		pushq $0	# Dummy error code, to make stack frame uniform
 	.else
 		UNWIND_HINT_IRET_REGS offset=8
-		ENDBR
 	.endif
 	pushq $i		# 72(%rsp) Vector number
 	jmp early_idt_handler_common
@@ -546,11 +367,11 @@ SYM_CODE_START(early_idt_handler_array)
 	i = i + 1
 	.fill early_idt_handler_array + i*EARLY_IDT_HANDLER_SIZE - ., 1, 0xcc
 	.endr
+	UNWIND_HINT_IRET_REGS offset=16
 SYM_CODE_END(early_idt_handler_array)
-	ANNOTATE_NOENDBR // early_idt_handler_array[NUM_EXCEPTION_VECTORS]
 
 SYM_CODE_START_LOCAL(early_idt_handler_common)
-	UNWIND_HINT_IRET_REGS offset=16
+	ANNOTATE_UNRET_END
 	/*
 	 * The stack is the hardware frame, an error code or zero, and the
 	 * vector number.
@@ -591,14 +412,13 @@ SYM_CODE_END(early_idt_handler_common)
  * early_idt_handler_array can't be used because it returns via the
  * paravirtualized INTERRUPT_RETURN and pv-ops don't work that early.
  *
- * XXX it does, fix this.
- *
  * This handler will end up in the .init.text section and not be
  * available to boot secondary CPUs.
  */
 SYM_CODE_START_NOALIGN(vc_no_ghcb)
 	UNWIND_HINT_IRET_REGS offset=8
-	ENDBR
+
+	ANNOTATE_UNRET_END
 
 	/* Build pt_regs */
 	PUSH_AND_CLEAR_REGS
@@ -754,7 +574,8 @@ SYM_DATA_END(level1_fixmap_pgt)
 	.data
 	.align 16
 
-SYM_DATA(smpboot_control,		.long 0)
+SYM_DATA(early_gdt_descr,		.word GDT_ENTRIES*8-1)
+SYM_DATA_LOCAL(early_gdt_descr_base,	.quad INIT_PER_CPU_VAR(gdt_page))
 
 	.align 16
 /* This must match the first entry in level2_kernel_pgt */

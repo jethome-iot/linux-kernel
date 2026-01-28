@@ -299,10 +299,7 @@ static void ixgbe_cache_ring_register(struct ixgbe_adapter *adapter)
 
 static int ixgbe_xdp_queues(struct ixgbe_adapter *adapter)
 {
-	int queues;
-
-	queues = min_t(int, IXGBE_MAX_XDP_QS, nr_cpu_ids);
-	return adapter->xdp_prog ? queues : 0;
+	return adapter->xdp_prog ? nr_cpu_ids : 0;
 }
 
 #define IXGBE_RSS_64Q_MASK	0x3F
@@ -874,7 +871,8 @@ static int ixgbe_alloc_q_vector(struct ixgbe_adapter *adapter,
 
 #endif
 	/* initialize NAPI */
-	netif_napi_add(adapter->netdev, &q_vector->napi, ixgbe_poll);
+	netif_napi_add(adapter->netdev, &q_vector->napi,
+		       ixgbe_poll, 64);
 
 	/* tie q_vector and adapter together */
 	adapter->q_vector[v_idx] = q_vector;
@@ -949,7 +947,6 @@ static int ixgbe_alloc_q_vector(struct ixgbe_adapter *adapter,
 		ring->count = adapter->tx_ring_count;
 		ring->queue_index = xdp_idx;
 		set_ring_xdp(ring);
-		spin_lock_init(&ring->tx_lock);
 
 		/* assign ring to adapter */
 		WRITE_ONCE(adapter->xdp_ring[xdp_idx], ring);

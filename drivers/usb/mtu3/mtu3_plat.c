@@ -13,7 +13,6 @@
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/pm_wakeirq.h>
-#include <linux/reset.h>
 
 #include "mtu3.h"
 #include "mtu3_dr.h"
@@ -190,31 +189,6 @@ static void ssusb_ip_sw_reset(struct ssusb_mtk *ssusb)
 	mtu3_setbits(ssusb->ippc_base, U3D_SSUSB_IP_PW_CTRL2, SSUSB_IP_DEV_PDN);
 }
 
-static void ssusb_u3_drd_check(struct ssusb_mtk *ssusb)
-{
-	struct otg_switch_mtk *otg_sx = &ssusb->otg_switch;
-	u32 dev_u3p_num;
-	u32 host_u3p_num;
-	u32 value;
-
-	/* u3 port0 is disabled */
-	if (ssusb->u3p_dis_msk & BIT(0)) {
-		otg_sx->is_u3_drd = false;
-		goto out;
-	}
-
-	value = mtu3_readl(ssusb->ippc_base, U3D_SSUSB_IP_DEV_CAP);
-	dev_u3p_num = SSUSB_IP_DEV_U3_PORT_NUM(value);
-
-	value = mtu3_readl(ssusb->ippc_base, U3D_SSUSB_IP_XHCI_CAP);
-	host_u3p_num = SSUSB_IP_XHCI_U3_PORT_NUM(value);
-
-	otg_sx->is_u3_drd = !!(dev_u3p_num && host_u3p_num);
-
-out:
-	dev_info(ssusb->dev, "usb3-drd: %d\n", otg_sx->is_u3_drd);
-}
-
 static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 {
 	struct device_node *node = pdev->dev.of_node;
@@ -234,8 +208,6 @@ static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 	clks[1].id = "ref_ck";
 	clks[2].id = "mcu_ck";
 	clks[3].id = "dma_ck";
-	clks[4].id = "xhci_ck";
-	clks[5].id = "frmcnt_ck";
 	ret = devm_clk_bulk_get_optional(dev, BULK_CLKS_CNT, clks);
 	if (ret)
 		return ret;
@@ -271,8 +243,6 @@ static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 	if (ssusb->dr_mode == USB_DR_MODE_UNKNOWN)
 		ssusb->dr_mode = USB_DR_MODE_OTG;
 
-	of_property_read_u32(node, "mediatek,u3p-dis-msk", &ssusb->u3p_dis_msk);
-
 	if (ssusb->dr_mode == USB_DR_MODE_PERIPHERAL)
 		goto out;
 
@@ -284,6 +254,8 @@ static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 	}
 
 	/* optional property, ignore the error if it does not exist */
+	of_property_read_u32(node, "mediatek,u3p-dis-msk",
+			     &ssusb->u3p_dis_msk);
 	of_property_read_u32(node, "mediatek,u2p-dis-msk",
 			     &ssusb->u2p_dis_msk);
 
@@ -297,6 +269,7 @@ static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 		goto out;
 
 	/* if dual-role mode is supported */
+	otg_sx->is_u3_drd = of_property_read_bool(node, "mediatek,usb3-drd");
 	otg_sx->manual_drd_enabled =
 		of_property_read_bool(node, "enable-manual-drd");
 	otg_sx->role_sw_used = of_property_read_bool(node, "usb-role-switch");
@@ -316,8 +289,9 @@ static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 	}
 
 out:
-	dev_info(dev, "dr_mode: %d, drd: %s\n", ssusb->dr_mode,
-		 otg_sx->manual_drd_enabled ? "manual" : "auto");
+	dev_info(dev, "dr_mode: %d, is_u3_dr: %d, drd: %s\n",
+		 ssusb->dr_mode, otg_sx->is_u3_drd,
+		otg_sx->manual_drd_enabled ? "manual" : "auto");
 	dev_info(dev, "u2p_dis_msk: %x, u3p_dis_msk: %x\n",
 		 ssusb->u2p_dis_msk, ssusb->u3p_dis_msk);
 
@@ -365,7 +339,7 @@ static int mtu3_probe(struct platform_device *pdev)
 		goto comm_init_err;
 
 	if (ssusb->wakeup_irq > 0) {
-		ret = dev_pm_set_dedicated_wake_irq_reverse(dev, ssusb->wakeup_irq);
+		ret = dev_pm_set_dedicated_wake_irq(dev, ssusb->wakeup_irq);
 		if (ret) {
 			dev_err(dev, "failed to set wakeup irq %d\n", ssusb->wakeup_irq);
 			goto comm_exit;
@@ -373,14 +347,7 @@ static int mtu3_probe(struct platform_device *pdev)
 		dev_info(dev, "wakeup irq %d\n", ssusb->wakeup_irq);
 	}
 
-	ret = device_reset_optional(dev);
-	if (ret) {
-		dev_err_probe(dev, ret, "failed to reset controller\n");
-		goto comm_exit;
-	}
-
 	ssusb_ip_sw_reset(ssusb);
-	ssusb_u3_drd_check(ssusb);
 
 	if (IS_ENABLED(CONFIG_USB_MTU3_HOST))
 		ssusb->dr_mode = USB_DR_MODE_HOST;
@@ -451,7 +418,7 @@ comm_init_err:
 	return ret;
 }
 
-static void mtu3_remove(struct platform_device *pdev)
+static int mtu3_remove(struct platform_device *pdev)
 {
 	struct ssusb_mtk *ssusb = platform_get_drvdata(pdev);
 
@@ -469,16 +436,8 @@ static void mtu3_remove(struct platform_device *pdev)
 		ssusb_gadget_exit(ssusb);
 		ssusb_host_exit(ssusb);
 		break;
-	case USB_DR_MODE_UNKNOWN:
-		/*
-		 * This cannot happen because with dr_mode ==
-		 * USB_DR_MODE_UNKNOWN, .probe() doesn't succeed and so
-		 * .remove() wouldn't be called at all. However (little
-		 * surprising) the compiler isn't smart enough to see that, so
-		 * we explicitly have this case item to not make the compiler
-		 * wail about an unhandled enumeration value.
-		 */
-		break;
+	default:
+		return -EINVAL;
 	}
 
 	ssusb_rscs_exit(ssusb);
@@ -486,6 +445,8 @@ static void mtu3_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
+
+	return 0;
 }
 
 static int resume_ip_and_ports(struct ssusb_mtk *ssusb, pm_message_t msg)
@@ -621,7 +582,7 @@ MODULE_DEVICE_TABLE(of, mtu3_of_match);
 
 static struct platform_driver mtu3_driver = {
 	.probe = mtu3_probe,
-	.remove_new = mtu3_remove,
+	.remove = mtu3_remove,
 	.driver = {
 		.name = MTU3_DRIVER_NAME,
 		.pm = DEV_PM_OPS,

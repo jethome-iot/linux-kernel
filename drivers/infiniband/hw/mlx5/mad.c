@@ -147,28 +147,6 @@ static void pma_cnt_assign(struct ib_pma_portcounters *pma_cnt,
 			     vl_15_dropped);
 }
 
-static int query_ib_ppcnt(struct mlx5_core_dev *dev, u8 port_num, void *out,
-			  size_t sz)
-{
-	u32 *in;
-	int err;
-
-	in  = kvzalloc(sz, GFP_KERNEL);
-	if (!in) {
-		err = -ENOMEM;
-		return err;
-	}
-
-	MLX5_SET(ppcnt_reg, in, local_port, port_num);
-
-	MLX5_SET(ppcnt_reg, in, grp, MLX5_INFINIBAND_PORT_COUNTERS_GROUP);
-	err = mlx5_core_access_reg(dev, in, sz, out,
-				   sz, MLX5_REG_PPCNT, 0, 0);
-
-	kvfree(in);
-	return err;
-}
-
 static int process_pma_cmd(struct mlx5_ib_dev *dev, u32 port_num,
 			   const struct ib_mad *in_mad, struct ib_mad *out_mad)
 {
@@ -230,7 +208,8 @@ static int process_pma_cmd(struct mlx5_ib_dev *dev, u32 port_num,
 			goto done;
 		}
 
-		err = query_ib_ppcnt(mdev, mdev_port_num, out_cnt, sz);
+		err = mlx5_core_query_ib_ppcnt(mdev, mdev_port_num,
+					       out_cnt, sz);
 		if (!err)
 			pma_cnt_assign(pma_cnt, out_cnt);
 	}
@@ -308,8 +287,8 @@ int mlx5_ib_process_mad(struct ib_device *ibdev, int mad_flags, u32 port_num,
 
 int mlx5_query_ext_port_caps(struct mlx5_ib_dev *dev, unsigned int port)
 {
-	struct ib_smp *in_mad;
-	struct ib_smp *out_mad;
+	struct ib_smp *in_mad  = NULL;
+	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
 	u16 packet_error;
 
@@ -318,7 +297,7 @@ int mlx5_query_ext_port_caps(struct mlx5_ib_dev *dev, unsigned int port)
 	if (!in_mad || !out_mad)
 		goto out;
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id = MLX5_ATTR_EXTENDED_PORT_INFO;
 	in_mad->attr_mod = cpu_to_be32(port);
 
@@ -338,14 +317,14 @@ out:
 static int mlx5_query_mad_ifc_smp_attr_node_info(struct ib_device *ibdev,
 						 struct ib_smp *out_mad)
 {
-	struct ib_smp *in_mad;
-	int err;
+	struct ib_smp *in_mad = NULL;
+	int err = -ENOMEM;
 
 	in_mad = kzalloc(sizeof(*in_mad), GFP_KERNEL);
 	if (!in_mad)
 		return -ENOMEM;
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id = IB_SMP_ATTR_NODE_INFO;
 
 	err = mlx5_MAD_IFC(to_mdev(ibdev), 1, 1, 1, NULL, NULL, in_mad,
@@ -358,8 +337,8 @@ static int mlx5_query_mad_ifc_smp_attr_node_info(struct ib_device *ibdev,
 int mlx5_query_mad_ifc_system_image_guid(struct ib_device *ibdev,
 					 __be64 *sys_image_guid)
 {
-	struct ib_smp *out_mad;
-	int err;
+	struct ib_smp *out_mad = NULL;
+	int err = -ENOMEM;
 
 	out_mad = kmalloc(sizeof(*out_mad), GFP_KERNEL);
 	if (!out_mad)
@@ -380,8 +359,8 @@ out:
 int mlx5_query_mad_ifc_max_pkeys(struct ib_device *ibdev,
 				 u16 *max_pkeys)
 {
-	struct ib_smp *out_mad;
-	int err;
+	struct ib_smp *out_mad = NULL;
+	int err = -ENOMEM;
 
 	out_mad = kmalloc(sizeof(*out_mad), GFP_KERNEL);
 	if (!out_mad)
@@ -402,8 +381,8 @@ out:
 int mlx5_query_mad_ifc_vendor_id(struct ib_device *ibdev,
 				 u32 *vendor_id)
 {
-	struct ib_smp *out_mad;
-	int err;
+	struct ib_smp *out_mad = NULL;
+	int err = -ENOMEM;
 
 	out_mad = kmalloc(sizeof(*out_mad), GFP_KERNEL);
 	if (!out_mad)
@@ -423,8 +402,8 @@ out:
 
 int mlx5_query_mad_ifc_node_desc(struct mlx5_ib_dev *dev, char *node_desc)
 {
-	struct ib_smp *in_mad;
-	struct ib_smp *out_mad;
+	struct ib_smp *in_mad  = NULL;
+	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
 
 	in_mad  = kzalloc(sizeof(*in_mad), GFP_KERNEL);
@@ -432,7 +411,7 @@ int mlx5_query_mad_ifc_node_desc(struct mlx5_ib_dev *dev, char *node_desc)
 	if (!in_mad || !out_mad)
 		goto out;
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id = IB_SMP_ATTR_NODE_DESC;
 
 	err = mlx5_MAD_IFC(dev, 1, 1, 1, NULL, NULL, in_mad, out_mad);
@@ -448,8 +427,8 @@ out:
 
 int mlx5_query_mad_ifc_node_guid(struct mlx5_ib_dev *dev, __be64 *node_guid)
 {
-	struct ib_smp *in_mad;
-	struct ib_smp *out_mad;
+	struct ib_smp *in_mad  = NULL;
+	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
 
 	in_mad  = kzalloc(sizeof(*in_mad), GFP_KERNEL);
@@ -457,7 +436,7 @@ int mlx5_query_mad_ifc_node_guid(struct mlx5_ib_dev *dev, __be64 *node_guid)
 	if (!in_mad || !out_mad)
 		goto out;
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id = IB_SMP_ATTR_NODE_INFO;
 
 	err = mlx5_MAD_IFC(dev, 1, 1, 1, NULL, NULL, in_mad, out_mad);
@@ -474,8 +453,8 @@ out:
 int mlx5_query_mad_ifc_pkey(struct ib_device *ibdev, u32 port, u16 index,
 			    u16 *pkey)
 {
-	struct ib_smp *in_mad;
-	struct ib_smp *out_mad;
+	struct ib_smp *in_mad  = NULL;
+	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
 
 	in_mad  = kzalloc(sizeof(*in_mad), GFP_KERNEL);
@@ -483,7 +462,7 @@ int mlx5_query_mad_ifc_pkey(struct ib_device *ibdev, u32 port, u16 index,
 	if (!in_mad || !out_mad)
 		goto out;
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id  = IB_SMP_ATTR_PKEY_TABLE;
 	in_mad->attr_mod = cpu_to_be32(index / 32);
 
@@ -503,8 +482,8 @@ out:
 int mlx5_query_mad_ifc_gids(struct ib_device *ibdev, u32 port, int index,
 			    union ib_gid *gid)
 {
-	struct ib_smp *in_mad;
-	struct ib_smp *out_mad;
+	struct ib_smp *in_mad  = NULL;
+	struct ib_smp *out_mad = NULL;
 	int err = -ENOMEM;
 
 	in_mad  = kzalloc(sizeof(*in_mad), GFP_KERNEL);
@@ -512,7 +491,7 @@ int mlx5_query_mad_ifc_gids(struct ib_device *ibdev, u32 port, int index,
 	if (!in_mad || !out_mad)
 		goto out;
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id  = IB_SMP_ATTR_PORT_INFO;
 	in_mad->attr_mod = cpu_to_be32(port);
 
@@ -523,7 +502,7 @@ int mlx5_query_mad_ifc_gids(struct ib_device *ibdev, u32 port, int index,
 
 	memcpy(gid->raw, out_mad->data + 8, 8);
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id  = IB_SMP_ATTR_GUID_INFO;
 	in_mad->attr_mod = cpu_to_be32(index / 8);
 
@@ -545,8 +524,8 @@ int mlx5_query_mad_ifc_port(struct ib_device *ibdev, u32 port,
 {
 	struct mlx5_ib_dev *dev = to_mdev(ibdev);
 	struct mlx5_core_dev *mdev = dev->mdev;
-	struct ib_smp *in_mad;
-	struct ib_smp *out_mad;
+	struct ib_smp *in_mad  = NULL;
+	struct ib_smp *out_mad = NULL;
 	int ext_active_speed;
 	int err = -ENOMEM;
 
@@ -557,7 +536,7 @@ int mlx5_query_mad_ifc_port(struct ib_device *ibdev, u32 port,
 
 	/* props being zeroed by the caller, avoid zeroing it here */
 
-	ib_init_query_mad(in_mad);
+	init_query_mad(in_mad);
 	in_mad->attr_id  = IB_SMP_ATTR_PORT_INFO;
 	in_mad->attr_mod = cpu_to_be32(port);
 
@@ -611,24 +590,6 @@ int mlx5_query_mad_ifc_port(struct ib_device *ibdev, u32 port,
 			    props->port_cap_flags2 & IB_PORT_LINK_SPEED_HDR_SUP)
 				props->active_speed = IB_SPEED_HDR;
 			break;
-		case 8:
-			if (props->port_cap_flags & IB_PORT_CAP_MASK2_SUP &&
-			    props->port_cap_flags2 & IB_PORT_LINK_SPEED_NDR_SUP)
-				props->active_speed = IB_SPEED_NDR;
-			break;
-		}
-	}
-
-	/* Check if extended speeds 2 (XDR/...) are supported */
-	if (props->port_cap_flags & IB_PORT_CAP_MASK2_SUP &&
-	    props->port_cap_flags2 & IB_PORT_EXTENDED_SPEEDS2_SUP) {
-		ext_active_speed = (out_mad->data[56] >> 4) & 0x6;
-
-		switch (ext_active_speed) {
-		case 2:
-			if (props->port_cap_flags2 & IB_PORT_LINK_SPEED_XDR_SUP)
-				props->active_speed = IB_SPEED_XDR;
-			break;
 		}
 	}
 
@@ -636,7 +597,7 @@ int mlx5_query_mad_ifc_port(struct ib_device *ibdev, u32 port,
 	if (props->active_speed == 4) {
 		if (dev->port_caps[port - 1].ext_port_cap &
 		    MLX_EXT_PORT_CAP_FLAG_EXTENDED_PORT_INFO) {
-			ib_init_query_mad(in_mad);
+			init_query_mad(in_mad);
 			in_mad->attr_id = MLX5_ATTR_EXTENDED_PORT_INFO;
 			in_mad->attr_mod = cpu_to_be32(port);
 

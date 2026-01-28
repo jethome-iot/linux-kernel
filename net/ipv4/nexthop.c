@@ -8,7 +8,6 @@
 #include <linux/nexthop.h>
 #include <linux/rtnetlink.h>
 #include <linux/slab.h>
-#include <linux/vmalloc.h>
 #include <net/arp.h>
 #include <net/ipv6_stubs.h>
 #include <net/lwtunnel.h>
@@ -1124,13 +1123,13 @@ static bool ipv6_good_nh(const struct fib6_nh *nh)
 	int state = NUD_REACHABLE;
 	struct neighbour *n;
 
-	rcu_read_lock();
+	rcu_read_lock_bh();
 
 	n = __ipv6_neigh_lookup_noref_stub(nh->fib_nh_dev, &nh->fib_nh_gw6);
 	if (n)
-		state = READ_ONCE(n->nud_state);
+		state = n->nud_state;
 
-	rcu_read_unlock();
+	rcu_read_unlock_bh();
 
 	return !!(state & NUD_VALID);
 }
@@ -1140,47 +1139,16 @@ static bool ipv4_good_nh(const struct fib_nh *nh)
 	int state = NUD_REACHABLE;
 	struct neighbour *n;
 
-	rcu_read_lock();
+	rcu_read_lock_bh();
 
 	n = __ipv4_neigh_lookup_noref(nh->fib_nh_dev,
 				      (__force u32)nh->fib_nh_gw4);
 	if (n)
-		state = READ_ONCE(n->nud_state);
+		state = n->nud_state;
 
-	rcu_read_unlock();
+	rcu_read_unlock_bh();
 
 	return !!(state & NUD_VALID);
-}
-
-static bool nexthop_is_good_nh(const struct nexthop *nh)
-{
-	struct nh_info *nhi = rcu_dereference(nh->nh_info);
-
-	switch (nhi->family) {
-	case AF_INET:
-		return ipv4_good_nh(&nhi->fib_nh);
-	case AF_INET6:
-		return ipv6_good_nh(&nhi->fib6_nh);
-	}
-
-	return false;
-}
-
-static struct nexthop *nexthop_select_path_fdb(struct nh_group *nhg, int hash)
-{
-	int i;
-
-	for (i = 0; i < nhg->num_nh; i++) {
-		struct nh_grp_entry *nhge = &nhg->nh_entries[i];
-
-		if (hash > atomic_read(&nhge->hthr.upper_bound))
-			continue;
-
-		return nhge->nh;
-	}
-
-	WARN_ON_ONCE(1);
-	return NULL;
 }
 
 static struct nexthop *nexthop_select_path_hthr(struct nh_group *nhg, int hash)
@@ -1188,28 +1156,36 @@ static struct nexthop *nexthop_select_path_hthr(struct nh_group *nhg, int hash)
 	struct nexthop *rc = NULL;
 	int i;
 
-	if (nhg->fdb_nh)
-		return nexthop_select_path_fdb(nhg, hash);
-
 	for (i = 0; i < nhg->num_nh; ++i) {
 		struct nh_grp_entry *nhge = &nhg->nh_entries[i];
-
-		/* nexthops always check if it is good and does
-		 * not rely on a sysctl for this behavior
-		 */
-		if (!nexthop_is_good_nh(nhge->nh))
-			continue;
-
-		if (!rc)
-			rc = nhge->nh;
+		struct nh_info *nhi;
 
 		if (hash > atomic_read(&nhge->hthr.upper_bound))
 			continue;
 
-		return nhge->nh;
+		nhi = rcu_dereference(nhge->nh->nh_info);
+		if (nhi->fdb_nh)
+			return nhge->nh;
+
+		/* nexthops always check if it is good and does
+		 * not rely on a sysctl for this behavior
+		 */
+		switch (nhi->family) {
+		case AF_INET:
+			if (ipv4_good_nh(&nhi->fib_nh))
+				return nhge->nh;
+			break;
+		case AF_INET6:
+			if (ipv6_good_nh(&nhi->fib6_nh))
+				return nhge->nh;
+			break;
+		}
+
+		if (!rc)
+			rc = nhge->nh;
 	}
 
-	return rc ? : nhg->nh_entries[0].nh;
+	return rc;
 }
 
 static struct nexthop *nexthop_select_path_res(struct nh_group *nhg, int hash)
@@ -1942,6 +1918,9 @@ static void nh_rt_cache_flush(struct net *net, struct nexthop *nh,
 	if (!replaced_nh->is_group)
 		return;
 
+	/* new dsts must use only the new nexthop group */
+	synchronize_net();
+
 	nhg = rtnl_dereference(replaced_nh->nh_grp);
 	for (i = 0; i < nhg->num_nh; i++) {
 		struct nh_grp_entry *nhge = &nhg->nh_entries[i];
@@ -2023,10 +2002,9 @@ static int replace_nexthop_grp(struct net *net, struct nexthop *old,
 
 	rcu_assign_pointer(old->nh_grp, newg);
 
-	/* Make sure concurrent readers are not using 'oldg' anymore. */
-	synchronize_net();
-
 	if (newg->resilient) {
+		/* Make sure concurrent readers are not using 'oldg' anymore. */
+		synchronize_net();
 		rcu_assign_pointer(oldg->res_table, tmp_table);
 		rcu_assign_pointer(oldg->spare->res_table, tmp_table);
 	}
@@ -3209,6 +3187,7 @@ static int rtm_dump_walk_nexthops(struct sk_buff *skb,
 			return err;
 	}
 
+	ctx->idx++;
 	return 0;
 }
 
@@ -3336,6 +3315,7 @@ static int nh_valid_dump_bucket_req(const struct nlmsghdr *nlh,
 struct rtm_dump_res_bucket_ctx {
 	struct rtm_dump_nh_ctx nh;
 	u16 bucket_index;
+	u32 done_nh_idx; /* 1 + the index of the last fully processed NH. */
 };
 
 static struct rtm_dump_res_bucket_ctx *
@@ -3364,6 +3344,9 @@ static int rtm_dump_nexthop_bucket_nh(struct sk_buff *skb,
 	u16 bucket_index;
 	int err;
 
+	if (dd->ctx->nh.idx < dd->ctx->done_nh_idx)
+		return 0;
+
 	nhg = rtnl_dereference(nh->nh_grp);
 	res_table = rtnl_dereference(nhg->res_table);
 	for (bucket_index = dd->ctx->bucket_index;
@@ -3390,6 +3373,7 @@ static int rtm_dump_nexthop_bucket_nh(struct sk_buff *skb,
 			return err;
 	}
 
+	dd->ctx->done_nh_idx = dd->ctx->nh.idx + 1;
 	dd->ctx->bucket_index = 0;
 
 	return 0;
@@ -3737,16 +3721,12 @@ out:
 }
 EXPORT_SYMBOL(nexthop_res_grp_activity_update);
 
-static void __net_exit nexthop_net_exit_batch(struct list_head *net_list)
+static void __net_exit nexthop_net_exit(struct net *net)
 {
-	struct net *net;
-
 	rtnl_lock();
-	list_for_each_entry(net, net_list, exit_list) {
-		flush_all_nexthops(net);
-		kfree(net->nexthop.devhash);
-	}
+	flush_all_nexthops(net);
 	rtnl_unlock();
+	kfree(net->nexthop.devhash);
 }
 
 static int __net_init nexthop_net_init(struct net *net)
@@ -3764,7 +3744,7 @@ static int __net_init nexthop_net_init(struct net *net)
 
 static struct pernet_operations nexthop_net_ops = {
 	.init = nexthop_net_init,
-	.exit_batch = nexthop_net_exit_batch,
+	.exit = nexthop_net_exit,
 };
 
 static int __init nexthop_init(void)

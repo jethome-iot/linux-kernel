@@ -5,7 +5,6 @@
 #define LINUX_MMC_CQHCI_H
 
 #include <linux/compiler.h>
-#include <linux/bitfield.h>
 #include <linux/bitops.h>
 #include <linux/spinlock_types.h>
 #include <linux/types.h>
@@ -24,8 +23,6 @@
 /* capabilities */
 #define CQHCI_CAP			0x04
 #define CQHCI_CAP_CS			0x10000000 /* Crypto Support */
-#define CQHCI_CAP_ITCFMUL		GENMASK(15, 12)
-#define CQHCI_ITCFMUL(x)		FIELD_GET(CQHCI_CAP_ITCFMUL, (x))
 
 /* configuration */
 #define CQHCI_CFG			0x08
@@ -93,6 +90,9 @@
 /* send status config 1 */
 #define CQHCI_SSC1			0x40
 #define CQHCI_SSC1_CBC_MASK		GENMASK(19, 16)
+#define CQHCI_SSC1_CIT_MASK		GENMASK(15, 0)
+#define CQHCI_SSC1_CBC(x)		(((x) & 0xF) << 16)
+#define CQHCI_SSC1_CIT(x)		((x) & 0xFFFF)
 
 /* send status config 2 */
 #define CQHCI_SSC2			0x44

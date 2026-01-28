@@ -6,7 +6,8 @@
 
   CONFIG_BUG - emit BUG traps.  Nothing happens without this.
   CONFIG_GENERIC_BUG - enable this code.
-  CONFIG_GENERIC_BUG_RELATIVE_POINTERS - use 32-bit relative pointers for bug_addr and file
+  CONFIG_GENERIC_BUG_RELATIVE_POINTERS - use 32-bit pointers relative to
+	the containing struct bug_entry for bug_addr and file.
   CONFIG_DEBUG_BUGVERBOSE - emit full file+line information for each BUG
 
   CONFIG_BUG and CONFIG_DEBUG_BUGVERBOSE are potentially user-settable
@@ -47,16 +48,17 @@
 #include <linux/sched.h>
 #include <linux/rculist.h>
 #include <linux/ftrace.h>
-#include <linux/context_tracking.h>
+
+#include <trace/hooks/bug.h>
 
 extern struct bug_entry __start___bug_table[], __stop___bug_table[];
 
 static inline unsigned long bug_addr(const struct bug_entry *bug)
 {
-#ifdef CONFIG_GENERIC_BUG_RELATIVE_POINTERS
-	return (unsigned long)&bug->bug_addr_disp + bug->bug_addr_disp;
-#else
+#ifndef CONFIG_GENERIC_BUG_RELATIVE_POINTERS
 	return bug->bug_addr;
+#else
+	return (unsigned long)bug + bug->bug_addr_disp;
 #endif
 }
 
@@ -131,10 +133,10 @@ void bug_get_file_line(struct bug_entry *bug, const char **file,
 		       unsigned int *line)
 {
 #ifdef CONFIG_DEBUG_BUGVERBOSE
-#ifdef CONFIG_GENERIC_BUG_RELATIVE_POINTERS
-	*file = (const char *)&bug->file_disp + bug->file_disp;
-#else
+#ifndef CONFIG_GENERIC_BUG_RELATIVE_POINTERS
 	*file = bug->file;
+#else
+	*file = (const char *)bug + bug->file_disp;
 #endif
 	*line = bug->line;
 #else
@@ -154,7 +156,7 @@ struct bug_entry *find_bug(unsigned long bugaddr)
 	return module_find_bug(bugaddr);
 }
 
-static enum bug_trap_type __report_bug(unsigned long bugaddr, struct pt_regs *regs)
+enum bug_trap_type report_bug(unsigned long bugaddr, struct pt_regs *regs)
 {
 	struct bug_entry *bug;
 	const char *file;
@@ -207,19 +209,9 @@ static enum bug_trap_type __report_bug(unsigned long bugaddr, struct pt_regs *re
 		pr_crit("Kernel BUG at %pB [verbose debug info unavailable]\n",
 			(void *)bugaddr);
 
+	trace_android_rvh_report_bug(file, line, bugaddr);
+
 	return BUG_TRAP_TYPE_BUG;
-}
-
-enum bug_trap_type report_bug(unsigned long bugaddr, struct pt_regs *regs)
-{
-	enum bug_trap_type ret;
-	bool rcu = false;
-
-	rcu = warn_rcu_enter();
-	ret = __report_bug(bugaddr, regs);
-	warn_rcu_exit(rcu);
-
-	return ret;
 }
 
 static void clear_once_table(struct bug_entry *start, struct bug_entry *end)

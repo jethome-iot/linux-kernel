@@ -13,7 +13,6 @@
 #include "xfs_btree.h"
 #include "xfs_btree_staging.h"
 #include "xfs_refcount_btree.h"
-#include "xfs_refcount.h"
 #include "xfs_alloc.h"
 #include "xfs_error.h"
 #include "xfs_trace.h"
@@ -21,8 +20,6 @@
 #include "xfs_bit.h"
 #include "xfs_rmap.h"
 #include "xfs_ag.h"
-
-static struct kmem_cache	*xfs_refcountbt_cur_cache;
 
 static struct xfs_btree_cur *
 xfs_refcountbt_dup_cursor(
@@ -67,14 +64,14 @@ xfs_refcountbt_alloc_block(
 	memset(&args, 0, sizeof(args));
 	args.tp = cur->bc_tp;
 	args.mp = cur->bc_mp;
-	args.pag = cur->bc_ag.pag;
+	args.type = XFS_ALLOCTYPE_NEAR_BNO;
+	args.fsbno = XFS_AGB_TO_FSB(cur->bc_mp, cur->bc_ag.pag->pag_agno,
+			xfs_refc_block(args.mp));
 	args.oinfo = XFS_RMAP_OINFO_REFC;
 	args.minlen = args.maxlen = args.prod = 1;
 	args.resv = XFS_AG_RESV_METADATA;
 
-	error = xfs_alloc_vextent_near_bno(&args,
-			XFS_AGB_TO_FSB(args.mp, args.pag->pag_agno,
-					xfs_refc_block(args.mp)));
+	error = xfs_alloc_vextent(&args);
 	if (error)
 		goto out_error;
 	trace_xfs_refcountbt_alloc_block(cur->bc_mp, cur->bc_ag.pag->pag_agno,
@@ -106,13 +103,18 @@ xfs_refcountbt_free_block(
 	struct xfs_buf		*agbp = cur->bc_ag.agbp;
 	struct xfs_agf		*agf = agbp->b_addr;
 	xfs_fsblock_t		fsbno = XFS_DADDR_TO_FSB(mp, xfs_buf_daddr(bp));
+	int			error;
 
 	trace_xfs_refcountbt_free_block(cur->bc_mp, cur->bc_ag.pag->pag_agno,
 			XFS_FSB_TO_AGBNO(cur->bc_mp, fsbno), 1);
 	be32_add_cpu(&agf->agf_refcount_blocks, -1);
 	xfs_alloc_log_agf(cur->bc_tp, agbp, XFS_AGF_REFCOUNT_BLOCKS);
-	return xfs_free_extent_later(cur->bc_tp, fsbno, 1,
-			&XFS_RMAP_OINFO_REFC, XFS_AG_RESV_METADATA, false);
+	error = xfs_free_extent(cur->bc_tp, fsbno, 1, &XFS_RMAP_OINFO_REFC,
+			XFS_AG_RESV_METADATA);
+	if (error)
+		return error;
+
+	return error;
 }
 
 STATIC int
@@ -156,12 +158,7 @@ xfs_refcountbt_init_rec_from_cur(
 	struct xfs_btree_cur	*cur,
 	union xfs_btree_rec	*rec)
 {
-	const struct xfs_refcount_irec *irec = &cur->bc_rec.rc;
-	uint32_t		start;
-
-	start = xfs_refcount_encode_startblock(irec->rc_startblock,
-			irec->rc_domain);
-	rec->refc.rc_startblock = cpu_to_be32(start);
+	rec->refc.rc_startblock = cpu_to_be32(cur->bc_rec.rc.rc_startblock);
 	rec->refc.rc_blockcount = cpu_to_be32(cur->bc_rec.rc.rc_blockcount);
 	rec->refc.rc_refcount = cpu_to_be32(cur->bc_rec.rc.rc_refcount);
 }
@@ -183,26 +180,20 @@ xfs_refcountbt_key_diff(
 	struct xfs_btree_cur		*cur,
 	const union xfs_btree_key	*key)
 {
+	struct xfs_refcount_irec	*rec = &cur->bc_rec.rc;
 	const struct xfs_refcount_key	*kp = &key->refc;
-	const struct xfs_refcount_irec	*irec = &cur->bc_rec.rc;
-	uint32_t			start;
 
-	start = xfs_refcount_encode_startblock(irec->rc_startblock,
-			irec->rc_domain);
-	return (int64_t)be32_to_cpu(kp->rc_startblock) - start;
+	return (int64_t)be32_to_cpu(kp->rc_startblock) - rec->rc_startblock;
 }
 
 STATIC int64_t
 xfs_refcountbt_diff_two_keys(
 	struct xfs_btree_cur		*cur,
 	const union xfs_btree_key	*k1,
-	const union xfs_btree_key	*k2,
-	const union xfs_btree_key	*mask)
+	const union xfs_btree_key	*k2)
 {
-	ASSERT(!mask || mask->refc.rc_startblock);
-
 	return (int64_t)be32_to_cpu(k1->refc.rc_startblock) -
-			be32_to_cpu(k2->refc.rc_startblock);
+			  be32_to_cpu(k2->refc.rc_startblock);
 }
 
 STATIC xfs_failaddr_t
@@ -225,19 +216,8 @@ xfs_refcountbt_verify(
 		return fa;
 
 	level = be16_to_cpu(block->bb_level);
-	if (pag && xfs_perag_initialised_agf(pag)) {
-		unsigned int	maxlevel = pag->pagf_refcount_level;
-
-#ifdef CONFIG_XFS_ONLINE_REPAIR
-		/*
-		 * Online repair could be rewriting the refcount btree, so
-		 * we'll validate against the larger of either tree while this
-		 * is going on.
-		 */
-		maxlevel = max_t(unsigned int, maxlevel,
-				pag->pagf_repair_refcount_level);
-#endif
-		if (level >= maxlevel)
+	if (pag && pag->pagf_init) {
+		if (level >= pag->pagf_refcount_level)
 			return __this_address;
 	} else if (level >= mp->m_refc_maxlevels)
 		return __this_address;
@@ -308,19 +288,6 @@ xfs_refcountbt_recs_inorder(
 		be32_to_cpu(r2->refc.rc_startblock);
 }
 
-STATIC enum xbtree_key_contig
-xfs_refcountbt_keys_contiguous(
-	struct xfs_btree_cur		*cur,
-	const union xfs_btree_key	*key1,
-	const union xfs_btree_key	*key2,
-	const union xfs_btree_key	*mask)
-{
-	ASSERT(!mask || mask->refc.rc_startblock);
-
-	return xbtree_key_contig(be32_to_cpu(key1->refc.rc_startblock),
-				 be32_to_cpu(key2->refc.rc_startblock));
-}
-
 static const struct xfs_btree_ops xfs_refcountbt_ops = {
 	.rec_len		= sizeof(struct xfs_refcount_rec),
 	.key_len		= sizeof(struct xfs_refcount_key),
@@ -340,7 +307,6 @@ static const struct xfs_btree_ops xfs_refcountbt_ops = {
 	.diff_two_keys		= xfs_refcountbt_diff_two_keys,
 	.keys_inorder		= xfs_refcountbt_keys_inorder,
 	.recs_inorder		= xfs_refcountbt_recs_inorder,
-	.keys_contiguous	= xfs_refcountbt_keys_contiguous,
 };
 
 /*
@@ -356,13 +322,19 @@ xfs_refcountbt_init_common(
 
 	ASSERT(pag->pag_agno < mp->m_sb.sb_agcount);
 
-	cur = xfs_btree_alloc_cursor(mp, tp, XFS_BTNUM_REFC,
-			mp->m_refc_maxlevels, xfs_refcountbt_cur_cache);
+	cur = kmem_cache_zalloc(xfs_btree_cur_zone, GFP_NOFS | __GFP_NOFAIL);
+	cur->bc_tp = tp;
+	cur->bc_mp = mp;
+	cur->bc_btnum = XFS_BTNUM_REFC;
+	cur->bc_blocklog = mp->m_sb.sb_blocklog;
 	cur->bc_statoff = XFS_STATS_CALC_INDEX(xs_refcbt_2);
 
 	cur->bc_flags |= XFS_BTREE_CRC_BLOCKS;
 
-	cur->bc_ag.pag = xfs_perag_hold(pag);
+	/* take a reference for the cursor */
+	atomic_inc(&pag->pag_ref);
+	cur->bc_ag.pag = pag;
+
 	cur->bc_ag.refc.nr_ops = 0;
 	cur->bc_ag.refc.shape_changes = 0;
 	cur->bc_ops = &xfs_refcountbt_ops;
@@ -424,18 +396,6 @@ xfs_refcountbt_commit_staged_btree(
 	xfs_btree_commit_afakeroot(cur, tp, agbp, &xfs_refcountbt_ops);
 }
 
-/* Calculate number of records in a refcount btree block. */
-static inline unsigned int
-xfs_refcountbt_block_maxrecs(
-	unsigned int		blocklen,
-	bool			leaf)
-{
-	if (leaf)
-		return blocklen / sizeof(struct xfs_refcount_rec);
-	return blocklen / (sizeof(struct xfs_refcount_key) +
-			   sizeof(xfs_refcount_ptr_t));
-}
-
 /*
  * Calculate the number of records in a refcount btree block.
  */
@@ -445,22 +405,11 @@ xfs_refcountbt_maxrecs(
 	bool			leaf)
 {
 	blocklen -= XFS_REFCOUNT_BLOCK_LEN;
-	return xfs_refcountbt_block_maxrecs(blocklen, leaf);
-}
 
-/* Compute the max possible height of the maximally sized refcount btree. */
-unsigned int
-xfs_refcountbt_maxlevels_ondisk(void)
-{
-	unsigned int		minrecs[2];
-	unsigned int		blocklen;
-
-	blocklen = XFS_MIN_CRC_BLOCKSIZE - XFS_BTREE_SBLOCK_CRC_LEN;
-
-	minrecs[0] = xfs_refcountbt_block_maxrecs(blocklen, true) / 2;
-	minrecs[1] = xfs_refcountbt_block_maxrecs(blocklen, false) / 2;
-
-	return xfs_btree_compute_maxlevels(minrecs, XFS_MAX_CRC_AG_BLOCKS);
+	if (leaf)
+		return blocklen / sizeof(struct xfs_refcount_rec);
+	return blocklen / (sizeof(struct xfs_refcount_key) +
+			   sizeof(xfs_refcount_ptr_t));
 }
 
 /* Compute the maximum height of a refcount btree. */
@@ -468,14 +417,8 @@ void
 xfs_refcountbt_compute_maxlevels(
 	struct xfs_mount		*mp)
 {
-	if (!xfs_has_reflink(mp)) {
-		mp->m_refc_maxlevels = 0;
-		return;
-	}
-
 	mp->m_refc_maxlevels = xfs_btree_compute_maxlevels(
 			mp->m_refc_mnr, mp->m_sb.sb_agblocks);
-	ASSERT(mp->m_refc_maxlevels <= xfs_refcountbt_maxlevels_ondisk());
 }
 
 /* Calculate the refcount btree size for some records. */
@@ -522,7 +465,7 @@ xfs_refcountbt_calc_reserves(
 	if (!xfs_has_reflink(mp))
 		return 0;
 
-	error = xfs_alloc_read_agf(pag, tp, 0, &agbp);
+	error = xfs_alloc_read_agf(mp, tp, pag->pag_agno, 0, &agbp);
 	if (error)
 		return error;
 
@@ -536,30 +479,12 @@ xfs_refcountbt_calc_reserves(
 	 * never be available for the kinds of things that would require btree
 	 * expansion.  We therefore can pretend the space isn't there.
 	 */
-	if (xfs_ag_contains_log(mp, pag->pag_agno))
+	if (mp->m_sb.sb_logstart &&
+	    XFS_FSB_TO_AGNO(mp, mp->m_sb.sb_logstart) == pag->pag_agno)
 		agblocks -= mp->m_sb.sb_logblocks;
 
 	*ask += xfs_refcountbt_max_size(mp, agblocks);
 	*used += tree_len;
 
 	return error;
-}
-
-int __init
-xfs_refcountbt_init_cur_cache(void)
-{
-	xfs_refcountbt_cur_cache = kmem_cache_create("xfs_refcbt_cur",
-			xfs_btree_cur_sizeof(xfs_refcountbt_maxlevels_ondisk()),
-			0, 0, NULL);
-
-	if (!xfs_refcountbt_cur_cache)
-		return -ENOMEM;
-	return 0;
-}
-
-void
-xfs_refcountbt_destroy_cur_cache(void)
-{
-	kmem_cache_destroy(xfs_refcountbt_cur_cache);
-	xfs_refcountbt_cur_cache = NULL;
 }

@@ -11,7 +11,6 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/machine.h>
 #include <linux/mfd/mp2629.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -171,7 +170,7 @@ fail_disable:
 	return ret;
 }
 
-static void mp2629_adc_remove(struct platform_device *pdev)
+static int mp2629_adc_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct mp2629_adc *info = iio_priv(indio_dev);
@@ -184,6 +183,8 @@ static void mp2629_adc_remove(struct platform_device *pdev)
 					 MP2629_ADC_CONTINUOUS, 0);
 	regmap_update_bits(info->regmap, MP2629_REG_ADC_CTRL,
 					 MP2629_ADC_START, 0);
+
+	return 0;
 }
 
 static const struct of_device_id mp2629_adc_of_match[] = {
@@ -198,7 +199,7 @@ static struct platform_driver mp2629_adc_driver = {
 		.of_match_table = mp2629_adc_of_match,
 	},
 	.probe		= mp2629_adc_probe,
-	.remove_new	= mp2629_adc_remove,
+	.remove		= mp2629_adc_remove,
 };
 module_platform_driver(mp2629_adc_driver);
 

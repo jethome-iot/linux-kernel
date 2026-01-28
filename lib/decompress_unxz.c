@@ -102,8 +102,6 @@
  */
 #ifdef STATIC
 #	define XZ_PREBOOT
-#else
-#include <linux/decompress/unxz.h>
 #endif
 #ifdef __KERNEL__
 #	include <linux/decompress/mm.h>
@@ -132,6 +130,9 @@
 #endif
 #ifdef CONFIG_ARM
 #	define XZ_DEC_ARM
+#endif
+#ifdef CONFIG_IA64
+#	define XZ_DEC_IA64
 #endif
 #ifdef CONFIG_SPARC
 #	define XZ_DEC_SPARC
@@ -166,8 +167,8 @@
  * memeq and memzero are not used much and any remotely sane implementation
  * is fast enough. memcpy/memmove speed matters in multi-call mode, but
  * the kernel image is decompressed in single-call mode, in which only
- * memmove speed can matter and only if there is a lot of incompressible data
- * (LZMA2 stores incompressible chunks in uncompressed form). Thus, the
+ * memmove speed can matter and only if there is a lot of uncompressible data
+ * (LZMA2 stores uncompressible chunks in uncompressed form). Thus, the
  * functions below should just be kept small; it's probably not worth
  * optimizing for speed.
  */

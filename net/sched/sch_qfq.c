@@ -130,7 +130,9 @@ struct qfq_aggregate;
 struct qfq_class {
 	struct Qdisc_class_common common;
 
-	struct gnet_stats_basic_sync bstats;
+	unsigned int filter_cnt;
+
+	struct gnet_stats_basic_packed bstats;
 	struct gnet_stats_queue qstats;
 	struct net_rate_estimator __rcu *rate_est;
 	struct Qdisc *qdisc;
@@ -213,7 +215,7 @@ static struct qfq_class *qfq_find_class(struct Qdisc *sch, u32 classid)
 	return container_of(clc, struct qfq_class, common);
 }
 
-static const struct netlink_range_validation lmax_range = {
+static struct netlink_range_validation lmax_range = {
 	.min = QFQ_MIN_LMAX,
 	.max = QFQ_MAX_LMAX,
 };
@@ -411,8 +413,8 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	int err;
 	int delta_w;
 
-	if (NL_REQ_ATTR_CHECK(extack, NULL, tca, TCA_OPTIONS)) {
-		NL_SET_ERR_MSG_MOD(extack, "missing options");
+	if (tca[TCA_OPTIONS] == NULL) {
+		pr_notice("qfq: no options\n");
 		return -EINVAL;
 	}
 
@@ -449,9 +451,8 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	delta_w = weight - (cl ? cl->agg->class_weight : 0);
 
 	if (q->wsum + delta_w > QFQ_MAX_WSUM) {
-		NL_SET_ERR_MSG_FMT_MOD(extack,
-				       "total weight out of range (%d + %u)\n",
-				       delta_w, q->wsum);
+		pr_notice("qfq: total weight out of range (%d + %u)\n",
+			  delta_w, q->wsum);
 		return -EINVAL;
 	}
 
@@ -460,7 +461,7 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 			err = gen_replace_estimator(&cl->bstats, NULL,
 						    &cl->rate_est,
 						    NULL,
-						    true,
+						    qdisc_root_sleeping_running(sch),
 						    tca[TCA_RATE]);
 			if (err)
 				return err;
@@ -474,7 +475,6 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	if (cl == NULL)
 		return -ENOBUFS;
 
-	gnet_stats_basic_sync_init(&cl->bstats);
 	cl->common.classid = classid;
 	cl->deficit = lmax;
 
@@ -487,7 +487,7 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		err = gen_new_estimator(&cl->bstats, NULL,
 					&cl->rate_est,
 					NULL,
-					true,
+					qdisc_root_sleeping_running(sch),
 					tca[TCA_RATE]);
 		if (err)
 			goto destroy_class;
@@ -543,10 +543,8 @@ static int qfq_delete_class(struct Qdisc *sch, unsigned long arg,
 	struct qfq_sched *q = qdisc_priv(sch);
 	struct qfq_class *cl = (struct qfq_class *)arg;
 
-	if (qdisc_class_in_use(&cl->common)) {
-		NL_SET_ERR_MSG_MOD(extack, "QFQ class in use");
+	if (cl->filter_cnt > 0)
 		return -EBUSY;
-	}
 
 	sch_tree_lock(sch);
 
@@ -580,8 +578,8 @@ static unsigned long qfq_bind_tcf(struct Qdisc *sch, unsigned long parent,
 {
 	struct qfq_class *cl = qfq_find_class(sch, classid);
 
-	if (cl)
-		qdisc_class_get(&cl->common);
+	if (cl != NULL)
+		cl->filter_cnt++;
 
 	return (unsigned long)cl;
 }
@@ -590,7 +588,7 @@ static void qfq_unbind_tcf(struct Qdisc *sch, unsigned long arg)
 {
 	struct qfq_class *cl = (struct qfq_class *)arg;
 
-	qdisc_class_put(&cl->common);
+	cl->filter_cnt--;
 }
 
 static int qfq_graft_class(struct Qdisc *sch, unsigned long arg,
@@ -651,7 +649,8 @@ static int qfq_dump_class_stats(struct Qdisc *sch, unsigned long arg,
 	xstats.weight = cl->agg->class_weight;
 	xstats.lmax = cl->agg->lmax;
 
-	if (gnet_stats_copy_basic(d, NULL, &cl->bstats, true) < 0 ||
+	if (gnet_stats_copy_basic(qdisc_root_sleeping_running(sch),
+				  d, NULL, &cl->bstats) < 0 ||
 	    gnet_stats_copy_rate_est(d, &cl->rate_est) < 0 ||
 	    qdisc_qstats_copy(d, cl->qdisc) < 0)
 		return -1;
@@ -670,8 +669,15 @@ static void qfq_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 
 	for (i = 0; i < q->clhash.hashsize; i++) {
 		hlist_for_each_entry(cl, &q->clhash.hash[i], common.hnode) {
-			if (!tc_qdisc_stats_dump(sch, (unsigned long)cl, arg))
+			if (arg->count < arg->skip) {
+				arg->count++;
+				continue;
+			}
+			if (arg->fn(sch, (unsigned long)cl, arg) < 0) {
+				arg->stop = 1;
 				return;
+			}
+			arg->count++;
 		}
 	}
 }
@@ -1003,7 +1009,7 @@ static inline struct sk_buff *qfq_peek_skb(struct qfq_aggregate *agg,
 	*cl = list_first_entry(&agg->active, struct qfq_class, alist);
 	skb = (*cl)->qdisc->ops->peek((*cl)->qdisc);
 	if (skb == NULL)
-		qdisc_warn_nonwc("qfq_dequeue", (*cl)->qdisc);
+		WARN_ONCE(1, "qfq_dequeue: non-workconserving leaf\n");
 	else
 		*len = qdisc_pkt_len(skb);
 
@@ -1250,7 +1256,8 @@ static int qfq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		return err;
 	}
 
-	_bstats_update(&cl->bstats, len, gso_segs);
+	cl->bstats.bytes += len;
+	cl->bstats.packets += gso_segs;
 	sch->qstats.backlog += len;
 	++sch->q.qlen;
 
@@ -1535,4 +1542,3 @@ static void __exit qfq_exit(void)
 module_init(qfq_init);
 module_exit(qfq_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Quick Fair Queueing Plus qdisc");

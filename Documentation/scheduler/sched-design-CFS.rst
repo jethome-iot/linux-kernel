@@ -94,7 +94,7 @@ other HZ detail.  Thus the CFS scheduler has no notion of "timeslices" in the
 way the previous scheduler had, and has no heuristics whatsoever.  There is
 only one central tunable (you have to switch on CONFIG_SCHED_DEBUG):
 
-   /sys/kernel/debug/sched/base_slice_ns
+   /proc/sys/kernel/sched_min_granularity_ns
 
 which can be used to tune the scheduler from "desktop" (i.e., low latencies) to
 "server" (i.e., good batching) workloads.  It defaults to a setting suitable
@@ -180,7 +180,7 @@ This is the (partial) list of the hooks:
    compat_yield sysctl is turned on; in that case, it places the scheduling
    entity at the right-most end of the red-black tree.
 
- - wakeup_preempt(...)
+ - check_preempt_curr(...)
 
    This function checks if a task that entered the runnable state should
    preempt the currently running task.
@@ -189,10 +189,10 @@ This is the (partial) list of the hooks:
 
    This function chooses the most appropriate task eligible to run next.
 
- - set_next_task(...)
+ - set_curr_task(...)
 
-   This function is called when a task changes its scheduling class, changes
-   its task group or is scheduled.
+   This function is called when a task changes its scheduling class or changes
+   its task group.
 
  - task_tick(...)
 

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) 2019 HiSilicon Limited. */
-#include <linux/align.h>
 #include <linux/dma-mapping.h>
-#include <linux/hisi_acc_qm.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include "qm.h"
 
 #define HISI_ACC_SGL_SGE_NR_MIN		1
 #define HISI_ACC_SGL_NR_MAX		256
@@ -65,16 +64,15 @@ struct hisi_acc_sgl_pool *hisi_acc_create_sgl_pool(struct device *dev,
 	if (!dev || !count || !sge_nr || sge_nr > HISI_ACC_SGL_SGE_NR_MAX)
 		return ERR_PTR(-EINVAL);
 
-	sgl_size = ALIGN(sizeof(struct acc_hw_sge) * sge_nr +
-			 sizeof(struct hisi_acc_hw_sgl),
-			 HISI_ACC_SGL_ALIGN_SIZE);
+	sgl_size = sizeof(struct acc_hw_sge) * sge_nr +
+		   sizeof(struct hisi_acc_hw_sgl);
 
 	/*
-	 * the pool may allocate a block of memory of size PAGE_SIZE * 2^MAX_PAGE_ORDER,
+	 * the pool may allocate a block of memory of size PAGE_SIZE * 2^(MAX_ORDER - 1),
 	 * block size may exceed 2^31 on ia64, so the max of block size is 2^31
 	 */
-	block_size = 1 << (PAGE_SHIFT + MAX_PAGE_ORDER < 32 ?
-			   PAGE_SHIFT + MAX_PAGE_ORDER : 31);
+	block_size = 1 << (PAGE_SHIFT + MAX_ORDER <= 32 ?
+			   PAGE_SHIFT + MAX_ORDER - 1 : 31);
 	sgl_num_per_block = block_size / sgl_size;
 	block_num = count / sgl_num_per_block;
 	remain_sgl = count % sgl_num_per_block;
@@ -121,10 +119,10 @@ struct hisi_acc_sgl_pool *hisi_acc_create_sgl_pool(struct device *dev,
 	return pool;
 
 err_free_mem:
-	for (j = 0; j < i; j++)
+	for (j = 0; j < i; j++) {
 		dma_free_coherent(dev, block_size, block[j].sgl,
 				  block[j].sgl_dma);
-
+	}
 	kfree_sensitive(pool);
 	return ERR_PTR(-ENOMEM);
 }
@@ -140,7 +138,7 @@ EXPORT_SYMBOL_GPL(hisi_acc_create_sgl_pool);
 void hisi_acc_free_sgl_pool(struct device *dev, struct hisi_acc_sgl_pool *pool)
 {
 	struct mem_block *block;
-	u32 i;
+	int i;
 
 	if (!dev || !pool)
 		return;
@@ -196,10 +194,9 @@ static void update_hw_sgl_sum_sge(struct hisi_acc_hw_sgl *hw_sgl, u16 sum)
 static void clear_hw_sgl_sge(struct hisi_acc_hw_sgl *hw_sgl)
 {
 	struct acc_hw_sge *hw_sge = hw_sgl->sge_entries;
-	u16 entry_sum = le16_to_cpu(hw_sgl->entry_sum_in_sgl);
 	int i;
 
-	for (i = 0; i < entry_sum; i++) {
+	for (i = 0; i < le16_to_cpu(hw_sgl->entry_sum_in_sgl); i++) {
 		hw_sge[i].page_ctrl = NULL;
 		hw_sge[i].buf = 0;
 		hw_sge[i].len = 0;
@@ -224,11 +221,10 @@ hisi_acc_sg_buf_map_to_hw_sgl(struct device *dev,
 			      u32 index, dma_addr_t *hw_sgl_dma)
 {
 	struct hisi_acc_hw_sgl *curr_hw_sgl;
-	unsigned int i, sg_n_mapped;
 	dma_addr_t curr_sgl_dma = 0;
 	struct acc_hw_sge *curr_hw_sge;
 	struct scatterlist *sg;
-	int sg_n;
+	int i, sg_n, sg_n_mapped;
 
 	if (!dev || !sgl || !pool || !hw_sgl_dma)
 		return ERR_PTR(-EINVAL);
@@ -251,6 +247,7 @@ hisi_acc_sg_buf_map_to_hw_sgl(struct device *dev,
 		dev_err(dev, "Get SGL error!\n");
 		dma_unmap_sg(dev, sgl, sg_n, DMA_BIDIRECTIONAL);
 		return ERR_PTR(-ENOMEM);
+
 	}
 	curr_hw_sgl->entry_length_in_sgl = cpu_to_le16(pool->sge_nr);
 	curr_hw_sge = curr_hw_sgl->sge_entries;

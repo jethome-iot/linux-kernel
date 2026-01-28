@@ -17,9 +17,9 @@
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fbdev_generic.h>
+#include <drm/drm_fb_helper.h>
 #include <drm/drm_gem_atomic_helper.h>
-#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_mipi_dbi.h>
 #include <drm/drm_modeset_helper.h>
@@ -137,19 +137,21 @@ out_exit:
 }
 
 static const struct drm_simple_display_pipe_funcs ili9341_pipe_funcs = {
-	DRM_MIPI_DBI_SIMPLE_DISPLAY_PIPE_FUNCS(yx240qv29_enable),
+	.enable = yx240qv29_enable,
+	.disable = mipi_dbi_pipe_disable,
+	.update = mipi_dbi_pipe_update,
 };
 
 static const struct drm_display_mode yx240qv29_mode = {
 	DRM_SIMPLE_MODE(240, 320, 37, 49),
 };
 
-DEFINE_DRM_GEM_DMA_FOPS(ili9341_fops);
+DEFINE_DRM_GEM_CMA_FOPS(ili9341_fops);
 
 static const struct drm_driver ili9341_driver = {
 	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	.fops			= &ili9341_fops,
-	DRM_GEM_DMA_DRIVER_OPS_VMAP,
+	DRM_GEM_CMA_DRIVER_OPS_VMAP,
 	.debugfs_init		= mipi_dbi_debugfs_init,
 	.name			= "ili9341",
 	.desc			= "Ilitek ILI9341",
@@ -160,12 +162,14 @@ static const struct drm_driver ili9341_driver = {
 
 static const struct of_device_id ili9341_of_match[] = {
 	{ .compatible = "adafruit,yx240qv29" },
+	{ .compatible = "hardkernel,hktft32" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, ili9341_of_match);
 
 static const struct spi_device_id ili9341_id[] = {
 	{ "yx240qv29", 0 },
+	{ "hktft32", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ili9341_id);
@@ -223,12 +227,14 @@ static int ili9341_probe(struct spi_device *spi)
 	return 0;
 }
 
-static void ili9341_remove(struct spi_device *spi)
+static int ili9341_remove(struct spi_device *spi)
 {
 	struct drm_device *drm = spi_get_drvdata(spi);
 
 	drm_dev_unplug(drm);
 	drm_atomic_helper_shutdown(drm);
+
+	return 0;
 }
 
 static void ili9341_shutdown(struct spi_device *spi)

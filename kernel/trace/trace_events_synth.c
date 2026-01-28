@@ -44,21 +44,11 @@ enum { ERRORS };
 
 static const char *err_text[] = { ERRORS };
 
-static DEFINE_MUTEX(lastcmd_mutex);
-static char *last_cmd;
+static char last_cmd[MAX_FILTER_STR_VAL];
 
 static int errpos(const char *str)
 {
-	int ret = 0;
-
-	mutex_lock(&lastcmd_mutex);
-	if (!str || !last_cmd)
-		goto out;
-
-	ret = err_pos(last_cmd, str);
- out:
-	mutex_unlock(&lastcmd_mutex);
-	return ret;
+	return err_pos(last_cmd, str);
 }
 
 static void last_cmd_set(const char *str)
@@ -66,22 +56,13 @@ static void last_cmd_set(const char *str)
 	if (!str)
 		return;
 
-	mutex_lock(&lastcmd_mutex);
-	kfree(last_cmd);
-	last_cmd = kstrdup(str, GFP_KERNEL);
-	mutex_unlock(&lastcmd_mutex);
+	strncpy(last_cmd, str, MAX_FILTER_STR_VAL - 1);
 }
 
-static void synth_err(u8 err_type, u16 err_pos)
+static void synth_err(u8 err_type, u8 err_pos)
 {
-	mutex_lock(&lastcmd_mutex);
-	if (!last_cmd)
-		goto out;
-
 	tracing_log_err(NULL, "synthetic_events", last_cmd, err_text,
 			err_type, err_pos);
- out:
-	mutex_unlock(&lastcmd_mutex);
 }
 
 static int create_synth_event(const char *raw_command);
@@ -127,7 +108,7 @@ static bool synth_event_match(const char *system, const char *event,
 
 struct synth_trace_event {
 	struct trace_entry	ent;
-	union trace_synth_field	fields[];
+	u64			fields[];
 };
 
 static int synth_event_define_fields(struct trace_event_call *call)
@@ -321,23 +302,23 @@ static const char *synth_field_fmt(char *type)
 
 static void print_synth_event_num_val(struct trace_seq *s,
 				      char *print_fmt, char *name,
-				      int size, union trace_synth_field *val, char *space)
+				      int size, u64 val, char *space)
 {
 	switch (size) {
 	case 1:
-		trace_seq_printf(s, print_fmt, name, val->as_u8, space);
+		trace_seq_printf(s, print_fmt, name, (u8)val, space);
 		break;
 
 	case 2:
-		trace_seq_printf(s, print_fmt, name, val->as_u16, space);
+		trace_seq_printf(s, print_fmt, name, (u16)val, space);
 		break;
 
 	case 4:
-		trace_seq_printf(s, print_fmt, name, val->as_u32, space);
+		trace_seq_printf(s, print_fmt, name, (u32)val, space);
 		break;
 
 	default:
-		trace_seq_printf(s, print_fmt, name, val->as_u64, space);
+		trace_seq_printf(s, print_fmt, name, val, space);
 		break;
 	}
 }
@@ -350,7 +331,7 @@ static enum print_line_t print_synth_event(struct trace_iterator *iter,
 	struct trace_seq *s = &iter->seq;
 	struct synth_trace_event *entry;
 	struct synth_event *se;
-	unsigned int i, j, n_u64;
+	unsigned int i, n_u64;
 	char print_fmt[32];
 	const char *fmt;
 
@@ -374,28 +355,43 @@ static enum print_line_t print_synth_event(struct trace_iterator *iter,
 		/* parameter values */
 		if (se->fields[i]->is_string) {
 			if (se->fields[i]->is_dynamic) {
-				union trace_synth_field *data = &entry->fields[n_u64];
+				u32 offset, data_offset;
+				char *str_field;
+
+				offset = (u32)entry->fields[n_u64];
+				data_offset = offset & 0xffff;
+
+				str_field = (char *)entry + data_offset;
 
 				trace_seq_printf(s, print_fmt, se->fields[i]->name,
 						 STR_VAR_LEN_MAX,
-						 (char *)entry + data->as_dynamic.offset,
+						 str_field,
 						 i == se->n_fields - 1 ? "" : " ");
 				n_u64++;
 			} else {
 				trace_seq_printf(s, print_fmt, se->fields[i]->name,
 						 STR_VAR_LEN_MAX,
-						 (char *)&entry->fields[n_u64].as_u64,
+						 (char *)&entry->fields[n_u64],
 						 i == se->n_fields - 1 ? "" : " ");
 				n_u64 += STR_VAR_LEN_MAX / sizeof(u64);
 			}
 		} else if (se->fields[i]->is_stack) {
-			union trace_synth_field *data = &entry->fields[n_u64];
-			unsigned long *p = (void *)entry + data->as_dynamic.offset;
+			u32 offset, data_offset, len;
+			unsigned long *p, *end;
+
+			offset = (u32)entry->fields[n_u64];
+			data_offset = offset & 0xffff;
+			len = offset >> 16;
+
+			p = (void *)entry + data_offset;
+			end = (void *)p + len - (sizeof(long) - 1);
 
 			trace_seq_printf(s, "%s=STACK:\n", se->fields[i]->name);
-			for (j = 1; j < data->as_dynamic.len / sizeof(long); j++)
-				trace_seq_printf(s, "=> %pS\n", (void *)p[j]);
+
+			for (; *p && p < end; p++)
+				trace_seq_printf(s, "=> %pS\n", (void *)*p);
 			n_u64++;
+
 		} else {
 			struct trace_print_flags __flags[] = {
 			    __def_gfpflag_names, {-1, NULL} };
@@ -404,13 +400,13 @@ static enum print_line_t print_synth_event(struct trace_iterator *iter,
 			print_synth_event_num_val(s, print_fmt,
 						  se->fields[i]->name,
 						  se->fields[i]->size,
-						  &entry->fields[n_u64],
+						  entry->fields[n_u64],
 						  space);
 
 			if (strcmp(se->fields[i]->type, "gfp_t") == 0) {
 				trace_seq_puts(s, " (");
 				trace_print_flags_seq(s, "|",
-						      entry->fields[n_u64].as_u64,
+						      entry->fields[n_u64],
 						      __flags);
 				trace_seq_putc(s, ')');
 			}
@@ -439,16 +435,22 @@ static unsigned int trace_string(struct synth_trace_event *entry,
 	int ret;
 
 	if (is_dynamic) {
-		union trace_synth_field *data = &entry->fields[*n_u64];
+		u32 data_offset;
 
-		data->as_dynamic.offset = struct_size(entry, fields, event->n_u64) + data_size;
-		data->as_dynamic.len = fetch_store_strlen((unsigned long)str_val);
+		data_offset = offsetof(typeof(*entry), fields);
+		data_offset += event->n_u64 * sizeof(u64);
+		data_offset += data_size;
 
-		ret = fetch_store_string((unsigned long)str_val, &entry->fields[*n_u64], entry);
+		len = kern_fetch_store_strlen((unsigned long)str_val);
+
+		data_offset |= len << 16;
+		*(u32 *)&entry->fields[*n_u64] = data_offset;
+
+		ret = kern_fetch_store_string((unsigned long)str_val, &entry->fields[*n_u64], entry);
 
 		(*n_u64)++;
 	} else {
-		str_field = (char *)&entry->fields[*n_u64].as_u64;
+		str_field = (char *)&entry->fields[*n_u64];
 
 #ifdef CONFIG_ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
 		if ((unsigned long)str_val < TASK_SIZE)
@@ -472,7 +474,6 @@ static unsigned int trace_stack(struct synth_trace_event *entry,
 				 unsigned int data_size,
 				 unsigned int *n_u64)
 {
-	union trace_synth_field *data = &entry->fields[*n_u64];
 	unsigned int len;
 	u32 data_offset;
 	void *data_loc;
@@ -485,6 +486,10 @@ static unsigned int trace_stack(struct synth_trace_event *entry,
 			break;
 	}
 
+	/* Include the zero'd element if it fits */
+	if (len < HIST_STACKTRACE_DEPTH)
+		len++;
+
 	len *= sizeof(long);
 
 	/* Find the dynamic section to copy the stack into. */
@@ -492,9 +497,8 @@ static unsigned int trace_stack(struct synth_trace_event *entry,
 	memcpy(data_loc, stack, len);
 
 	/* Fill in the field that holds the offset/len combo */
-
-	data->as_dynamic.offset = data_offset;
-	data->as_dynamic.len = len;
+	data_offset |= len << 16;
+	*(u32 *)&entry->fields[*n_u64] = data_offset;
 
 	(*n_u64)++;
 
@@ -527,13 +531,7 @@ static notrace void trace_event_raw_event_synth(void *__data,
 		val_idx = var_ref_idx[field_pos];
 		str_val = (char *)(long)var_ref_vals[val_idx];
 
-		if (event->dynamic_fields[i]->is_stack) {
-			/* reserve one extra element for size */
-			len = *((unsigned long *)str_val) + 1;
-			len *= sizeof(unsigned long);
-		} else {
-			len = fetch_store_strlen((unsigned long)str_val);
-		}
+		len = kern_fetch_store_strlen((unsigned long)str_val);
 
 		fields_size += len;
 	}
@@ -571,19 +569,19 @@ static notrace void trace_event_raw_event_synth(void *__data,
 
 			switch (field->size) {
 			case 1:
-				entry->fields[n_u64].as_u8 = (u8)val;
+				*(u8 *)&entry->fields[n_u64] = (u8)val;
 				break;
 
 			case 2:
-				entry->fields[n_u64].as_u16 = (u16)val;
+				*(u16 *)&entry->fields[n_u64] = (u16)val;
 				break;
 
 			case 4:
-				entry->fields[n_u64].as_u32 = (u32)val;
+				*(u32 *)&entry->fields[n_u64] = (u32)val;
 				break;
 
 			default:
-				entry->fields[n_u64].as_u64 = val;
+				entry->fields[n_u64] = val;
 				break;
 			}
 			n_u64++;
@@ -1137,7 +1135,7 @@ EXPORT_SYMBOL_GPL(synth_event_add_fields);
  * @cmd: A pointer to the dynevent_cmd struct representing the new event
  * @name: The name of the synthetic event
  * @mod: The module creating the event, NULL if not created from a module
- * @...: Variable number of arg (pairs), one pair for each field
+ * @args: Variable number of arg (pairs), one pair for each field
  *
  * NOTE: Users normally won't want to call this function directly, but
  * rather use the synth_event_gen_cmd_start() wrapper, which
@@ -1209,7 +1207,6 @@ EXPORT_SYMBOL_GPL(__synth_event_gen_cmd_start);
  * synth_event_gen_cmd_array_start - Start synthetic event command from an array
  * @cmd: A pointer to the dynevent_cmd struct representing the new event
  * @name: The name of the synthetic event
- * @mod: The module creating the event, NULL if not created from a module
  * @fields: An array of type/name field descriptions
  * @n_fields: The number of field descriptions contained in the fields array
  *
@@ -1328,8 +1325,9 @@ static int __create_synth_event(const char *name, const char *raw_fields)
 						  argv + consumed, &consumed,
 						  &field_version);
 			if (IS_ERR(field)) {
+				argv_free(argv);
 				ret = PTR_ERR(field);
-				goto err_free_arg;
+				goto err;
 			}
 
 			/*
@@ -1352,19 +1350,18 @@ static int __create_synth_event(const char *name, const char *raw_fields)
 			if (cmd_version > 1 && n_fields_this_loop >= 1) {
 				synth_err(SYNTH_ERR_INVALID_CMD, errpos(field_str));
 				ret = -EINVAL;
-				goto err_free_arg;
+				goto err;
 			}
 
 			if (n_fields == SYNTH_FIELDS_MAX) {
 				synth_err(SYNTH_ERR_TOO_MANY_FIELDS, 0);
 				ret = -EINVAL;
-				goto err_free_arg;
+				goto err;
 			}
 			fields[n_fields++] = field;
 
 			n_fields_this_loop++;
 		}
-		argv_free(argv);
 
 		if (consumed < argc) {
 			synth_err(SYNTH_ERR_INVALID_CMD, 0);
@@ -1372,6 +1369,7 @@ static int __create_synth_event(const char *name, const char *raw_fields)
 			goto err;
 		}
 
+		argv_free(argv);
 	}
 
 	if (n_fields == 0) {
@@ -1397,8 +1395,6 @@ static int __create_synth_event(const char *name, const char *raw_fields)
 	kfree(saved_fields);
 
 	return ret;
- err_free_arg:
-	argv_free(argv);
  err:
 	for (i = 0; i < n_fields; i++)
 		free_synth_field(fields[i]);
@@ -1695,7 +1691,7 @@ __synth_event_trace_end(struct synth_event_trace_state *trace_state)
  * synth_event_trace - Trace a synthetic event
  * @file: The trace_event_file representing the synthetic event
  * @n_vals: The number of values in vals
- * @...: Variable number of args containing the event values
+ * @args: Variable number of args containing the event values
  *
  * Trace a synthetic event using the values passed in the variable
  * argument list.
@@ -1770,19 +1766,19 @@ int synth_event_trace(struct trace_event_file *file, unsigned int n_vals, ...)
 
 			switch (field->size) {
 			case 1:
-				state.entry->fields[n_u64].as_u8 = (u8)val;
+				*(u8 *)&state.entry->fields[n_u64] = (u8)val;
 				break;
 
 			case 2:
-				state.entry->fields[n_u64].as_u16 = (u16)val;
+				*(u16 *)&state.entry->fields[n_u64] = (u16)val;
 				break;
 
 			case 4:
-				state.entry->fields[n_u64].as_u32 = (u32)val;
+				*(u32 *)&state.entry->fields[n_u64] = (u32)val;
 				break;
 
 			default:
-				state.entry->fields[n_u64].as_u64 = val;
+				state.entry->fields[n_u64] = val;
 				break;
 			}
 			n_u64++;
@@ -1863,19 +1859,19 @@ int synth_event_trace_array(struct trace_event_file *file, u64 *vals,
 
 			switch (field->size) {
 			case 1:
-				state.entry->fields[n_u64].as_u8 = (u8)val;
+				*(u8 *)&state.entry->fields[n_u64] = (u8)val;
 				break;
 
 			case 2:
-				state.entry->fields[n_u64].as_u16 = (u16)val;
+				*(u16 *)&state.entry->fields[n_u64] = (u16)val;
 				break;
 
 			case 4:
-				state.entry->fields[n_u64].as_u32 = (u32)val;
+				*(u32 *)&state.entry->fields[n_u64] = (u32)val;
 				break;
 
 			default:
-				state.entry->fields[n_u64].as_u64 = val;
+				state.entry->fields[n_u64] = val;
 				break;
 			}
 			n_u64++;
@@ -2010,19 +2006,19 @@ static int __synth_event_add_val(const char *field_name, u64 val,
 	} else {
 		switch (field->size) {
 		case 1:
-			trace_state->entry->fields[field->offset].as_u8 = (u8)val;
+			*(u8 *)&trace_state->entry->fields[field->offset] = (u8)val;
 			break;
 
 		case 2:
-			trace_state->entry->fields[field->offset].as_u16 = (u16)val;
+			*(u16 *)&trace_state->entry->fields[field->offset] = (u16)val;
 			break;
 
 		case 4:
-			trace_state->entry->fields[field->offset].as_u32 = (u32)val;
+			*(u32 *)&trace_state->entry->fields[field->offset] = (u32)val;
 			break;
 
 		default:
-			trace_state->entry->fields[field->offset].as_u64 = val;
+			trace_state->entry->fields[field->offset] = val;
 			break;
 		}
 	}
@@ -2068,7 +2064,7 @@ EXPORT_SYMBOL_GPL(synth_event_add_next_val);
 /**
  * synth_event_add_val - Add a named field's value to an open synth trace
  * @field_name: The name of the synthetic event field value to set
- * @val: The value to set the named field to
+ * @val: The value to set the next field to
  * @trace_state: A pointer to object tracking the piecewise trace state
  *
  * Set the value of the named field in an event that's been opened by

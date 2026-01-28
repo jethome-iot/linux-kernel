@@ -13,8 +13,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/platform_device.h>
-#include <linux/property.h>
+#include <linux/of_device.h>
 #include <linux/perf_event.h>
 #include <linux/slab.h>
 
@@ -104,7 +103,7 @@ struct mmdc_pmu {
 	struct device *dev;
 	struct perf_event *mmdc_events[MMDC_NUM_COUNTERS];
 	struct hlist_node node;
-	const struct fsl_mmdc_devtype_data *devtype_data;
+	struct fsl_mmdc_devtype_data *devtype_data;
 	struct clk *mmdc_ipg_clk;
 };
 
@@ -457,7 +456,7 @@ static int mmdc_pmu_init(struct mmdc_pmu *pmu_mmdc,
 	return pmu_mmdc->id;
 }
 
-static void imx_mmdc_remove(struct platform_device *pdev)
+static int imx_mmdc_remove(struct platform_device *pdev)
 {
 	struct mmdc_pmu *pmu_mmdc = platform_get_drvdata(pdev);
 
@@ -467,6 +466,7 @@ static void imx_mmdc_remove(struct platform_device *pdev)
 	iounmap(pmu_mmdc->mmdc_base);
 	clk_disable_unprepare(pmu_mmdc->mmdc_ipg_clk);
 	kfree(pmu_mmdc);
+	return 0;
 }
 
 static int imx_mmdc_perf_init(struct platform_device *pdev, void __iomem *mmdc_base,
@@ -475,6 +475,8 @@ static int imx_mmdc_perf_init(struct platform_device *pdev, void __iomem *mmdc_b
 	struct mmdc_pmu *pmu_mmdc;
 	char *name;
 	int ret;
+	const struct of_device_id *of_id =
+		of_match_device(imx_mmdc_dt_ids, &pdev->dev);
 
 	pmu_mmdc = kzalloc(sizeof(*pmu_mmdc), GFP_KERNEL);
 	if (!pmu_mmdc) {
@@ -506,7 +508,7 @@ static int imx_mmdc_perf_init(struct platform_device *pdev, void __iomem *mmdc_b
 	}
 
 	pmu_mmdc->mmdc_ipg_clk = mmdc_ipg_clk;
-	pmu_mmdc->devtype_data = device_get_match_data(&pdev->dev);
+	pmu_mmdc->devtype_data = (struct fsl_mmdc_devtype_data *)of_id->data;
 
 	hrtimer_init(&pmu_mmdc->hrtimer, CLOCK_MONOTONIC,
 			HRTIMER_MODE_REL);
@@ -595,7 +597,7 @@ static struct platform_driver imx_mmdc_driver = {
 		.of_match_table = imx_mmdc_dt_ids,
 	},
 	.probe		= imx_mmdc_probe,
-	.remove_new	= imx_mmdc_remove,
+	.remove		= imx_mmdc_remove,
 };
 
 static int __init imx_mmdc_init(void)

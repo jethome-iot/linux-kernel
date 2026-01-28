@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2019 Amlogic, Inc. All rights reserved.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		//target = <&some_node>;
+		target-path="/";
+		__overlay__ {
+			amlvecm {
+				enable_hdr10plus = <1>;/*1:enable :0:disable*/
+			};
+		};
+	};
+
+};

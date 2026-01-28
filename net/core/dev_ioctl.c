@@ -5,13 +5,10 @@
 #include <linux/etherdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/net_tstamp.h>
-#include <linux/phylib_stubs.h>
 #include <linux/wireless.h>
 #include <linux/if_bridge.h>
-#include <net/dsa_stubs.h>
+#include <net/dsa.h>
 #include <net/wext.h>
-
-#include "dev.h"
 
 /*
  *	Map an interface index to its name (SIOCGIFNAME)
@@ -24,6 +21,7 @@
  *	match.  --pb
  */
 
+#ifndef CONFIG_AMLOGIC_ZAPPER_NET_CUT
 static int dev_ifname(struct net *net, struct ifreq *ifr)
 {
 	ifr->ifr_name[IFNAMSIZ-1] = 0;
@@ -184,18 +182,22 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
 	return err;
 }
 
-static int net_hwtstamp_validate(const struct kernel_hwtstamp_config *cfg)
+static int net_hwtstamp_validate(struct ifreq *ifr)
 {
+	struct hwtstamp_config cfg;
 	enum hwtstamp_tx_types tx_type;
 	enum hwtstamp_rx_filters rx_filter;
 	int tx_type_valid = 0;
 	int rx_filter_valid = 0;
 
-	if (cfg->flags & ~HWTSTAMP_FLAG_MASK)
+	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
+		return -EFAULT;
+
+	if (cfg.flags) /* reserved for future extensions */
 		return -EINVAL;
 
-	tx_type = cfg->tx_type;
-	rx_filter = cfg->rx_filter;
+	tx_type = cfg.tx_type;
+	rx_filter = cfg.rx_filter;
 
 	switch (tx_type) {
 	case HWTSTAMP_TX_OFF:
@@ -243,227 +245,21 @@ static int dev_eth_ioctl(struct net_device *dev,
 			 struct ifreq *ifr, unsigned int cmd)
 {
 	const struct net_device_ops *ops = dev->netdev_ops;
-
-	if (!ops->ndo_eth_ioctl)
-		return -EOPNOTSUPP;
-
-	if (!netif_device_present(dev))
-		return -ENODEV;
-
-	return ops->ndo_eth_ioctl(dev, ifr, cmd);
-}
-
-/**
- * dev_get_hwtstamp_phylib() - Get hardware timestamping settings of NIC
- *	or of attached phylib PHY
- * @dev: Network device
- * @cfg: Timestamping configuration structure
- *
- * Helper for enforcing a common policy that phylib timestamping, if available,
- * should take precedence in front of hardware timestamping provided by the
- * netdev.
- *
- * Note: phy_mii_ioctl() only handles SIOCSHWTSTAMP (not SIOCGHWTSTAMP), and
- * there only exists a phydev->mii_ts->hwtstamp() method. So this will return
- * -EOPNOTSUPP for phylib for now, which is still more accurate than letting
- * the netdev handle the GET request.
- */
-static int dev_get_hwtstamp_phylib(struct net_device *dev,
-				   struct kernel_hwtstamp_config *cfg)
-{
-	if (phy_has_hwtstamp(dev->phydev))
-		return phy_hwtstamp_get(dev->phydev, cfg);
-
-	return dev->netdev_ops->ndo_hwtstamp_get(dev, cfg);
-}
-
-static int dev_get_hwtstamp(struct net_device *dev, struct ifreq *ifr)
-{
-	const struct net_device_ops *ops = dev->netdev_ops;
-	struct kernel_hwtstamp_config kernel_cfg = {};
-	struct hwtstamp_config cfg;
 	int err;
 
-	if (!ops->ndo_hwtstamp_get)
-		return dev_eth_ioctl(dev, ifr, SIOCGHWTSTAMP); /* legacy */
-
-	if (!netif_device_present(dev))
-		return -ENODEV;
-
-	kernel_cfg.ifr = ifr;
-	err = dev_get_hwtstamp_phylib(dev, &kernel_cfg);
-	if (err)
+	err = dsa_ndo_eth_ioctl(dev, ifr, cmd);
+	if (err == 0 || err != -EOPNOTSUPP)
 		return err;
 
-	/* If the request was resolved through an unconverted driver, omit
-	 * the copy_to_user(), since the implementation has already done that
-	 */
-	if (!kernel_cfg.copied_to_user) {
-		hwtstamp_config_from_kernel(&cfg, &kernel_cfg);
-
-		if (copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)))
-			return -EFAULT;
+	if (ops->ndo_eth_ioctl) {
+		if (netif_device_present(dev))
+			err = ops->ndo_eth_ioctl(dev, ifr, cmd);
+		else
+			err = -ENODEV;
 	}
 
-	return 0;
+	return err;
 }
-
-/**
- * dev_set_hwtstamp_phylib() - Change hardware timestamping of NIC
- *	or of attached phylib PHY
- * @dev: Network device
- * @cfg: Timestamping configuration structure
- * @extack: Netlink extended ack message structure, for error reporting
- *
- * Helper for enforcing a common policy that phylib timestamping, if available,
- * should take precedence in front of hardware timestamping provided by the
- * netdev. If the netdev driver needs to perform specific actions even for PHY
- * timestamping to work properly (a switch port must trap the timestamped
- * frames and not forward them), it must set IFF_SEE_ALL_HWTSTAMP_REQUESTS in
- * dev->priv_flags.
- */
-int dev_set_hwtstamp_phylib(struct net_device *dev,
-			    struct kernel_hwtstamp_config *cfg,
-			    struct netlink_ext_ack *extack)
-{
-	const struct net_device_ops *ops = dev->netdev_ops;
-	bool phy_ts = phy_has_hwtstamp(dev->phydev);
-	struct kernel_hwtstamp_config old_cfg = {};
-	bool changed = false;
-	int err;
-
-	cfg->source = phy_ts ? HWTSTAMP_SOURCE_PHYLIB : HWTSTAMP_SOURCE_NETDEV;
-
-	if (phy_ts && (dev->priv_flags & IFF_SEE_ALL_HWTSTAMP_REQUESTS)) {
-		err = ops->ndo_hwtstamp_get(dev, &old_cfg);
-		if (err)
-			return err;
-	}
-
-	if (!phy_ts || (dev->priv_flags & IFF_SEE_ALL_HWTSTAMP_REQUESTS)) {
-		err = ops->ndo_hwtstamp_set(dev, cfg, extack);
-		if (err) {
-			if (extack->_msg)
-				netdev_err(dev, "%s\n", extack->_msg);
-			return err;
-		}
-	}
-
-	if (phy_ts && (dev->priv_flags & IFF_SEE_ALL_HWTSTAMP_REQUESTS))
-		changed = kernel_hwtstamp_config_changed(&old_cfg, cfg);
-
-	if (phy_ts) {
-		err = phy_hwtstamp_set(dev->phydev, cfg, extack);
-		if (err) {
-			if (changed)
-				ops->ndo_hwtstamp_set(dev, &old_cfg, NULL);
-			return err;
-		}
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(dev_set_hwtstamp_phylib);
-
-static int dev_set_hwtstamp(struct net_device *dev, struct ifreq *ifr)
-{
-	const struct net_device_ops *ops = dev->netdev_ops;
-	struct kernel_hwtstamp_config kernel_cfg = {};
-	struct netlink_ext_ack extack = {};
-	struct hwtstamp_config cfg;
-	int err;
-
-	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
-		return -EFAULT;
-
-	hwtstamp_config_to_kernel(&kernel_cfg, &cfg);
-	kernel_cfg.ifr = ifr;
-
-	err = net_hwtstamp_validate(&kernel_cfg);
-	if (err)
-		return err;
-
-	err = dsa_conduit_hwtstamp_validate(dev, &kernel_cfg, &extack);
-	if (err) {
-		if (extack._msg)
-			netdev_err(dev, "%s\n", extack._msg);
-		return err;
-	}
-
-	if (!ops->ndo_hwtstamp_set)
-		return dev_eth_ioctl(dev, ifr, SIOCSHWTSTAMP); /* legacy */
-
-	if (!netif_device_present(dev))
-		return -ENODEV;
-
-	err = dev_set_hwtstamp_phylib(dev, &kernel_cfg, &extack);
-	if (err)
-		return err;
-
-	/* The driver may have modified the configuration, so copy the
-	 * updated version of it back to user space
-	 */
-	if (!kernel_cfg.copied_to_user) {
-		hwtstamp_config_from_kernel(&cfg, &kernel_cfg);
-
-		if (copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)))
-			return -EFAULT;
-	}
-
-	return 0;
-}
-
-static int generic_hwtstamp_ioctl_lower(struct net_device *dev, int cmd,
-					struct kernel_hwtstamp_config *kernel_cfg)
-{
-	struct ifreq ifrr;
-	int err;
-
-	strscpy_pad(ifrr.ifr_name, dev->name, IFNAMSIZ);
-	ifrr.ifr_ifru = kernel_cfg->ifr->ifr_ifru;
-
-	err = dev_eth_ioctl(dev, &ifrr, cmd);
-	if (err)
-		return err;
-
-	kernel_cfg->ifr->ifr_ifru = ifrr.ifr_ifru;
-	kernel_cfg->copied_to_user = true;
-
-	return 0;
-}
-
-int generic_hwtstamp_get_lower(struct net_device *dev,
-			       struct kernel_hwtstamp_config *kernel_cfg)
-{
-	const struct net_device_ops *ops = dev->netdev_ops;
-
-	if (!netif_device_present(dev))
-		return -ENODEV;
-
-	if (ops->ndo_hwtstamp_get)
-		return dev_get_hwtstamp_phylib(dev, kernel_cfg);
-
-	/* Legacy path: unconverted lower driver */
-	return generic_hwtstamp_ioctl_lower(dev, SIOCGHWTSTAMP, kernel_cfg);
-}
-EXPORT_SYMBOL(generic_hwtstamp_get_lower);
-
-int generic_hwtstamp_set_lower(struct net_device *dev,
-			       struct kernel_hwtstamp_config *kernel_cfg,
-			       struct netlink_ext_ack *extack)
-{
-	const struct net_device_ops *ops = dev->netdev_ops;
-
-	if (!netif_device_present(dev))
-		return -ENODEV;
-
-	if (ops->ndo_hwtstamp_set)
-		return dev_set_hwtstamp_phylib(dev, kernel_cfg, extack);
-
-	/* Legacy path: unconverted lower driver */
-	return generic_hwtstamp_ioctl_lower(dev, SIOCSHWTSTAMP, kernel_cfg);
-}
-EXPORT_SYMBOL(generic_hwtstamp_set_lower);
 
 static int dev_siocbond(struct net_device *dev,
 			struct ifreq *ifr, unsigned int cmd)
@@ -518,7 +314,6 @@ static int dev_ifsioc(struct net *net, struct ifreq *ifr, void __user *data,
 	int err;
 	struct net_device *dev = __dev_get_by_name(net, ifr->ifr_name);
 	const struct net_device_ops *ops;
-	netdevice_tracker dev_tracker;
 
 	if (!dev)
 		return -ENODEV;
@@ -545,7 +340,7 @@ static int dev_ifsioc(struct net *net, struct ifreq *ifr, void __user *data,
 		if (ifr->ifr_hwaddr.sa_family != dev->type)
 			return -EINVAL;
 		memcpy(dev->broadcast, ifr->ifr_hwaddr.sa_data,
-		       min(sizeof(ifr->ifr_hwaddr.sa_data_min),
+		       min(sizeof(ifr->ifr_hwaddr.sa_data),
 			   (size_t)dev->addr_len));
 		call_netdevice_notifiers(NETDEV_CHANGEADDR, dev);
 		return 0;
@@ -587,38 +382,43 @@ static int dev_ifsioc(struct net *net, struct ifreq *ifr, void __user *data,
 			return -ENODEV;
 		if (!netif_is_bridge_master(dev))
 			return -EOPNOTSUPP;
-		netdev_hold(dev, &dev_tracker, GFP_KERNEL);
+		dev_hold(dev);
 		rtnl_unlock();
 		err = br_ioctl_call(net, netdev_priv(dev), cmd, ifr, NULL);
-		netdev_put(dev, &dev_tracker);
+		dev_put(dev);
 		rtnl_lock();
 		return err;
 
-	case SIOCDEVPRIVATE ... SIOCDEVPRIVATE + 15:
-		return dev_siocdevprivate(dev, ifr, data, cmd);
-
 	case SIOCSHWTSTAMP:
-		return dev_set_hwtstamp(dev, ifr);
+		err = net_hwtstamp_validate(ifr);
+		if (err)
+			return err;
+		fallthrough;
 
-	case SIOCGHWTSTAMP:
-		return dev_get_hwtstamp(dev, ifr);
-
-	case SIOCGMIIPHY:
-	case SIOCGMIIREG:
-	case SIOCSMIIREG:
-		return dev_eth_ioctl(dev, ifr, cmd);
-
-	case SIOCBONDENSLAVE:
-	case SIOCBONDRELEASE:
-	case SIOCBONDSETHWADDR:
-	case SIOCBONDSLAVEINFOQUERY:
-	case SIOCBONDINFOQUERY:
-	case SIOCBONDCHANGEACTIVE:
-		return dev_siocbond(dev, ifr, cmd);
-
-	/* Unknown ioctl */
+	/*
+	 *	Unknown or private ioctl
+	 */
 	default:
-		err = -EINVAL;
+		if (cmd >= SIOCDEVPRIVATE &&
+		    cmd <= SIOCDEVPRIVATE + 15)
+			return dev_siocdevprivate(dev, ifr, data, cmd);
+
+		if (cmd == SIOCGMIIPHY ||
+		    cmd == SIOCGMIIREG ||
+		    cmd == SIOCSMIIREG ||
+		    cmd == SIOCSHWTSTAMP ||
+		    cmd == SIOCGHWTSTAMP) {
+			err = dev_eth_ioctl(dev, ifr, cmd);
+		} else if (cmd == SIOCBONDENSLAVE ||
+		    cmd == SIOCBONDRELEASE ||
+		    cmd == SIOCBONDSETHWADDR ||
+		    cmd == SIOCBONDSLAVEINFOQUERY ||
+		    cmd == SIOCBONDINFOQUERY ||
+		    cmd == SIOCBONDCHANGEACTIVE) {
+			err = dev_siocbond(dev, ifr, cmd);
+		} else
+			err = -EINVAL;
+
 	}
 	return err;
 }
@@ -649,6 +449,7 @@ void dev_load(struct net *net, const char *name)
 		request_module("%s", name);
 }
 EXPORT_SYMBOL(dev_load);
+#endif
 
 /*
  *	This function handles all "interface"-type I/O control requests. The actual
@@ -660,7 +461,6 @@ EXPORT_SYMBOL(dev_load);
  *	@net: the applicable net namespace
  *	@cmd: command to issue
  *	@ifr: pointer to a struct ifreq in user space
- *	@data: data exchanged with userspace
  *	@need_copyout: whether or not copy_to_user() should be called
  *
  *	Issue ioctl functions to devices. This is normally called by the
@@ -672,14 +472,17 @@ EXPORT_SYMBOL(dev_load);
 int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 	      void __user *data, bool *need_copyout)
 {
+#ifndef CONFIG_AMLOGIC_ZAPPER_NET_CUT
 	int ret;
+#endif
 	char *colon;
 
 	if (need_copyout)
 		*need_copyout = true;
+#ifndef CONFIG_AMLOGIC_ZAPPER_NET_CUT
 	if (cmd == SIOCGIFNAME)
 		return dev_ifname(net, ifr);
-
+#endif
 	ifr->ifr_name[IFNAMSIZ-1] = 0;
 
 	colon = strchr(ifr->ifr_name, ':');
@@ -691,6 +494,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 	 */
 
 	switch (cmd) {
+#ifndef CONFIG_AMLOGIC_ZAPPER_NET_CUT
 	case SIOCGIFHWADDR:
 		dev_load(net, ifr->ifr_name);
 		ret = dev_get_mac_address(&ifr->ifr_hwaddr, net, ifr->ifr_name);
@@ -720,7 +524,9 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 
 	case SIOCETHTOOL:
 		dev_load(net, ifr->ifr_name);
+		rtnl_lock();
 		ret = dev_ethtool(net, ifr, data);
+		rtnl_unlock();
 		if (colon)
 			*colon = ':';
 		return ret;
@@ -743,6 +549,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 		if (colon)
 			*colon = ':';
 		return ret;
+#endif
 
 	/*
 	 *	These ioctl calls:
@@ -780,6 +587,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 		fallthrough;
+#ifndef CONFIG_AMLOGIC_ZAPPER_NET_CUT
 	case SIOCBONDSLAVEINFOQUERY:
 	case SIOCBONDINFOQUERY:
 		dev_load(net, ifr->ifr_name);
@@ -789,6 +597,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 		if (need_copyout)
 			*need_copyout = false;
 		return ret;
+#endif
 
 	case SIOCGIFMEM:
 		/* Get the per device memory space. We can add this but
@@ -803,6 +612,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 	 *	Unknown or private ioctl.
 	 */
 	default:
+#ifndef CONFIG_AMLOGIC_ZAPPER_NET_CUT
 		if (cmd == SIOCWANDEV ||
 		    cmd == SIOCGHWTSTAMP ||
 		    (cmd >= SIOCDEVPRIVATE &&
@@ -813,6 +623,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 			rtnl_unlock();
 			return ret;
 		}
+#endif
 		return -ENOTTY;
 	}
 }

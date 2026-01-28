@@ -68,7 +68,7 @@ TRACE_DEFINE_ENUM(EX_BLOCK_AGE);
 
 #define F2FS_OP_FLAGS (REQ_RAHEAD | REQ_SYNC | REQ_META | REQ_PRIO |	\
 			REQ_PREFLUSH | REQ_FUA)
-#define F2FS_BIO_FLAG_MASK(t) (__force u32)((t) & F2FS_OP_FLAGS)
+#define F2FS_BIO_FLAG_MASK(t)	(t & F2FS_OP_FLAGS)
 
 #define show_bio_type(op,op_flags)	show_bio_op(op),		\
 						show_bio_op_flags(op_flags)
@@ -77,12 +77,12 @@ TRACE_DEFINE_ENUM(EX_BLOCK_AGE);
 
 #define show_bio_op_flags(flags)					\
 	__print_flags(F2FS_BIO_FLAG_MASK(flags), "|",			\
-		{ (__force u32)REQ_RAHEAD,	"R" },			\
-		{ (__force u32)REQ_SYNC,	"S" },			\
-		{ (__force u32)REQ_META,	"M" },			\
-		{ (__force u32)REQ_PRIO,	"P" },			\
-		{ (__force u32)REQ_PREFLUSH,	"PF" },			\
-		{ (__force u32)REQ_FUA,		"FUA" })
+		{ REQ_RAHEAD,		"R" },				\
+		{ REQ_SYNC,		"S" },				\
+		{ REQ_META,		"M" },				\
+		{ REQ_PRIO,		"P" },				\
+		{ REQ_PREFLUSH,		"PF" },				\
+		{ REQ_FUA,		"FUA" })
 
 #define show_data_type(type)						\
 	__print_symbolic(type,						\
@@ -161,19 +161,6 @@ TRACE_DEFINE_ENUM(EX_BLOCK_AGE);
 		{ EX_READ,	"Read" },				\
 		{ EX_BLOCK_AGE,	"Block Age" })
 
-#define show_inode_type(x) \
-	__print_symbolic(x, \
-		{ S_IFLNK,		"symbolic" }, \
-		{ S_IFREG,		"regular" }, \
-		{ S_IFDIR,		"directory" }, \
-		{ S_IFCHR,		"character" }, \
-		{ S_IFBLK,		"block" }, \
-		{ S_IFIFO,		"fifo" }, \
-		{ S_IFSOCK,		"sock" })
-
-#define S_ALL_PERM	(S_ISUID | S_ISGID | S_ISVTX |	\
-			S_IRWXU | S_IRWXG | S_IRWXO)
-
 struct f2fs_sb_info;
 struct f2fs_io_info;
 struct extent_info;
@@ -228,21 +215,17 @@ DECLARE_EVENT_CLASS(f2fs__inode_exit,
 	TP_STRUCT__entry(
 		__field(dev_t,	dev)
 		__field(ino_t,	ino)
-		__field(umode_t, mode)
 		__field(int,	ret)
 	),
 
 	TP_fast_assign(
 		__entry->dev	= inode->i_sb->s_dev;
 		__entry->ino	= inode->i_ino;
-		__entry->mode	= inode->i_mode;
 		__entry->ret	= ret;
 	),
 
-	TP_printk("dev = (%d,%d), ino = %lu, type: %s, mode = 0%o, ret = %d",
+	TP_printk("dev = (%d,%d), ino = %lu, ret = %d",
 		show_dev_ino(__entry),
-		show_inode_type(__entry->mode & S_IFMT),
-		__entry->mode & S_ALL_PERM,
 		__entry->ret)
 );
 
@@ -883,75 +866,6 @@ TRACE_EVENT(f2fs_lookup_end,
 		__entry->err)
 );
 
-TRACE_EVENT(f2fs_rename_start,
-
-	TP_PROTO(struct inode *old_dir, struct dentry *old_dentry,
-			struct inode *new_dir, struct dentry *new_dentry,
-			unsigned int flags),
-
-	TP_ARGS(old_dir, old_dentry, new_dir, new_dentry, flags),
-
-	TP_STRUCT__entry(
-		__field(dev_t,		dev)
-		__field(ino_t,		ino)
-		__string(old_name,	old_dentry->d_name.name)
-		__field(ino_t,		new_pino)
-		__string(new_name,	new_dentry->d_name.name)
-		__field(unsigned int,	flags)
-	),
-
-	TP_fast_assign(
-		__entry->dev		= old_dir->i_sb->s_dev;
-		__entry->ino		= old_dir->i_ino;
-		__assign_str(old_name, old_dentry->d_name.name);
-		__entry->new_pino	= new_dir->i_ino;
-		__assign_str(new_name, new_dentry->d_name.name);
-		__entry->flags		= flags;
-	),
-
-	TP_printk("dev = (%d,%d), old_dir = %lu, old_name: %s, "
-		"new_dir = %lu, new_name: %s, flags = %u",
-		show_dev_ino(__entry),
-		__get_str(old_name),
-		__entry->new_pino,
-		__get_str(new_name),
-		__entry->flags)
-);
-
-TRACE_EVENT(f2fs_rename_end,
-
-	TP_PROTO(struct dentry *old_dentry, struct dentry *new_dentry,
-			unsigned int flags, int ret),
-
-	TP_ARGS(old_dentry, new_dentry, flags, ret),
-
-	TP_STRUCT__entry(
-		__field(dev_t,		dev)
-		__field(ino_t,		ino)
-		__string(old_name,	old_dentry->d_name.name)
-		__string(new_name,	new_dentry->d_name.name)
-		__field(unsigned int,	flags)
-		__field(int,		ret)
-	),
-
-	TP_fast_assign(
-		__entry->dev		= old_dentry->d_sb->s_dev;
-		__entry->ino		= old_dentry->d_inode->i_ino;
-		__assign_str(old_name, old_dentry->d_name.name);
-		__assign_str(new_name, new_dentry->d_name.name);
-		__entry->flags		= flags;
-		__entry->ret		= ret;
-	),
-
-	TP_printk("dev = (%d,%d), ino = %lu, old_name: %s, "
-		"new_name: %s, flags = %u, ret = %d",
-		show_dev_ino(__entry),
-		__get_str(old_name),
-		__get_str(new_name),
-		__entry->flags,
-		__entry->ret)
-);
-
 TRACE_EVENT(f2fs_readdir,
 
 	TP_PROTO(struct inode *dir, loff_t start_pos, loff_t end_pos, int err),
@@ -1032,6 +946,7 @@ TRACE_EVENT(f2fs_direct_IO_enter,
 		__field(ino_t,	ino)
 		__field(loff_t,	ki_pos)
 		__field(int,	ki_flags)
+		__field(u16,	ki_hint)
 		__field(u16,	ki_ioprio)
 		__field(unsigned long,	len)
 		__field(int,	rw)
@@ -1042,16 +957,18 @@ TRACE_EVENT(f2fs_direct_IO_enter,
 		__entry->ino		= inode->i_ino;
 		__entry->ki_pos		= iocb->ki_pos;
 		__entry->ki_flags	= iocb->ki_flags;
+		__entry->ki_hint	= iocb->ki_hint;
 		__entry->ki_ioprio	= iocb->ki_ioprio;
 		__entry->len		= len;
 		__entry->rw		= rw;
 	),
 
-	TP_printk("dev = (%d,%d), ino = %lu pos = %lld len = %lu ki_flags = %x ki_ioprio = %x rw = %d",
+	TP_printk("dev = (%d,%d), ino = %lu pos = %lld len = %lu ki_flags = %x ki_hint = %x ki_ioprio = %x rw = %d",
 		show_dev_ino(__entry),
 		__entry->ki_pos,
 		__entry->len,
 		__entry->ki_flags,
+		__entry->ki_hint,
 		__entry->ki_ioprio,
 		__entry->rw)
 );
@@ -1130,8 +1047,8 @@ DECLARE_EVENT_CLASS(f2fs__submit_page_bio,
 		__field(pgoff_t, index)
 		__field(block_t, old_blkaddr)
 		__field(block_t, new_blkaddr)
-		__field(enum req_op, op)
-		__field(blk_opf_t, op_flags)
+		__field(int, op)
+		__field(int, op_flags)
 		__field(int, temp)
 		__field(int, type)
 	),
@@ -1186,8 +1103,8 @@ DECLARE_EVENT_CLASS(f2fs__bio,
 	TP_STRUCT__entry(
 		__field(dev_t,	dev)
 		__field(dev_t,	target)
-		__field(enum req_op,	op)
-		__field(blk_opf_t,	op_flags)
+		__field(int,	op)
+		__field(int,	op_flags)
 		__field(int,	type)
 		__field(sector_t,	sector)
 		__field(unsigned int,	size)
@@ -1250,15 +1167,17 @@ DEFINE_EVENT_CONDITION(f2fs__bio, f2fs_submit_write_bio,
 
 TRACE_EVENT(f2fs_write_begin,
 
-	TP_PROTO(struct inode *inode, loff_t pos, unsigned int len),
+	TP_PROTO(struct inode *inode, loff_t pos, unsigned int len,
+				unsigned int flags),
 
-	TP_ARGS(inode, pos, len),
+	TP_ARGS(inode, pos, len, flags),
 
 	TP_STRUCT__entry(
 		__field(dev_t,	dev)
 		__field(ino_t,	ino)
 		__field(loff_t,	pos)
 		__field(unsigned int, len)
+		__field(unsigned int, flags)
 	),
 
 	TP_fast_assign(
@@ -1266,12 +1185,14 @@ TRACE_EVENT(f2fs_write_begin,
 		__entry->ino	= inode->i_ino;
 		__entry->pos	= pos;
 		__entry->len	= len;
+		__entry->flags	= flags;
 	),
 
-	TP_printk("dev = (%d,%d), ino = %lu, pos = %llu, len = %u",
+	TP_printk("dev = (%d,%d), ino = %lu, pos = %llu, len = %u, flags = %u",
 		show_dev_ino(__entry),
 		(unsigned long long)__entry->pos,
-		__entry->len)
+		__entry->len,
+		__entry->flags)
 );
 
 TRACE_EVENT(f2fs_write_end,
@@ -1369,6 +1290,13 @@ DEFINE_EVENT(f2fs__page, f2fs_set_page_dirty,
 	TP_ARGS(page, type)
 );
 
+DEFINE_EVENT(f2fs__page, f2fs_vm_page_mkwrite,
+
+	TP_PROTO(struct page *page, int type),
+
+	TP_ARGS(page, type)
+);
+
 TRACE_EVENT(f2fs_replace_atomic_write_block,
 
 	TP_PROTO(struct inode *inode, struct inode *cow_inode, pgoff_t index,
@@ -1406,50 +1334,30 @@ TRACE_EVENT(f2fs_replace_atomic_write_block,
 		__entry->recovery)
 );
 
-DECLARE_EVENT_CLASS(f2fs_mmap,
+TRACE_EVENT(f2fs_filemap_fault,
 
-	TP_PROTO(struct inode *inode, pgoff_t index,
-			vm_flags_t flags, vm_fault_t ret),
+	TP_PROTO(struct inode *inode, pgoff_t index, unsigned long ret),
 
-	TP_ARGS(inode, index, flags, ret),
+	TP_ARGS(inode, index, ret),
 
 	TP_STRUCT__entry(
 		__field(dev_t,	dev)
 		__field(ino_t,	ino)
 		__field(pgoff_t, index)
-		__field(vm_flags_t, flags)
-		__field(vm_fault_t, ret)
+		__field(unsigned long, ret)
 	),
 
 	TP_fast_assign(
 		__entry->dev	= inode->i_sb->s_dev;
 		__entry->ino	= inode->i_ino;
 		__entry->index	= index;
-		__entry->flags	= flags;
 		__entry->ret	= ret;
 	),
 
-	TP_printk("dev = (%d,%d), ino = %lu, index = %lu, flags: %s, ret: %s",
+	TP_printk("dev = (%d,%d), ino = %lu, index = %lu, ret = %lx",
 		show_dev_ino(__entry),
 		(unsigned long)__entry->index,
-		__print_flags(__entry->flags, "|", FAULT_FLAG_TRACE),
-		__print_flags(__entry->ret, "|", VM_FAULT_RESULT_TRACE))
-);
-
-DEFINE_EVENT(f2fs_mmap, f2fs_filemap_fault,
-
-	TP_PROTO(struct inode *inode, pgoff_t index,
-			vm_flags_t flags, vm_fault_t ret),
-
-	TP_ARGS(inode, index, flags, ret)
-);
-
-DEFINE_EVENT(f2fs_mmap, f2fs_vm_page_mkwrite,
-
-	TP_PROTO(struct inode *inode, pgoff_t index,
-			vm_flags_t flags, vm_fault_t ret),
-
-	TP_ARGS(inode, index, flags, ret)
+		__entry->ret)
 );
 
 TRACE_EVENT(f2fs_writepages,
@@ -1611,7 +1519,7 @@ DEFINE_EVENT(f2fs_discard, f2fs_remove_discard,
 	TP_ARGS(dev, blkstart, blklen)
 );
 
-DECLARE_EVENT_CLASS(f2fs_reset_zone,
+TRACE_EVENT(f2fs_issue_reset_zone,
 
 	TP_PROTO(struct block_device *dev, block_t blkstart),
 
@@ -1627,23 +1535,9 @@ DECLARE_EVENT_CLASS(f2fs_reset_zone,
 		__entry->blkstart = blkstart;
 	),
 
-	TP_printk("dev = (%d,%d), zone at block = 0x%llx",
+	TP_printk("dev = (%d,%d), reset zone at block = 0x%llx",
 		show_dev(__entry->dev),
 		(unsigned long long)__entry->blkstart)
-);
-
-DEFINE_EVENT(f2fs_reset_zone, f2fs_queue_reset_zone,
-
-	TP_PROTO(struct block_device *dev, block_t blkstart),
-
-	TP_ARGS(dev, blkstart)
-);
-
-DEFINE_EVENT(f2fs_reset_zone, f2fs_issue_reset_zone,
-
-	TP_PROTO(struct block_device *dev, block_t blkstart),
-
-	TP_ARGS(dev, blkstart)
 );
 
 TRACE_EVENT(f2fs_issue_flush,
@@ -2092,7 +1986,6 @@ TRACE_EVENT(f2fs_iostat,
 		__field(unsigned long long,	fs_nrio)
 		__field(unsigned long long,	fs_mrio)
 		__field(unsigned long long,	fs_discard)
-		__field(unsigned long long,	fs_reset_zone)
 	),
 
 	TP_fast_assign(
@@ -2124,14 +2017,12 @@ TRACE_EVENT(f2fs_iostat,
 		__entry->fs_nrio	= iostat[FS_NODE_READ_IO];
 		__entry->fs_mrio	= iostat[FS_META_READ_IO];
 		__entry->fs_discard	= iostat[FS_DISCARD_IO];
-		__entry->fs_reset_zone	= iostat[FS_ZONE_RESET_IO];
 	),
 
 	TP_printk("dev = (%d,%d), "
 		"app [write=%llu (direct=%llu, buffered=%llu), mapped=%llu, "
 		"compr(buffered=%llu, mapped=%llu)], "
-		"fs [data=%llu, cdata=%llu, node=%llu, meta=%llu, discard=%llu, "
-		"reset_zone=%llu], "
+		"fs [data=%llu, cdata=%llu, node=%llu, meta=%llu, discard=%llu], "
 		"gc [data=%llu, node=%llu], "
 		"cp [data=%llu, node=%llu, meta=%llu], "
 		"app [read=%llu (direct=%llu, buffered=%llu), mapped=%llu], "
@@ -2142,7 +2033,6 @@ TRACE_EVENT(f2fs_iostat,
 		__entry->app_bio, __entry->app_mio, __entry->app_bcdio,
 		__entry->app_mcdio, __entry->fs_dio, __entry->fs_cdio,
 		__entry->fs_nio, __entry->fs_mio, __entry->fs_discard,
-		__entry->fs_reset_zone,
 		__entry->fs_gc_dio, __entry->fs_gc_nio, __entry->fs_cp_dio,
 		__entry->fs_cp_nio, __entry->fs_cp_mio,
 		__entry->app_rio, __entry->app_drio, __entry->app_brio,

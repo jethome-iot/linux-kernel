@@ -11,11 +11,10 @@
 #include <linux/init.h>
 #include <asm/machdep.h>
 #include <asm/MC68VZ328.h>
-#include "m68328.h"
 #include "screen.h"
 
 /***************************************************************************/
-/*                        Init Dragon Engine II hardware                   */
+/*                        Init Drangon Engine hardware                     */
 /***************************************************************************/
 
 static void dragen2_reset(void)

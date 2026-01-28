@@ -142,14 +142,12 @@ static ssize_t isci_show_id(struct device *dev, struct device_attribute *attr, c
 
 static DEVICE_ATTR(isci_id, S_IRUGO, isci_show_id, NULL);
 
-static struct attribute *isci_host_attrs[] = {
-	&dev_attr_isci_id.attr,
+static struct device_attribute *isci_host_attrs[] = {
+	&dev_attr_isci_id,
 	NULL
 };
 
-ATTRIBUTE_GROUPS(isci_host);
-
-static const struct scsi_host_template isci_sht = {
+static struct scsi_host_template isci_sht = {
 
 	.module				= THIS_MODULE,
 	.name				= DRV_NAME,
@@ -175,7 +173,7 @@ static const struct scsi_host_template isci_sht = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl			= sas_ioctl,
 #endif
-	.shost_groups			= isci_host_groups,
+	.shost_attrs			= isci_host_attrs,
 	.track_queue_depth		= 1,
 };
 
@@ -193,6 +191,7 @@ static struct sas_domain_function_template isci_transport_ops  = {
 	/* Task Management Functions. Must be called from process context. */
 	.lldd_abort_task	= isci_task_abort_task,
 	.lldd_abort_task_set	= isci_task_abort_task_set,
+	.lldd_clear_aca		= isci_task_clear_aca,
 	.lldd_clear_task_set	= isci_task_clear_task_set,
 	.lldd_I_T_nexus_reset	= isci_task_I_T_nexus_reset,
 	.lldd_lu_reset		= isci_task_lu_reset,
@@ -250,6 +249,7 @@ static int isci_register_sas_ha(struct isci_host *isci_host)
 		return -ENOMEM;
 
 	sas_ha->sas_ha_name = DRV_NAME;
+	sas_ha->lldd_module = THIS_MODULE;
 	sas_ha->sas_addr    = &isci_host->phys[0].sas_addr[0];
 
 	for (i = 0; i < SCI_MAX_PHYS; i++) {
@@ -263,7 +263,9 @@ static int isci_register_sas_ha(struct isci_host *isci_host)
 
 	sas_ha->strict_wide_ports = 1;
 
-	return sas_register_ha(sas_ha);
+	sas_register_ha(sas_ha);
+
+	return 0;
 }
 
 static void isci_unregister(struct isci_host *isci_host)
@@ -572,7 +574,7 @@ static struct isci_host *isci_host_alloc(struct pci_dev *pdev, int id)
 		goto err_shost;
 
 	SHOST_TO_SAS_HA(shost) = &ihost->sas_ha;
-	ihost->sas_ha.shost = shost;
+	ihost->sas_ha.core.shost = shost;
 	shost->transportt = isci_transport_template;
 
 	shost->max_id = ~0;
@@ -727,7 +729,7 @@ static int isci_resume(struct device *dev)
 		sas_prep_resume_ha(&ihost->sas_ha);
 
 		isci_host_init(ihost);
-		isci_host_start(ihost->sas_ha.shost);
+		isci_host_start(ihost->sas_ha.core.shost);
 		wait_for_start(ihost);
 
 		sas_resume_ha(&ihost->sas_ha);

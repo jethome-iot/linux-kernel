@@ -91,8 +91,7 @@ xfs_ag_resv_critical(
 	trace_xfs_ag_resv_critical(pag, type, avail);
 
 	/* Critically low if less than 10% or max btree height remains. */
-	return XFS_TEST_ERROR(avail < orig / 10 ||
-			      avail < pag->pag_mount->m_agbtree_maxlevels,
+	return XFS_TEST_ERROR(avail < orig / 10 || avail < XFS_BTREE_MAXLEVELS,
 			pag->pag_mount, XFS_ERRTAG_AG_RESV_CRITICAL);
 }
 
@@ -264,7 +263,7 @@ xfs_ag_resv_init(
 		if (error)
 			goto out;
 
-		error = xfs_finobt_calc_reserves(pag, tp, &ask, &used);
+		error = xfs_finobt_calc_reserves(mp, tp, pag, &ask, &used);
 		if (error)
 			goto out;
 
@@ -322,7 +321,7 @@ out:
 	 * address.
 	 */
 	if (has_resv) {
-		error2 = xfs_alloc_read_agf(pag, tp, 0, NULL);
+		error2 = xfs_alloc_pagf_init(mp, tp, pag->pag_agno, 0);
 		if (error2)
 			return error2;
 
@@ -411,8 +410,6 @@ xfs_ag_resv_free_extent(
 		fallthrough;
 	case XFS_AG_RESV_NONE:
 		xfs_trans_mod_sb(tp, XFS_TRANS_SB_FDBLOCKS, (int64_t)len);
-		fallthrough;
-	case XFS_AG_RESV_IGNORE:
 		return;
 	}
 

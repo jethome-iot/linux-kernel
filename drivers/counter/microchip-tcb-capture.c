@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
+/**
  * Copyright (C) 2020 Microchip
  *
  * Author: Kamel Bouhara <kamel.bouhara@bootlin.com>
@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <soc/at91/atmel_tcb.h>
@@ -23,6 +24,7 @@
 
 struct mchp_tc_data {
 	const struct atmel_tcb_config *tc_cfg;
+	struct counter_device counter;
 	struct regmap *regmap;
 	int qdec_mode;
 	int num_channels;
@@ -69,7 +71,7 @@ static int mchp_tc_count_function_read(struct counter_device *counter,
 				       struct counter_count *count,
 				       enum counter_function *function)
 {
-	struct mchp_tc_data *const priv = counter_priv(counter);
+	struct mchp_tc_data *const priv = counter->priv;
 
 	if (priv->qdec_mode)
 		*function = COUNTER_FUNCTION_QUADRATURE_X4;
@@ -83,7 +85,7 @@ static int mchp_tc_count_function_write(struct counter_device *counter,
 					struct counter_count *count,
 					enum counter_function function)
 {
-	struct mchp_tc_data *const priv = counter_priv(counter);
+	struct mchp_tc_data *const priv = counter->priv;
 	u32 bmr, cmr;
 
 	regmap_read(priv->regmap, ATMEL_TC_BMR, &bmr);
@@ -145,7 +147,7 @@ static int mchp_tc_count_signal_read(struct counter_device *counter,
 				     struct counter_signal *signal,
 				     enum counter_signal_level *lvl)
 {
-	struct mchp_tc_data *const priv = counter_priv(counter);
+	struct mchp_tc_data *const priv = counter->priv;
 	bool sigstatus;
 	u32 sr;
 
@@ -166,7 +168,7 @@ static int mchp_tc_count_action_read(struct counter_device *counter,
 				     struct counter_synapse *synapse,
 				     enum counter_synapse_action *action)
 {
-	struct mchp_tc_data *const priv = counter_priv(counter);
+	struct mchp_tc_data *const priv = counter->priv;
 	u32 cmr;
 
 	if (priv->qdec_mode) {
@@ -205,7 +207,7 @@ static int mchp_tc_count_action_write(struct counter_device *counter,
 				      struct counter_synapse *synapse,
 				      enum counter_synapse_action action)
 {
-	struct mchp_tc_data *const priv = counter_priv(counter);
+	struct mchp_tc_data *const priv = counter->priv;
 	u32 edge = ATMEL_TC_ETRGEDG_NONE;
 
 	/* QDEC mode is rising edge only; only TIOA handled in non-QDEC mode */
@@ -238,7 +240,7 @@ static int mchp_tc_count_action_write(struct counter_device *counter,
 static int mchp_tc_count_read(struct counter_device *counter,
 			      struct counter_count *count, u64 *val)
 {
-	struct mchp_tc_data *const priv = counter_priv(counter);
+	struct mchp_tc_data *const priv = counter->priv;
 	u32 cnt;
 
 	regmap_read(priv->regmap, ATMEL_TC_REG(priv->channel[0], CV), &cnt);
@@ -304,7 +306,6 @@ static int mchp_tc_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	const struct atmel_tcb_config *tcb_config;
 	const struct of_device_id *match;
-	struct counter_device *counter;
 	struct mchp_tc_data *priv;
 	char clk_name[7];
 	struct regmap *regmap;
@@ -312,10 +313,11 @@ static int mchp_tc_probe(struct platform_device *pdev)
 	int channel;
 	int ret, i;
 
-	counter = devm_counter_alloc(&pdev->dev, sizeof(*priv));
-	if (!counter)
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
 		return -ENOMEM;
-	priv = counter_priv(counter);
+
+	platform_set_drvdata(pdev, priv);
 
 	match = of_match_node(atmel_tc_of_match, np->parent);
 	tcb_config = match->data;
@@ -370,19 +372,16 @@ static int mchp_tc_probe(struct platform_device *pdev)
 
 	priv->tc_cfg = tcb_config;
 	priv->regmap = regmap;
-	counter->name = dev_name(&pdev->dev);
-	counter->parent = &pdev->dev;
-	counter->ops = &mchp_tc_ops;
-	counter->num_counts = ARRAY_SIZE(mchp_tc_counts);
-	counter->counts = mchp_tc_counts;
-	counter->num_signals = ARRAY_SIZE(mchp_tc_count_signals);
-	counter->signals = mchp_tc_count_signals;
+	priv->counter.name = dev_name(&pdev->dev);
+	priv->counter.parent = &pdev->dev;
+	priv->counter.ops = &mchp_tc_ops;
+	priv->counter.num_counts = ARRAY_SIZE(mchp_tc_counts);
+	priv->counter.counts = mchp_tc_counts;
+	priv->counter.num_signals = ARRAY_SIZE(mchp_tc_count_signals);
+	priv->counter.signals = mchp_tc_count_signals;
+	priv->counter.priv = priv;
 
-	ret = devm_counter_add(&pdev->dev, counter);
-	if (ret < 0)
-		return dev_err_probe(&pdev->dev, ret, "Failed to add counter\n");
-
-	return 0;
+	return devm_counter_register(&pdev->dev, &priv->counter);
 }
 
 static const struct of_device_id mchp_tc_dt_ids[] = {
@@ -403,4 +402,3 @@ module_platform_driver(mchp_tc_driver);
 MODULE_AUTHOR("Kamel Bouhara <kamel.bouhara@bootlin.com>");
 MODULE_DESCRIPTION("Microchip TCB Capture driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(COUNTER);

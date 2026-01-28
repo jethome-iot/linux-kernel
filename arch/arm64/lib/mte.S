@@ -18,7 +18,7 @@
  */
 	.macro	multitag_transfer_size, reg, tmp
 	mrs_s	\reg, SYS_GMID_EL1
-	ubfx	\reg, \reg, #GMID_EL1_BS_SHIFT, #GMID_EL1_BS_WIDTH
+	ubfx	\reg, \reg, #GMID_EL1_BS_SHIFT, #GMID_EL1_BS_SIZE
 	mov	\tmp, #4
 	lsl	\reg, \tmp, \reg
 	.endm
@@ -134,7 +134,7 @@ SYM_FUNC_END(mte_copy_tags_to_user)
 /*
  * Save the tags in a page
  *   x0 - page address
- *   x1 - tag storage, MTE_PAGE_TAG_STORAGE bytes
+ *   x1 - tag storage
  */
 SYM_FUNC_START(mte_save_page_tags)
 	multitag_transfer_size x7, x5
@@ -158,7 +158,7 @@ SYM_FUNC_END(mte_save_page_tags)
 /*
  * Restore the tags in a page
  *   x0 - page address
- *   x1 - tag storage, MTE_PAGE_TAG_STORAGE bytes
+ *   x1 - tag storage
  */
 SYM_FUNC_START(mte_restore_page_tags)
 	multitag_transfer_size x7, x5

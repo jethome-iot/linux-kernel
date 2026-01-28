@@ -3,10 +3,6 @@
 
 #include <linux/sched/cputime.h>
 
-#include <linux/bpf.h>
-#include <linux/btf.h>
-#include <linux/btf_ids.h>
-
 static DEFINE_SPINLOCK(cgroup_rstat_lock);
 static DEFINE_PER_CPU(raw_spinlock_t, cgroup_rstat_cpu_lock);
 
@@ -26,7 +22,7 @@ static struct cgroup_rstat_cpu *cgroup_rstat_cpu(struct cgroup *cgrp, int cpu)
  * rstat_cpu->updated_children list.  See the comment on top of
  * cgroup_rstat_cpu definition for details.
  */
-__bpf_kfunc void cgroup_rstat_updated(struct cgroup *cgrp, int cpu)
+void cgroup_rstat_updated(struct cgroup *cgrp, int cpu)
 {
 	raw_spinlock_t *cpu_lock = per_cpu_ptr(&cgroup_rstat_cpu_lock, cpu);
 	unsigned long flags;
@@ -39,7 +35,7 @@ __bpf_kfunc void cgroup_rstat_updated(struct cgroup *cgrp, int cpu)
 	 * instead of NULL, we can tell whether @cgrp is on the list by
 	 * testing the next pointer for NULL.
 	 */
-	if (data_race(cgroup_rstat_cpu(cgrp, cpu)->updated_next))
+	if (cgroup_rstat_cpu(cgrp, cpu)->updated_next)
 		return;
 
 	raw_spin_lock_irqsave(cpu_lock, flags);
@@ -74,156 +70,82 @@ __bpf_kfunc void cgroup_rstat_updated(struct cgroup *cgrp, int cpu)
 }
 
 /**
- * cgroup_rstat_push_children - push children cgroups into the given list
- * @head: current head of the list (= subtree root)
- * @child: first child of the root
+ * cgroup_rstat_cpu_pop_updated - iterate and dismantle rstat_cpu updated tree
+ * @pos: current position
+ * @root: root of the tree to traversal
  * @cpu: target cpu
- * Return: A new singly linked list of cgroups to be flush
  *
- * Iteratively traverse down the cgroup_rstat_cpu updated tree level by
- * level and push all the parents first before their next level children
- * into a singly linked list built from the tail backward like "pushing"
- * cgroups into a stack. The root is pushed by the caller.
- */
-static struct cgroup *cgroup_rstat_push_children(struct cgroup *head,
-						 struct cgroup *child, int cpu)
-{
-	struct cgroup *chead = child;	/* Head of child cgroup level */
-	struct cgroup *ghead = NULL;	/* Head of grandchild cgroup level */
-	struct cgroup *parent, *grandchild;
-	struct cgroup_rstat_cpu *crstatc;
-
-	child->rstat_flush_next = NULL;
-
-next_level:
-	while (chead) {
-		child = chead;
-		chead = child->rstat_flush_next;
-		parent = cgroup_parent(child);
-
-		/* updated_next is parent cgroup terminated */
-		while (child != parent) {
-			child->rstat_flush_next = head;
-			head = child;
-			crstatc = cgroup_rstat_cpu(child, cpu);
-			grandchild = crstatc->updated_children;
-			if (grandchild != child) {
-				/* Push the grand child to the next level */
-				crstatc->updated_children = child;
-				grandchild->rstat_flush_next = ghead;
-				ghead = grandchild;
-			}
-			child = crstatc->updated_next;
-			crstatc->updated_next = NULL;
-		}
-	}
-
-	if (ghead) {
-		chead = ghead;
-		ghead = NULL;
-		goto next_level;
-	}
-	return head;
-}
-
-/**
- * cgroup_rstat_updated_list - return a list of updated cgroups to be flushed
- * @root: root of the cgroup subtree to traverse
- * @cpu: target cpu
- * Return: A singly linked list of cgroups to be flushed
- *
- * Walks the updated rstat_cpu tree on @cpu from @root.  During traversal,
- * each returned cgroup is unlinked from the updated tree.
+ * Walks the updated rstat_cpu tree on @cpu from @root.  %NULL @pos starts
+ * the traversal and %NULL return indicates the end.  During traversal,
+ * each returned cgroup is unlinked from the tree.  Must be called with the
+ * matching cgroup_rstat_cpu_lock held.
  *
  * The only ordering guarantee is that, for a parent and a child pair
- * covered by a given traversal, the child is before its parent in
- * the list.
- *
- * Note that updated_children is self terminated and points to a list of
- * child cgroups if not empty. Whereas updated_next is like a sibling link
- * within the children list and terminated by the parent cgroup. An exception
- * here is the cgroup root whose updated_next can be self terminated.
+ * covered by a given traversal, if a child is visited, its parent is
+ * guaranteed to be visited afterwards.
  */
-static struct cgroup *cgroup_rstat_updated_list(struct cgroup *root, int cpu)
+static struct cgroup *cgroup_rstat_cpu_pop_updated(struct cgroup *pos,
+						   struct cgroup *root, int cpu)
 {
-	raw_spinlock_t *cpu_lock = per_cpu_ptr(&cgroup_rstat_cpu_lock, cpu);
-	struct cgroup_rstat_cpu *rstatc = cgroup_rstat_cpu(root, cpu);
-	struct cgroup *head = NULL, *parent, *child;
-	unsigned long flags;
+	struct cgroup_rstat_cpu *rstatc;
+
+	if (pos == root)
+		return NULL;
 
 	/*
-	 * The _irqsave() is needed because cgroup_rstat_lock is
-	 * spinlock_t which is a sleeping lock on PREEMPT_RT. Acquiring
-	 * this lock with the _irq() suffix only disables interrupts on
-	 * a non-PREEMPT_RT kernel. The raw_spinlock_t below disables
-	 * interrupts on both configurations. The _irqsave() ensures
-	 * that interrupts are always disabled and later restored.
+	 * We're gonna walk down to the first leaf and visit/remove it.  We
+	 * can pick whatever unvisited node as the starting point.
 	 */
-	raw_spin_lock_irqsave(cpu_lock, flags);
+	if (!pos)
+		pos = root;
+	else
+		pos = cgroup_parent(pos);
 
-	/* Return NULL if this subtree is not on-list */
-	if (!rstatc->updated_next)
-		goto unlock_ret;
-
-	/*
-	 * Unlink @root from its parent. As the updated_children list is
-	 * singly linked, we have to walk it to find the removal point.
-	 */
-	parent = cgroup_parent(root);
-	if (parent) {
-		struct cgroup_rstat_cpu *prstatc;
-		struct cgroup **nextp;
-
-		prstatc = cgroup_rstat_cpu(parent, cpu);
-		nextp = &prstatc->updated_children;
-		while (*nextp != root) {
-			struct cgroup_rstat_cpu *nrstatc;
-
-			nrstatc = cgroup_rstat_cpu(*nextp, cpu);
-			WARN_ON_ONCE(*nextp == parent);
-			nextp = &nrstatc->updated_next;
-		}
-		*nextp = rstatc->updated_next;
+	/* walk down to the first leaf */
+	while (true) {
+		rstatc = cgroup_rstat_cpu(pos, cpu);
+		if (rstatc->updated_children == pos)
+			break;
+		pos = rstatc->updated_children;
 	}
 
-	rstatc->updated_next = NULL;
+	/*
+	 * Unlink @pos from the tree.  As the updated_children list is
+	 * singly linked, we have to walk it to find the removal point.
+	 * However, due to the way we traverse, @pos will be the first
+	 * child in most cases. The only exception is @root.
+	 */
+	if (rstatc->updated_next) {
+		struct cgroup *parent = cgroup_parent(pos);
 
-	/* Push @root to the list first before pushing the children */
-	head = root;
-	root->rstat_flush_next = NULL;
-	child = rstatc->updated_children;
-	rstatc->updated_children = root;
-	if (child != root)
-		head = cgroup_rstat_push_children(head, child, cpu);
-unlock_ret:
-	raw_spin_unlock_irqrestore(cpu_lock, flags);
-	return head;
+		if (parent) {
+			struct cgroup_rstat_cpu *prstatc;
+			struct cgroup **nextp;
+
+			prstatc = cgroup_rstat_cpu(parent, cpu);
+			nextp = &prstatc->updated_children;
+			while (true) {
+				struct cgroup_rstat_cpu *nrstatc;
+
+				nrstatc = cgroup_rstat_cpu(*nextp, cpu);
+				if (*nextp == pos)
+					break;
+				WARN_ON_ONCE(*nextp == parent);
+				nextp = &nrstatc->updated_next;
+			}
+			*nextp = rstatc->updated_next;
+		}
+
+		rstatc->updated_next = NULL;
+		return pos;
+	}
+
+	/* only happens for @root */
+	return NULL;
 }
-
-/*
- * A hook for bpf stat collectors to attach to and flush their stats.
- * Together with providing bpf kfuncs for cgroup_rstat_updated() and
- * cgroup_rstat_flush(), this enables a complete workflow where bpf progs that
- * collect cgroup stats can integrate with rstat for efficient flushing.
- *
- * A static noinline declaration here could cause the compiler to optimize away
- * the function. A global noinline declaration will keep the definition, but may
- * optimize away the callsite. Therefore, __weak is needed to ensure that the
- * call is still emitted, by telling the compiler that we don't know what the
- * function might eventually be.
- */
-
-__bpf_hook_start();
-
-__weak noinline void bpf_rstat_flush(struct cgroup *cgrp,
-				     struct cgroup *parent, int cpu)
-{
-}
-
-__bpf_hook_end();
 
 /* see cgroup_rstat_flush() */
-static void cgroup_rstat_flush_locked(struct cgroup *cgrp)
+static void cgroup_rstat_flush_locked(struct cgroup *cgrp, bool may_sleep)
 	__releases(&cgroup_rstat_lock) __acquires(&cgroup_rstat_lock)
 {
 	int cpu;
@@ -231,13 +153,15 @@ static void cgroup_rstat_flush_locked(struct cgroup *cgrp)
 	lockdep_assert_held(&cgroup_rstat_lock);
 
 	for_each_possible_cpu(cpu) {
-		struct cgroup *pos = cgroup_rstat_updated_list(cgrp, cpu);
+		raw_spinlock_t *cpu_lock = per_cpu_ptr(&cgroup_rstat_cpu_lock,
+						       cpu);
+		struct cgroup *pos = NULL;
 
-		for (; pos; pos = pos->rstat_flush_next) {
+		raw_spin_lock(cpu_lock);
+		while ((pos = cgroup_rstat_cpu_pop_updated(pos, cgrp, cpu))) {
 			struct cgroup_subsys_state *css;
 
 			cgroup_base_stat_flush(pos, cpu);
-			bpf_rstat_flush(pos, cgroup_parent(pos), cpu);
 
 			rcu_read_lock();
 			list_for_each_entry_rcu(css, &pos->rstat_css_list,
@@ -245,9 +169,11 @@ static void cgroup_rstat_flush_locked(struct cgroup *cgrp)
 				css->ss->css_rstat_flush(css, cpu);
 			rcu_read_unlock();
 		}
+		raw_spin_unlock(cpu_lock);
 
-		/* play nice and yield if necessary */
-		if (need_resched() || spin_needbreak(&cgroup_rstat_lock)) {
+		/* if @may_sleep, play nice and yield if necessary */
+		if (may_sleep && (need_resched() ||
+				  spin_needbreak(&cgroup_rstat_lock))) {
 			spin_unlock_irq(&cgroup_rstat_lock);
 			if (!cond_resched())
 				cpu_relax();
@@ -269,13 +195,28 @@ static void cgroup_rstat_flush_locked(struct cgroup *cgrp)
  *
  * This function may block.
  */
-__bpf_kfunc void cgroup_rstat_flush(struct cgroup *cgrp)
+void cgroup_rstat_flush(struct cgroup *cgrp)
 {
 	might_sleep();
 
 	spin_lock_irq(&cgroup_rstat_lock);
-	cgroup_rstat_flush_locked(cgrp);
+	cgroup_rstat_flush_locked(cgrp, true);
 	spin_unlock_irq(&cgroup_rstat_lock);
+}
+
+/**
+ * cgroup_rstat_flush_irqsafe - irqsafe version of cgroup_rstat_flush()
+ * @cgrp: target cgroup
+ *
+ * This function can be called from any context.
+ */
+void cgroup_rstat_flush_irqsafe(struct cgroup *cgrp)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cgroup_rstat_lock, flags);
+	cgroup_rstat_flush_locked(cgrp, false);
+	spin_unlock_irqrestore(&cgroup_rstat_lock, flags);
 }
 
 /**
@@ -292,7 +233,7 @@ void cgroup_rstat_flush_hold(struct cgroup *cgrp)
 {
 	might_sleep();
 	spin_lock_irq(&cgroup_rstat_lock);
-	cgroup_rstat_flush_locked(cgrp);
+	cgroup_rstat_flush_locked(cgrp, true);
 }
 
 /**
@@ -363,9 +304,6 @@ static void cgroup_base_stat_add(struct cgroup_base_stat *dst_bstat,
 	dst_bstat->cputime.utime += src_bstat->cputime.utime;
 	dst_bstat->cputime.stime += src_bstat->cputime.stime;
 	dst_bstat->cputime.sum_exec_runtime += src_bstat->cputime.sum_exec_runtime;
-#ifdef CONFIG_SCHED_CORE
-	dst_bstat->forceidle_sum += src_bstat->forceidle_sum;
-#endif
 }
 
 static void cgroup_base_stat_sub(struct cgroup_base_stat *dst_bstat,
@@ -374,17 +312,13 @@ static void cgroup_base_stat_sub(struct cgroup_base_stat *dst_bstat,
 	dst_bstat->cputime.utime -= src_bstat->cputime.utime;
 	dst_bstat->cputime.stime -= src_bstat->cputime.stime;
 	dst_bstat->cputime.sum_exec_runtime -= src_bstat->cputime.sum_exec_runtime;
-#ifdef CONFIG_SCHED_CORE
-	dst_bstat->forceidle_sum -= src_bstat->forceidle_sum;
-#endif
 }
 
 static void cgroup_base_stat_flush(struct cgroup *cgrp, int cpu)
 {
 	struct cgroup_rstat_cpu *rstatc = cgroup_rstat_cpu(cgrp, cpu);
 	struct cgroup *parent = cgroup_parent(cgrp);
-	struct cgroup_rstat_cpu *prstatc;
-	struct cgroup_base_stat delta;
+	struct cgroup_base_stat cur, delta;
 	unsigned seq;
 
 	/* Root-level stats are sourced from system-wide CPU stats */
@@ -394,27 +328,21 @@ static void cgroup_base_stat_flush(struct cgroup *cgrp, int cpu)
 	/* fetch the current per-cpu values */
 	do {
 		seq = __u64_stats_fetch_begin(&rstatc->bsync);
-		delta = rstatc->bstat;
+		cur.cputime = rstatc->bstat.cputime;
 	} while (__u64_stats_fetch_retry(&rstatc->bsync, seq));
 
-	/* propagate per-cpu delta to cgroup and per-cpu global statistics */
+	/* propagate percpu delta to global */
+	delta = cur;
 	cgroup_base_stat_sub(&delta, &rstatc->last_bstat);
 	cgroup_base_stat_add(&cgrp->bstat, &delta);
 	cgroup_base_stat_add(&rstatc->last_bstat, &delta);
-	cgroup_base_stat_add(&rstatc->subtree_bstat, &delta);
 
-	/* propagate cgroup and per-cpu global delta to parent (unless that's root) */
+	/* propagate global delta to parent (unless that's root) */
 	if (cgroup_parent(parent)) {
 		delta = cgrp->bstat;
 		cgroup_base_stat_sub(&delta, &cgrp->last_bstat);
 		cgroup_base_stat_add(&parent->bstat, &delta);
 		cgroup_base_stat_add(&cgrp->last_bstat, &delta);
-
-		delta = rstatc->subtree_bstat;
-		prstatc = cgroup_rstat_cpu(parent, cpu);
-		cgroup_base_stat_sub(&delta, &rstatc->last_subtree_bstat);
-		cgroup_base_stat_add(&prstatc->subtree_bstat, &delta);
-		cgroup_base_stat_add(&rstatc->last_subtree_bstat, &delta);
 	}
 }
 
@@ -465,11 +393,6 @@ void __cgroup_account_cputime_field(struct cgroup *cgrp,
 	case CPUTIME_SOFTIRQ:
 		rstatc->bstat.cputime.stime += delta_exec;
 		break;
-#ifdef CONFIG_SCHED_CORE
-	case CPUTIME_FORCEIDLE:
-		rstatc->bstat.forceidle_sum += delta_exec;
-		break;
-#endif
 	default:
 		break;
 	}
@@ -483,12 +406,13 @@ void __cgroup_account_cputime_field(struct cgroup *cgrp,
  * with how it is done by __cgroup_account_cputime_field for each bit of
  * cpu time attributed to a cgroup.
  */
-static void root_cgroup_cputime(struct cgroup_base_stat *bstat)
+static void root_cgroup_cputime(struct task_cputime *cputime)
 {
-	struct task_cputime *cputime = &bstat->cputime;
 	int i;
 
-	memset(bstat, 0, sizeof(*bstat));
+	cputime->stime = 0;
+	cputime->utime = 0;
+	cputime->sum_exec_runtime = 0;
 	for_each_possible_cpu(i) {
 		struct kernel_cpustat kcpustat;
 		u64 *cpustat = kcpustat.cpustat;
@@ -509,10 +433,6 @@ static void root_cgroup_cputime(struct cgroup_base_stat *bstat)
 		cputime->sum_exec_runtime += user;
 		cputime->sum_exec_runtime += sys;
 		cputime->sum_exec_runtime += cpustat[CPUTIME_STEAL];
-
-#ifdef CONFIG_SCHED_CORE
-		bstat->forceidle_sum += cpustat[CPUTIME_FORCEIDLE];
-#endif
 	}
 }
 
@@ -520,61 +440,27 @@ void cgroup_base_stat_cputime_show(struct seq_file *seq)
 {
 	struct cgroup *cgrp = seq_css(seq)->cgroup;
 	u64 usage, utime, stime;
-	struct cgroup_base_stat bstat;
-#ifdef CONFIG_SCHED_CORE
-	u64 forceidle_time;
-#endif
+	struct task_cputime cputime;
 
 	if (cgroup_parent(cgrp)) {
 		cgroup_rstat_flush_hold(cgrp);
 		usage = cgrp->bstat.cputime.sum_exec_runtime;
 		cputime_adjust(&cgrp->bstat.cputime, &cgrp->prev_cputime,
 			       &utime, &stime);
-#ifdef CONFIG_SCHED_CORE
-		forceidle_time = cgrp->bstat.forceidle_sum;
-#endif
 		cgroup_rstat_flush_release();
 	} else {
-		root_cgroup_cputime(&bstat);
-		usage = bstat.cputime.sum_exec_runtime;
-		utime = bstat.cputime.utime;
-		stime = bstat.cputime.stime;
-#ifdef CONFIG_SCHED_CORE
-		forceidle_time = bstat.forceidle_sum;
-#endif
+		root_cgroup_cputime(&cputime);
+		usage = cputime.sum_exec_runtime;
+		utime = cputime.utime;
+		stime = cputime.stime;
 	}
 
 	do_div(usage, NSEC_PER_USEC);
 	do_div(utime, NSEC_PER_USEC);
 	do_div(stime, NSEC_PER_USEC);
-#ifdef CONFIG_SCHED_CORE
-	do_div(forceidle_time, NSEC_PER_USEC);
-#endif
 
 	seq_printf(seq, "usage_usec %llu\n"
 		   "user_usec %llu\n"
 		   "system_usec %llu\n",
 		   usage, utime, stime);
-
-#ifdef CONFIG_SCHED_CORE
-	seq_printf(seq, "core_sched.force_idle_usec %llu\n", forceidle_time);
-#endif
 }
-
-/* Add bpf kfuncs for cgroup_rstat_updated() and cgroup_rstat_flush() */
-BTF_SET8_START(bpf_rstat_kfunc_ids)
-BTF_ID_FLAGS(func, cgroup_rstat_updated)
-BTF_ID_FLAGS(func, cgroup_rstat_flush, KF_SLEEPABLE)
-BTF_SET8_END(bpf_rstat_kfunc_ids)
-
-static const struct btf_kfunc_id_set bpf_rstat_kfunc_set = {
-	.owner          = THIS_MODULE,
-	.set            = &bpf_rstat_kfunc_ids,
-};
-
-static int __init bpf_rstat_kfunc_init(void)
-{
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING,
-					 &bpf_rstat_kfunc_set);
-}
-late_initcall(bpf_rstat_kfunc_init);

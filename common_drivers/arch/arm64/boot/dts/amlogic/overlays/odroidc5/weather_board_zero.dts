@@ -1,0 +1,20 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target = <&i2c1>;
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clock-frequency = <100000>;		/* default 100k */
+
+			shtc1: shtc1@70 {
+				status = "okay";
+				compatible = "sensirion,shtc3";
+				reg = <0x70>;
+			};
+		};
+	};
+};

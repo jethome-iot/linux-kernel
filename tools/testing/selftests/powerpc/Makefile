@@ -17,7 +17,6 @@ SUB_DIRS = alignment		\
 	   benchmarks		\
 	   cache_shape		\
 	   copyloops		\
-	   dexcr		\
 	   dscr			\
 	   mm			\
 	   nx-gzip		\
@@ -31,12 +30,8 @@ SUB_DIRS = alignment		\
 	   eeh			\
 	   vphn         \
 	   math		\
-	   papr_attributes	\
-	   papr_vpd		\
-	   papr_sysparm		\
 	   ptrace	\
-	   security	\
-	   mce
+	   security
 
 endif
 
@@ -48,27 +43,28 @@ $(SUB_DIRS):
 include ../lib.mk
 
 override define RUN_TESTS
-	+@for TARGET in $(SUB_DIRS); do \
+	@for TARGET in $(SUB_DIRS); do \
 		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
 		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET run_tests;\
 	done;
 endef
 
 override define INSTALL_RULE
-	+@for TARGET in $(SUB_DIRS); do \
+	@for TARGET in $(SUB_DIRS); do \
 		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
 		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET install;\
 	done;
 endef
 
-emit_tests:
-	+@for TARGET in $(SUB_DIRS); do \
+override define EMIT_TESTS
+	@for TARGET in $(SUB_DIRS); do \
 		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
-		$(MAKE) OUTPUT=$$BUILD_TARGET -s -C $$TARGET $@;\
+		$(MAKE) OUTPUT=$$BUILD_TARGET -s -C $$TARGET emit_tests;\
 	done;
+endef
 
 override define CLEAN
-	+@for TARGET in $(SUB_DIRS); do \
+	@for TARGET in $(SUB_DIRS); do \
 		BUILD_TARGET=$(OUTPUT)/$$TARGET;	\
 		$(MAKE) OUTPUT=$$BUILD_TARGET -C $$TARGET clean; \
 	done;
@@ -78,4 +74,4 @@ endef
 tags:
 	find . -name '*.c' -o -name '*.h' | xargs ctags
 
-.PHONY: tags $(SUB_DIRS) emit_tests
+.PHONY: tags $(SUB_DIRS)

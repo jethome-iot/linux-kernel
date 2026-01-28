@@ -14,8 +14,8 @@
 #include <linux/moduleparam.h>
 #include <linux/gfp.h>
 #include <linux/sched.h>
-#include <linux/string_helpers.h>
 #include <linux/sysctl.h>
+#include <linux/ctype.h>
 #include <linux/swap.h>
 #include <linux/kthread.h>
 #include <linux/oom.h>
@@ -90,7 +90,7 @@ static long cmm_alloc_pages(long nr, long *counter,
 			} else
 				free_page((unsigned long) npa);
 		}
-		diag10_range(virt_to_pfn((void *)addr), 1);
+		diag10_range(addr >> PAGE_SHIFT, 1);
 		pa->pages[pa->index++] = addr;
 		(*counter)++;
 		spin_unlock(&cmm_lock);
@@ -332,6 +332,17 @@ static struct ctl_table cmm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= cmm_timeout_handler,
 	},
+	{ }
+};
+
+static struct ctl_table cmm_dir_table[] = {
+	{
+		.procname	= "vm",
+		.maxlen		= 0,
+		.mode		= 0555,
+		.child		= cmm_table,
+	},
+	{ }
 };
 
 #ifdef CONFIG_CMM_IUCV
@@ -378,15 +389,18 @@ static int __init cmm_init(void)
 {
 	int rc = -ENOMEM;
 
-	cmm_sysctl_header = register_sysctl("vm", cmm_table);
+	cmm_sysctl_header = register_sysctl_table(cmm_dir_table);
 	if (!cmm_sysctl_header)
 		goto out_sysctl;
 #ifdef CONFIG_CMM_IUCV
 	/* convert sender to uppercase characters */
-	if (sender)
-		string_upper(sender, sender);
-	else
+	if (sender) {
+		int len = strlen(sender);
+		while (len--)
+			sender[len] = toupper(sender[len]);
+	} else {
 		sender = cmm_default_sender;
+	}
 
 	rc = smsg_register_callback(SMSG_PREFIX, cmm_smsg_target);
 	if (rc < 0)

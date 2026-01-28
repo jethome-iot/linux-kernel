@@ -148,10 +148,16 @@ out:
 
 static void css_sch_todo(struct work_struct *work);
 
-static void css_sch_create_locks(struct subchannel *sch)
+static int css_sch_create_locks(struct subchannel *sch)
 {
-	spin_lock_init(&sch->lock);
+	sch->lock = kmalloc(sizeof(*sch->lock), GFP_KERNEL);
+	if (!sch->lock)
+		return -ENOMEM;
+
+	spin_lock_init(sch->lock);
 	mutex_init(&sch->reg_mutex);
+
+	return 0;
 }
 
 static void css_subchannel_release(struct device *dev)
@@ -161,6 +167,7 @@ static void css_subchannel_release(struct device *dev)
 	sch->config.intparm = 0;
 	cio_commit_config(sch);
 	kfree(sch->driver_override);
+	kfree(sch->lock);
 	kfree(sch);
 }
 
@@ -212,7 +219,9 @@ struct subchannel *css_alloc_subchannel(struct subchannel_id schid,
 	sch->schib = *schib;
 	sch->st = schib->pmcw.st;
 
-	css_sch_create_locks(sch);
+	ret = css_sch_create_locks(sch);
+	if (ret)
+		goto err;
 
 	INIT_WORK(&sch->todo_work, css_sch_todo);
 	sch->dev.release = &css_subchannel_release;
@@ -224,17 +233,19 @@ struct subchannel *css_alloc_subchannel(struct subchannel_id schid,
 	 */
 	ret = dma_set_coherent_mask(&sch->dev, DMA_BIT_MASK(31));
 	if (ret)
-		goto err;
+		goto err_lock;
 	/*
 	 * But we don't have such restrictions imposed on the stuff that
 	 * is handled by the streaming API.
 	 */
 	ret = dma_set_mask(&sch->dev, DMA_BIT_MASK(64));
 	if (ret)
-		goto err;
+		goto err_lock;
 
 	return sch;
 
+err_lock:
+	kfree(sch->lock);
 err:
 	kfree(sch);
 	return ERR_PTR(ret);
@@ -329,11 +340,31 @@ static ssize_t driver_override_store(struct device *dev,
 				     const char *buf, size_t count)
 {
 	struct subchannel *sch = to_subchannel(dev);
-	int ret;
+	char *driver_override, *old, *cp;
 
-	ret = driver_set_override(dev, &sch->driver_override, buf, count);
-	if (ret)
-		return ret;
+	/* We need to keep extra room for a newline */
+	if (count >= (PAGE_SIZE - 1))
+		return -EINVAL;
+
+	driver_override = kstrndup(buf, count, GFP_KERNEL);
+	if (!driver_override)
+		return -ENOMEM;
+
+	cp = strchr(driver_override, '\n');
+	if (cp)
+		*cp = '\0';
+
+	device_lock(dev);
+	old = sch->driver_override;
+	if (strlen(driver_override)) {
+		sch->driver_override = driver_override;
+	} else {
+		kfree(driver_override);
+		sch->driver_override = NULL;
+	}
+	device_unlock(dev);
+
+	kfree(old);
 
 	return count;
 }
@@ -441,6 +472,16 @@ int css_register_subchannel(struct subchannel *sch)
 	if (sch->st == SUBCHANNEL_TYPE_IO)
 		sch->dev.type = &io_subchannel_type;
 
+	/*
+	 * We don't want to generate uevents for I/O subchannels that don't
+	 * have a working ccw device behind them since they will be
+	 * unregistered before they can be used anyway, so we delay the add
+	 * uevent until after device recognition was successful.
+	 * Note that we suppress the uevent for all subchannel types;
+	 * the subchannel driver can decide itself when it wants to inform
+	 * userspace of its existence.
+	 */
+	dev_set_uevent_suppress(&sch->dev, 1);
 	css_update_ssd_info(sch);
 	/* make it known to the system */
 	ret = css_sch_device_register(sch);
@@ -448,6 +489,15 @@ int css_register_subchannel(struct subchannel *sch)
 		CIO_MSG_EVENT(0, "Could not register sch 0.%x.%04x: %d\n",
 			      sch->schid.ssid, sch->schid.sch_no, ret);
 		return ret;
+	}
+	if (!sch->driver) {
+		/*
+		 * No driver matched. Generate the uevent now so that
+		 * a fitting driver module may be loaded based on the
+		 * modalias.
+		 */
+		dev_set_uevent_suppress(&sch->dev, 0);
+		kobject_uevent(&sch->dev.kobj, KOBJ_ADD);
 	}
 	return ret;
 }
@@ -593,12 +643,12 @@ static void css_sch_todo(struct work_struct *work)
 
 	sch = container_of(work, struct subchannel, todo_work);
 	/* Find out todo. */
-	spin_lock_irq(&sch->lock);
+	spin_lock_irq(sch->lock);
 	todo = sch->todo;
 	CIO_MSG_EVENT(4, "sch_todo: sch=0.%x.%04x, todo=%d\n", sch->schid.ssid,
 		      sch->schid.sch_no, todo);
 	sch->todo = SCH_TODO_NOTHING;
-	spin_unlock_irq(&sch->lock);
+	spin_unlock_irq(sch->lock);
 	/* Perform todo. */
 	switch (todo) {
 	case SCH_TODO_NOTHING:
@@ -606,9 +656,9 @@ static void css_sch_todo(struct work_struct *work)
 	case SCH_TODO_EVAL:
 		ret = css_evaluate_known_subchannel(sch, 1);
 		if (ret == -EAGAIN) {
-			spin_lock_irq(&sch->lock);
+			spin_lock_irq(sch->lock);
 			css_sched_sch_todo(sch, todo);
-			spin_unlock_irq(&sch->lock);
+			spin_unlock_irq(sch->lock);
 		}
 		break;
 	case SCH_TODO_UNREG:
@@ -731,21 +781,12 @@ void css_schedule_eval_all(void)
 	spin_unlock_irqrestore(&slow_subchannel_lock, flags);
 }
 
-static int __unset_validpath(struct device *dev, void *data)
+static int __unset_registered(struct device *dev, void *data)
 {
 	struct idset *set = data;
 	struct subchannel *sch = to_subchannel(dev);
-	struct pmcw *pmcw = &sch->schib.pmcw;
 
-	/* Here we want to make sure that we are considering only those subchannels
-	 * which do not have an operational device attached to it. This can be found
-	 * with the help of PAM and POM values of pmcw. OPM provides the information
-	 * about any path which is currently vary-off, so that we should not consider.
-	 */
-	if (sch->st == SUBCHANNEL_TYPE_IO &&
-	    (sch->opm & pmcw->pam & pmcw->pom))
-		idset_sch_del(set, sch->schid);
-
+	idset_sch_del(set, sch->schid);
 	return 0;
 }
 
@@ -774,8 +815,8 @@ void css_schedule_eval_cond(enum css_eval_cond cond, unsigned long delay)
 	}
 	idset_fill(set);
 	switch (cond) {
-	case CSS_EVAL_NO_PATH:
-		bus_for_each_dev(&css_bus_type, NULL, set, __unset_validpath);
+	case CSS_EVAL_UNREG:
+		bus_for_each_dev(&css_bus_type, NULL, set, __unset_registered);
 		break;
 	case CSS_EVAL_NOT_ONLINE:
 		bus_for_each_dev(&css_bus_type, NULL, set, __unset_online);
@@ -798,11 +839,11 @@ void css_wait_for_slow_path(void)
 	flush_workqueue(cio_work_q);
 }
 
-/* Schedule reprobing of all subchannels with no valid operational path. */
+/* Schedule reprobing of all unregistered subchannels. */
 void css_schedule_reprobe(void)
 {
 	/* Schedule with a delay to allow merging of subsequent calls. */
-	css_schedule_eval_cond(CSS_EVAL_NO_PATH, 1 * HZ);
+	css_schedule_eval_cond(CSS_EVAL_UNREG, 1 * HZ);
 }
 EXPORT_SYMBOL_GPL(css_schedule_reprobe);
 
@@ -1017,7 +1058,12 @@ static int __init setup_css(int nr)
 	css->pseudo_subchannel->dev.parent = &css->device;
 	css->pseudo_subchannel->dev.release = css_subchannel_release;
 	mutex_init(&css->pseudo_subchannel->reg_mutex);
-	css_sch_create_locks(css->pseudo_subchannel);
+	ret = css_sch_create_locks(css->pseudo_subchannel);
+	if (ret) {
+		kfree(css->pseudo_subchannel);
+		device_unregister(&css->device);
+		goto out_err;
+	}
 
 	dev_set_name(&css->pseudo_subchannel->dev, "defunct");
 	ret = device_register(&css->pseudo_subchannel->dev);
@@ -1397,9 +1443,9 @@ static void css_shutdown(struct device *dev)
 		sch->driver->shutdown(sch);
 }
 
-static int css_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int css_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct subchannel *sch = to_subchannel(dev);
+	struct subchannel *sch = to_subchannel(dev);
 	int ret;
 
 	ret = add_uevent_var(env, "ST=%01X", sch->st);

@@ -220,53 +220,12 @@ void transport_subsystem_check_init(void)
 	sub_api_initialized = 1;
 }
 
-static void target_release_cmd_refcnt(struct percpu_ref *ref)
+static void target_release_sess_cmd_refcnt(struct percpu_ref *ref)
 {
-	struct target_cmd_counter *cmd_cnt  = container_of(ref,
-							   typeof(*cmd_cnt),
-							   refcnt);
-	wake_up(&cmd_cnt->refcnt_wq);
+	struct se_session *sess = container_of(ref, typeof(*sess), cmd_count);
+
+	wake_up(&sess->cmd_count_wq);
 }
-
-struct target_cmd_counter *target_alloc_cmd_counter(void)
-{
-	struct target_cmd_counter *cmd_cnt;
-	int rc;
-
-	cmd_cnt = kzalloc(sizeof(*cmd_cnt), GFP_KERNEL);
-	if (!cmd_cnt)
-		return NULL;
-
-	init_completion(&cmd_cnt->stop_done);
-	init_waitqueue_head(&cmd_cnt->refcnt_wq);
-	atomic_set(&cmd_cnt->stopped, 0);
-
-	rc = percpu_ref_init(&cmd_cnt->refcnt, target_release_cmd_refcnt, 0,
-			     GFP_KERNEL);
-	if (rc)
-		goto free_cmd_cnt;
-
-	return cmd_cnt;
-
-free_cmd_cnt:
-	kfree(cmd_cnt);
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(target_alloc_cmd_counter);
-
-void target_free_cmd_counter(struct target_cmd_counter *cmd_cnt)
-{
-	/*
-	 * Drivers like loop do not call target_stop_session during session
-	 * shutdown so we have to drop the ref taken at init time here.
-	 */
-	if (!atomic_read(&cmd_cnt->stopped))
-		percpu_ref_put(&cmd_cnt->refcnt);
-
-	percpu_ref_exit(&cmd_cnt->refcnt);
-	kfree(cmd_cnt);
-}
-EXPORT_SYMBOL_GPL(target_free_cmd_counter);
 
 /**
  * transport_init_session - initialize a session object
@@ -274,13 +233,31 @@ EXPORT_SYMBOL_GPL(target_free_cmd_counter);
  *
  * The caller must have zero-initialized @se_sess before calling this function.
  */
-void transport_init_session(struct se_session *se_sess)
+int transport_init_session(struct se_session *se_sess)
 {
 	INIT_LIST_HEAD(&se_sess->sess_list);
 	INIT_LIST_HEAD(&se_sess->sess_acl_list);
 	spin_lock_init(&se_sess->sess_cmd_lock);
+	init_waitqueue_head(&se_sess->cmd_count_wq);
+	init_completion(&se_sess->stop_done);
+	atomic_set(&se_sess->stopped, 0);
+	return percpu_ref_init(&se_sess->cmd_count,
+			       target_release_sess_cmd_refcnt, 0, GFP_KERNEL);
 }
 EXPORT_SYMBOL(transport_init_session);
+
+void transport_uninit_session(struct se_session *se_sess)
+{
+	/*
+	 * Drivers like iscsi and loop do not call target_stop_session
+	 * during session shutdown so we have to drop the ref taken at init
+	 * time here.
+	 */
+	if (!atomic_read(&se_sess->stopped))
+		percpu_ref_put(&se_sess->cmd_count);
+
+	percpu_ref_exit(&se_sess->cmd_count);
+}
 
 /**
  * transport_alloc_session - allocate a session object and initialize it
@@ -289,6 +266,7 @@ EXPORT_SYMBOL(transport_init_session);
 struct se_session *transport_alloc_session(enum target_prot_op sup_prot_ops)
 {
 	struct se_session *se_sess;
+	int ret;
 
 	se_sess = kmem_cache_zalloc(se_sess_cache, GFP_KERNEL);
 	if (!se_sess) {
@@ -296,7 +274,11 @@ struct se_session *transport_alloc_session(enum target_prot_op sup_prot_ops)
 				" se_sess_cache\n");
 		return ERR_PTR(-ENOMEM);
 	}
-	transport_init_session(se_sess);
+	ret = transport_init_session(se_sess);
+	if (ret < 0) {
+		kmem_cache_free(se_sess_cache, se_sess);
+		return ERR_PTR(ret);
+	}
 	se_sess->sup_prot_ops = sup_prot_ops;
 
 	return se_sess;
@@ -462,13 +444,8 @@ target_setup_session(struct se_portal_group *tpg,
 		     int (*callback)(struct se_portal_group *,
 				     struct se_session *, void *))
 {
-	struct target_cmd_counter *cmd_cnt;
 	struct se_session *sess;
-	int rc;
 
-	cmd_cnt = target_alloc_cmd_counter();
-	if (!cmd_cnt)
-		return ERR_PTR(-ENOMEM);
 	/*
 	 * If the fabric driver is using percpu-ida based pre allocation
 	 * of I/O descriptor tags, go ahead and perform that setup now..
@@ -478,38 +455,29 @@ target_setup_session(struct se_portal_group *tpg,
 	else
 		sess = transport_alloc_session(prot_op);
 
-	if (IS_ERR(sess)) {
-		rc = PTR_ERR(sess);
-		goto free_cnt;
-	}
-	sess->cmd_cnt = cmd_cnt;
+	if (IS_ERR(sess))
+		return sess;
 
 	sess->se_node_acl = core_tpg_check_initiator_node_acl(tpg,
 					(unsigned char *)initiatorname);
 	if (!sess->se_node_acl) {
-		rc = -EACCES;
-		goto free_sess;
+		transport_free_session(sess);
+		return ERR_PTR(-EACCES);
 	}
 	/*
 	 * Go ahead and perform any remaining fabric setup that is
 	 * required before transport_register_session().
 	 */
 	if (callback != NULL) {
-		rc = callback(tpg, sess, private);
-		if (rc)
-			goto free_sess;
+		int rc = callback(tpg, sess, private);
+		if (rc) {
+			transport_free_session(sess);
+			return ERR_PTR(rc);
+		}
 	}
 
 	transport_register_session(tpg, sess->se_node_acl, sess, private);
 	return sess;
-
-free_sess:
-	transport_free_session(sess);
-	return ERR_PTR(rc);
-
-free_cnt:
-	target_free_cmd_counter(cmd_cnt);
-	return ERR_PTR(rc);
 }
 EXPORT_SYMBOL(target_setup_session);
 
@@ -634,8 +602,7 @@ void transport_free_session(struct se_session *se_sess)
 		sbitmap_queue_free(&se_sess->sess_tag_pool);
 		kvfree(se_sess->sess_cmd_map);
 	}
-	if (se_sess->cmd_cnt)
-		target_free_cmd_counter(se_sess->cmd_cnt);
+	transport_uninit_session(se_sess);
 	kmem_cache_free(se_sess_cache, se_sess);
 }
 EXPORT_SYMBOL(transport_free_session);
@@ -1445,12 +1412,14 @@ target_cmd_size_check(struct se_cmd *cmd, unsigned int size)
  *
  * Preserves the value of @cmd->tag.
  */
-void __target_init_cmd(struct se_cmd *cmd,
-		       const struct target_core_fabric_ops *tfo,
-		       struct se_session *se_sess, u32 data_length,
-		       int data_direction, int task_attr,
-		       unsigned char *sense_buffer, u64 unpacked_lun,
-		       struct target_cmd_counter *cmd_cnt)
+void __target_init_cmd(
+	struct se_cmd *cmd,
+	const struct target_core_fabric_ops *tfo,
+	struct se_session *se_sess,
+	u32 data_length,
+	int data_direction,
+	int task_attr,
+	unsigned char *sense_buffer, u64 unpacked_lun)
 {
 	INIT_LIST_HEAD(&cmd->se_delayed_node);
 	INIT_LIST_HEAD(&cmd->se_qf_node);
@@ -1470,7 +1439,6 @@ void __target_init_cmd(struct se_cmd *cmd,
 	cmd->sam_task_attr = task_attr;
 	cmd->sense_buffer = sense_buffer;
 	cmd->orig_fe_lun = unpacked_lun;
-	cmd->cmd_cnt = cmd_cnt;
 
 	if (!(cmd->se_cmd_flags & SCF_USE_CPUID))
 		cmd->cpuid = raw_smp_processor_id();
@@ -1559,10 +1527,10 @@ target_cmd_parse_cdb(struct se_cmd *cmd)
 
 	ret = dev->transport->parse_cdb(cmd);
 	if (ret == TCM_UNSUPPORTED_SCSI_OPCODE)
-		pr_debug_ratelimited("%s/%s: Unsupported SCSI Opcode 0x%02x, sending CHECK_CONDITION.\n",
-				     cmd->se_tfo->fabric_name,
-				     cmd->se_sess->se_node_acl->initiatorname,
-				     cmd->t_task_cdb[0]);
+		pr_warn_ratelimited("%s/%s: Unsupported SCSI Opcode 0x%02x, sending CHECK_CONDITION.\n",
+				    cmd->se_tfo->fabric_name,
+				    cmd->se_sess->se_node_acl->initiatorname,
+				    cmd->t_task_cdb[0]);
 	if (ret)
 		return ret;
 
@@ -1576,38 +1544,16 @@ target_cmd_parse_cdb(struct se_cmd *cmd)
 }
 EXPORT_SYMBOL(target_cmd_parse_cdb);
 
-static int __target_submit(struct se_cmd *cmd)
+/*
+ * Used by fabric module frontends to queue tasks directly.
+ * May only be used from process context.
+ */
+int transport_handle_cdb_direct(
+	struct se_cmd *cmd)
 {
 	sense_reason_t ret;
 
 	might_sleep();
-
-	/*
-	 * Check if we need to delay processing because of ALUA
-	 * Active/NonOptimized primary access state..
-	 */
-	core_alua_check_nonop_delay(cmd);
-
-	if (cmd->t_data_nents != 0) {
-		/*
-		 * This is primarily a hack for udev and tcm loop which sends
-		 * INQUIRYs with a single page and expects the data to be
-		 * cleared.
-		 */
-		if (!(cmd->se_cmd_flags & SCF_SCSI_DATA_CDB) &&
-		    cmd->data_direction == DMA_FROM_DEVICE) {
-			struct scatterlist *sgl = cmd->t_data_sg;
-			unsigned char *buf = NULL;
-
-			BUG_ON(!sgl);
-
-			buf = kmap_local_page(sg_page(sgl));
-			if (buf) {
-				memset(buf + sgl->offset, 0, sgl->length);
-				kunmap_local(buf);
-			}
-		}
-	}
 
 	if (!cmd->se_lun) {
 		dump_stack();
@@ -1636,6 +1582,7 @@ static int __target_submit(struct se_cmd *cmd)
 		transport_generic_request_failure(cmd, ret);
 	return 0;
 }
+EXPORT_SYMBOL(transport_handle_cdb_direct);
 
 sense_reason_t
 transport_generic_map_mem_to_cmd(struct se_cmd *cmd, struct scatterlist *sgl,
@@ -1711,8 +1658,7 @@ int target_init_cmd(struct se_cmd *se_cmd, struct se_session *se_sess,
 	 * target_core_fabric_ops->queue_status() callback
 	 */
 	__target_init_cmd(se_cmd, se_tpg->se_tpg_tfo, se_sess, data_length,
-			  data_dir, task_attr, sense, unpacked_lun,
-			  se_sess->cmd_cnt);
+			  data_dir, task_attr, sense, unpacked_lun);
 
 	/*
 	 * Obtain struct se_cmd->cmd_kref reference. A second kref_get here is
@@ -1801,6 +1747,53 @@ generic_fail:
 	return -EIO;
 }
 EXPORT_SYMBOL_GPL(target_submit_prep);
+
+/**
+ * target_submit - perform final initialization and submit cmd to LIO core
+ * @se_cmd: command descriptor to submit
+ *
+ * target_submit_prep must have been called on the cmd, and this must be
+ * called from process context.
+ */
+void target_submit(struct se_cmd *se_cmd)
+{
+	struct scatterlist *sgl = se_cmd->t_data_sg;
+	unsigned char *buf = NULL;
+
+	might_sleep();
+
+	if (se_cmd->t_data_nents != 0) {
+		BUG_ON(!sgl);
+		/*
+		 * A work-around for tcm_loop as some userspace code via
+		 * scsi-generic do not memset their associated read buffers,
+		 * so go ahead and do that here for type non-data CDBs.  Also
+		 * note that this is currently guaranteed to be a single SGL
+		 * for this case by target core in target_setup_cmd_from_cdb()
+		 * -> transport_generic_cmd_sequencer().
+		 */
+		if (!(se_cmd->se_cmd_flags & SCF_SCSI_DATA_CDB) &&
+		     se_cmd->data_direction == DMA_FROM_DEVICE) {
+			if (sgl)
+				buf = kmap(sg_page(sgl)) + sgl->offset;
+
+			if (buf) {
+				memset(buf, 0, sgl->length);
+				kunmap(sg_page(sgl));
+			}
+		}
+
+	}
+
+	/*
+	 * Check if we need to delay processing because of ALUA
+	 * Active/NonOptimized primary access state..
+	 */
+	core_alua_check_nonop_delay(se_cmd);
+
+	transport_handle_cdb_direct(se_cmd);
+}
+EXPORT_SYMBOL_GPL(target_submit);
 
 /**
  * target_submit_cmd - lookup unpacked lun and submit uninitialized se_cmd
@@ -1897,7 +1890,7 @@ void target_queued_submit_work(struct work_struct *work)
 			se_plug = target_plug_device(se_dev);
 		}
 
-		__target_submit(se_cmd);
+		target_submit(se_cmd);
 	}
 
 	if (se_plug)
@@ -1908,7 +1901,7 @@ void target_queued_submit_work(struct work_struct *work)
  * target_queue_submission - queue the cmd to run on the LIO workqueue
  * @se_cmd: command descriptor to submit
  */
-static void target_queue_submission(struct se_cmd *se_cmd)
+void target_queue_submission(struct se_cmd *se_cmd)
 {
 	struct se_device *se_dev = se_cmd->se_dev;
 	int cpu = se_cmd->cpuid;
@@ -1918,35 +1911,7 @@ static void target_queue_submission(struct se_cmd *se_cmd)
 	llist_add(&se_cmd->se_cmd_list, &sq->cmd_list);
 	queue_work_on(cpu, target_submission_wq, &sq->work);
 }
-
-/**
- * target_submit - perform final initialization and submit cmd to LIO core
- * @se_cmd: command descriptor to submit
- *
- * target_submit_prep or something similar must have been called on the cmd,
- * and this must be called from process context.
- */
-int target_submit(struct se_cmd *se_cmd)
-{
-	const struct target_core_fabric_ops *tfo = se_cmd->se_sess->se_tpg->se_tpg_tfo;
-	struct se_dev_attrib *da = &se_cmd->se_dev->dev_attrib;
-	u8 submit_type;
-
-	if (da->submit_type == TARGET_FABRIC_DEFAULT_SUBMIT)
-		submit_type = tfo->default_submit_type;
-	else if (da->submit_type == TARGET_DIRECT_SUBMIT &&
-		 tfo->direct_submit_supp)
-		submit_type = TARGET_DIRECT_SUBMIT;
-	else
-		submit_type = TARGET_QUEUE_SUBMIT;
-
-	if (submit_type == TARGET_DIRECT_SUBMIT)
-		return __target_submit(se_cmd);
-
-	target_queue_submission(se_cmd);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(target_submit);
+EXPORT_SYMBOL_GPL(target_queue_submission);
 
 static void target_complete_tmr_failure(struct work_struct *work)
 {
@@ -1988,8 +1953,7 @@ int target_submit_tmr(struct se_cmd *se_cmd, struct se_session *se_sess,
 	BUG_ON(!se_tpg);
 
 	__target_init_cmd(se_cmd, se_tpg->se_tpg_tfo, se_sess,
-			  0, DMA_NONE, TCM_SIMPLE_TAG, sense, unpacked_lun,
-			  se_sess->cmd_cnt);
+			  0, DMA_NONE, TCM_SIMPLE_TAG, sense, unpacked_lun);
 	/*
 	 * FIXME: Currently expect caller to handle se_cmd->se_tmr_req
 	 * allocation failure.
@@ -2255,10 +2219,6 @@ static bool target_handle_task_attr(struct se_cmd *cmd)
 		atomic_dec_mb(&dev->non_ordered);
 	}
 
-	spin_lock_irq(&cmd->t_state_lock);
-	cmd->transport_state &= ~CMD_T_SENT;
-	spin_unlock_irq(&cmd->t_state_lock);
-
 	spin_lock(&dev->delayed_cmd_lock);
 	list_add_tail(&cmd->se_delayed_node, &dev->delayed_cmd_list);
 	spin_unlock(&dev->delayed_cmd_lock);
@@ -2293,8 +2253,12 @@ void target_execute_cmd(struct se_cmd *cmd)
 	if (target_write_prot_action(cmd))
 		return;
 
-	if (target_handle_task_attr(cmd))
+	if (target_handle_task_attr(cmd)) {
+		spin_lock_irq(&cmd->t_state_lock);
+		cmd->transport_state &= ~CMD_T_SENT;
+		spin_unlock_irq(&cmd->t_state_lock);
 		return;
+	}
 
 	__target_execute_cmd(cmd, true);
 }
@@ -2993,6 +2957,7 @@ EXPORT_SYMBOL(transport_generic_free_cmd);
  */
 int target_get_sess_cmd(struct se_cmd *se_cmd, bool ack_kref)
 {
+	struct se_session *se_sess = se_cmd->se_sess;
 	int ret = 0;
 
 	/*
@@ -3005,14 +2970,9 @@ int target_get_sess_cmd(struct se_cmd *se_cmd, bool ack_kref)
 		se_cmd->se_cmd_flags |= SCF_ACK_KREF;
 	}
 
-	/*
-	 * Users like xcopy do not use counters since they never do a stop
-	 * and wait.
-	 */
-	if (se_cmd->cmd_cnt) {
-		if (!percpu_ref_tryget_live(&se_cmd->cmd_cnt->refcnt))
-			ret = -ESHUTDOWN;
-	}
+	if (!percpu_ref_tryget_live(&se_sess->cmd_count))
+		ret = -ESHUTDOWN;
+
 	if (ret && ack_kref)
 		target_put_sess_cmd(se_cmd);
 
@@ -3033,7 +2993,7 @@ static void target_free_cmd_mem(struct se_cmd *cmd)
 static void target_release_cmd_kref(struct kref *kref)
 {
 	struct se_cmd *se_cmd = container_of(kref, struct se_cmd, cmd_kref);
-	struct target_cmd_counter *cmd_cnt = se_cmd->cmd_cnt;
+	struct se_session *se_sess = se_cmd->se_sess;
 	struct completion *free_compl = se_cmd->free_compl;
 	struct completion *abrt_compl = se_cmd->abrt_compl;
 
@@ -3044,8 +3004,7 @@ static void target_release_cmd_kref(struct kref *kref)
 	if (abrt_compl)
 		complete(abrt_compl);
 
-	if (cmd_cnt)
-		percpu_ref_put(&cmd_cnt->refcnt);
+	percpu_ref_put(&se_sess->cmd_count);
 }
 
 /**
@@ -3164,66 +3123,45 @@ void target_show_cmd(const char *pfx, struct se_cmd *cmd)
 }
 EXPORT_SYMBOL(target_show_cmd);
 
-static void target_stop_cmd_counter_confirm(struct percpu_ref *ref)
+static void target_stop_session_confirm(struct percpu_ref *ref)
 {
-	struct target_cmd_counter *cmd_cnt = container_of(ref,
-						struct target_cmd_counter,
-						refcnt);
-	complete_all(&cmd_cnt->stop_done);
+	struct se_session *se_sess = container_of(ref, struct se_session,
+						  cmd_count);
+	complete_all(&se_sess->stop_done);
 }
-
-/**
- * target_stop_cmd_counter - Stop new IO from being added to the counter.
- * @cmd_cnt: counter to stop
- */
-void target_stop_cmd_counter(struct target_cmd_counter *cmd_cnt)
-{
-	pr_debug("Stopping command counter.\n");
-	if (!atomic_cmpxchg(&cmd_cnt->stopped, 0, 1))
-		percpu_ref_kill_and_confirm(&cmd_cnt->refcnt,
-					    target_stop_cmd_counter_confirm);
-}
-EXPORT_SYMBOL_GPL(target_stop_cmd_counter);
 
 /**
  * target_stop_session - Stop new IO from being queued on the session.
- * @se_sess: session to stop
+ * @se_sess:    session to stop
  */
 void target_stop_session(struct se_session *se_sess)
 {
-	target_stop_cmd_counter(se_sess->cmd_cnt);
+	pr_debug("Stopping session queue.\n");
+	if (atomic_cmpxchg(&se_sess->stopped, 0, 1) == 0)
+		percpu_ref_kill_and_confirm(&se_sess->cmd_count,
+					    target_stop_session_confirm);
 }
 EXPORT_SYMBOL(target_stop_session);
 
 /**
- * target_wait_for_cmds - Wait for outstanding cmds.
- * @cmd_cnt: counter to wait for active I/O for.
- */
-void target_wait_for_cmds(struct target_cmd_counter *cmd_cnt)
-{
-	int ret;
-
-	WARN_ON_ONCE(!atomic_read(&cmd_cnt->stopped));
-
-	do {
-		pr_debug("Waiting for running cmds to complete.\n");
-		ret = wait_event_timeout(cmd_cnt->refcnt_wq,
-					 percpu_ref_is_zero(&cmd_cnt->refcnt),
-					 180 * HZ);
-	} while (ret <= 0);
-
-	wait_for_completion(&cmd_cnt->stop_done);
-	pr_debug("Waiting for cmds done.\n");
-}
-EXPORT_SYMBOL_GPL(target_wait_for_cmds);
-
-/**
  * target_wait_for_sess_cmds - Wait for outstanding commands
- * @se_sess: session to wait for active I/O
+ * @se_sess:    session to wait for active I/O
  */
 void target_wait_for_sess_cmds(struct se_session *se_sess)
 {
-	target_wait_for_cmds(se_sess->cmd_cnt);
+	int ret;
+
+	WARN_ON_ONCE(!atomic_read(&se_sess->stopped));
+
+	do {
+		pr_debug("Waiting for running cmds to complete.\n");
+		ret = wait_event_timeout(se_sess->cmd_count_wq,
+				percpu_ref_is_zero(&se_sess->cmd_count),
+				180 * HZ);
+	} while (ret <= 0);
+
+	wait_for_completion(&se_sess->stop_done);
+	pr_debug("Waiting for cmds done.\n");
 }
 EXPORT_SYMBOL(target_wait_for_sess_cmds);
 
@@ -3593,7 +3531,8 @@ static void target_tmr_work(struct work_struct *work)
 		tmr->response = (!ret) ? TMR_FUNCTION_COMPLETE :
 					 TMR_FUNCTION_REJECTED;
 		if (tmr->response == TMR_FUNCTION_COMPLETE) {
-			target_dev_ua_allocate(dev, 0x29,
+			target_ua_allocate_lun(cmd->se_sess->se_node_acl,
+					       cmd->orig_fe_lun, 0x29,
 					       ASCQ_29H_BUS_DEVICE_RESET_FUNCTION_OCCURRED);
 		}
 		break;

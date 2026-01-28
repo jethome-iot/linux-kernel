@@ -488,7 +488,7 @@ static void run_test(struct migrate_reuseport_test_case *test_case,
 			goto close_servers;
 	}
 
-	/* Tie requests to the first four listeners */
+	/* Tie requests to the first four listners */
 	err = start_clients(test_case);
 	if (!ASSERT_OK(err, "start_clients"))
 		goto close_clients;
@@ -541,7 +541,7 @@ close_servers:
 	}
 }
 
-void serial_test_migrate_reuseport(void)
+void test_migrate_reuseport(void)
 {
 	struct test_migrate_reuseport *skel;
 	int i;

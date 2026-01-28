@@ -10,6 +10,7 @@
 #include <linux/mfd/as3722.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
@@ -61,11 +62,13 @@ static int as3722_poweroff_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void as3722_poweroff_remove(struct platform_device *pdev)
+static int as3722_poweroff_remove(struct platform_device *pdev)
 {
 	if (pm_power_off == as3722_pm_power_off)
 		pm_power_off = NULL;
 	as3722_pm_poweroff = NULL;
+
+	return 0;
 }
 
 static struct platform_driver as3722_poweroff_driver = {
@@ -73,7 +76,7 @@ static struct platform_driver as3722_poweroff_driver = {
 		.name = "as3722-power-off",
 	},
 	.probe = as3722_poweroff_probe,
-	.remove_new = as3722_poweroff_remove,
+	.remove = as3722_poweroff_remove,
 };
 
 module_platform_driver(as3722_poweroff_driver);
@@ -81,3 +84,4 @@ module_platform_driver(as3722_poweroff_driver);
 MODULE_DESCRIPTION("Power off driver for ams AS3722 PMIC Device");
 MODULE_ALIAS("platform:as3722-power-off");
 MODULE_AUTHOR("Laxman Dewangan <ldewangan@nvidia.com>");
+MODULE_LICENSE("GPL v2");

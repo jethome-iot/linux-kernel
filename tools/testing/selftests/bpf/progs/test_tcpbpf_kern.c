@@ -16,6 +16,7 @@
 #include "test_tcpbpf.h"
 
 struct tcpbpf_globals global = {};
+int _version SEC("version") = 1;
 
 /**
  * SOL_TCP is defined in <netinet/tcp.h> while
@@ -46,6 +47,8 @@ int bpf_testcb(struct bpf_sock_ops *skops)
 	struct bpf_sock_ops *reuse = skops;
 	struct tcphdr *thdr;
 	int window_clamp = 9216;
+	int good_call_rv = 0;
+	int bad_call_rv = 0;
 	int save_syn = 1;
 	int rv = -1;
 	int v = 0;

@@ -5,15 +5,10 @@
  *  Copyright (C) 2000-2002 Russell King
  *  modification for nommu, Hyok S. Choi, 2004
  *
- *  Note: this file should not be included explicitly, include <asm/page.h>
- *  to get access to these definitions.
+ *  Note: this file should not be included by non-asm/.h files
  */
 #ifndef __ASM_ARM_MEMORY_H
 #define __ASM_ARM_MEMORY_H
-
-#ifndef _ASMARM_PAGE_H
-#error "Do not include <asm/memory.h> directly"
-#endif
 
 #include <linux/compiler.h>
 #include <linux/const.h>
@@ -23,6 +18,11 @@
 #ifdef CONFIG_NEED_MACH_MEMORY_H
 #include <mach/memory.h>
 #endif
+
+#ifdef CONFIG_AMLOGIC_VMAP
+#define SIZE_VSTACK             (48 * 1024 * 1024)
+#endif
+
 #include <asm/kasan_def.h>
 
 /*
@@ -41,7 +41,11 @@
  * TASK_UNMAPPED_BASE - the lower boundary of the mmap VM area
  */
 #ifndef CONFIG_KASAN
-#define TASK_SIZE		(UL(CONFIG_PAGE_OFFSET) - UL(SZ_16M))
+#ifdef CONFIG_AMLOGIC_VMAP
+#define TASK_SIZE               (UL(CONFIG_PAGE_OFFSET) - UL(SZ_16M) - SIZE_VSTACK)
+#else
+#define TASK_SIZE               (UL(CONFIG_PAGE_OFFSET) - UL(SZ_16M))
+#endif
 #else
 #define TASK_SIZE		(KASAN_SHADOW_START)
 #endif
@@ -56,12 +60,20 @@
  * The module space lives between the addresses given by TASK_SIZE
  * and PAGE_OFFSET - it must be within 32MB of the kernel text.
  */
+#if defined(CONFIG_AMLOGIC_VMAP)
+#define MODULES_VADDR           (PAGE_OFFSET - SZ_64M)
+#else
 #ifndef CONFIG_THUMB2_KERNEL
+#ifdef CONFIG_AMLOGIC_ARM_KASAN
+#define MODULES_VADDR		(PAGE_OFFSET - SZ_32M)
+#else
 #define MODULES_VADDR		(PAGE_OFFSET - SZ_16M)
+#endif
 #else
 /* smaller range for Thumb-2 symbols relocation (2^24)*/
 #define MODULES_VADDR		(PAGE_OFFSET - SZ_8M)
 #endif
+#endif  /* CONFIG_AMLOGIC_VMAP */
 
 #if TASK_SIZE > MODULES_VADDR
 #error Top of user space clashes with start of module space
@@ -293,12 +305,10 @@ static inline unsigned long __phys_to_virt(phys_addr_t x)
 
 #endif
 
-static inline unsigned long virt_to_pfn(const void *p)
-{
-	unsigned long kaddr = (unsigned long)p;
-	return (((kaddr - PAGE_OFFSET) >> PAGE_SHIFT) +
-		PHYS_PFN_OFFSET);
-}
+#define virt_to_pfn(kaddr) \
+	((((unsigned long)(kaddr) - PAGE_OFFSET) >> PAGE_SHIFT) + \
+	 PHYS_PFN_OFFSET)
+
 #define __pa_symbol_nodebug(x)	__virt_to_phys_nodebug((x))
 
 #ifdef CONFIG_DEBUG_VIRTUAL
@@ -377,6 +387,19 @@ static inline unsigned long __virt_to_idmap(unsigned long x)
 #define virt_to_idmap(x)	__virt_to_idmap((unsigned long)(x))
 
 /*
+ * Virtual <-> DMA view memory address translations
+ * Again, these are *only* valid on the kernel direct mapped RAM
+ * memory.  Use of these is *deprecated* (and that doesn't mean
+ * use the __ prefixed forms instead.)  See dma-mapping.h.
+ */
+#ifndef __virt_to_bus
+#define __virt_to_bus	__virt_to_phys
+#define __bus_to_virt	__phys_to_virt
+#define __pfn_to_bus(x)	__pfn_to_phys(x)
+#define __bus_to_pfn(x)	__phys_to_pfn(x)
+#endif
+
+/*
  * Conversion between a struct page and a physical address.
  *
  *  page_to_pfn(page)	convert a struct page * to a PFN number
@@ -392,5 +415,7 @@ static inline unsigned long __virt_to_idmap(unsigned long x)
 					&& pfn_valid(virt_to_pfn(kaddr)))
 
 #endif
+
+#include <asm-generic/memory_model.h>
 
 #endif

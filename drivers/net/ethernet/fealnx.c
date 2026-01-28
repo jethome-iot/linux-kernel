@@ -482,7 +482,6 @@ static int fealnx_init_one(struct pci_dev *pdev,
 	struct net_device *dev;
 	void *ring_space;
 	dma_addr_t ring_dma;
-	u8 addr[ETH_ALEN];
 #ifdef USE_IO_OPS
 	int bar = 0;
 #else
@@ -526,8 +525,7 @@ static int fealnx_init_one(struct pci_dev *pdev,
 
 	/* read ethernet id */
 	for (i = 0; i < 6; ++i)
-		addr[i] = ioread8(ioaddr + PAR0 + i);
-	eth_hw_addr_set(dev, addr);
+		dev->dev_addr[i] = ioread8(ioaddr + PAR0 + i);
 
 	/* Reset the chip to erase previous misconfiguration. */
 	iowrite32(0x00000001, ioaddr + BCR);
@@ -1809,8 +1807,8 @@ static void netdev_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *i
 {
 	struct netdev_private *np = netdev_priv(dev);
 
-	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
-	strscpy(info->bus_info, pci_name(np->pci_dev), sizeof(info->bus_info));
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->bus_info, pci_name(np->pci_dev), sizeof(info->bus_info));
 }
 
 static int netdev_get_link_ksettings(struct net_device *dev,

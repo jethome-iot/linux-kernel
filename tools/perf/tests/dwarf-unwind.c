@@ -67,7 +67,6 @@ int test_dwarf_unwind__compare(void *p1, void *p2);
 int test_dwarf_unwind__krava_3(struct thread *thread);
 int test_dwarf_unwind__krava_2(struct thread *thread);
 int test_dwarf_unwind__krava_1(struct thread *thread);
-int test__dwarf_unwind(struct test_suite *test, int subtest);
 
 #define MAX_STACK 8
 
@@ -123,7 +122,7 @@ NO_TAIL_CALL_ATTRIBUTE noinline int test_dwarf_unwind__thread(struct thread *thr
 	}
 
 	err = unwind__get_entries(unwind_entry, &cnt, thread,
-				  &sample, MAX_STACK, false);
+				  &sample, MAX_STACK);
 	if (err)
 		pr_debug("unwind failed\n");
 	else if (cnt != MAX_STACK) {
@@ -196,8 +195,7 @@ NO_TAIL_CALL_ATTRIBUTE noinline int test_dwarf_unwind__krava_1(struct thread *th
 	return ret;
 }
 
-noinline int test__dwarf_unwind(struct test_suite *test __maybe_unused,
-				int subtest __maybe_unused)
+int test__dwarf_unwind(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	struct machine *machine;
 	struct thread *thread;
@@ -235,8 +233,7 @@ noinline int test__dwarf_unwind(struct test_suite *test __maybe_unused,
 	thread__put(thread);
 
  out:
+	machine__delete_threads(machine);
 	machine__delete(machine);
 	return err;
 }
-
-DEFINE_SUITE("Test dwarf unwind", dwarf_unwind);

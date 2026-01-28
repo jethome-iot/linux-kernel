@@ -21,10 +21,8 @@ static inline u32 read_cpucfg(u32 reg)
 	u32 __res;
 
 	__asm__ __volatile__(
-		_ASM_SET_PARSE_R
 		"parse_r __res,%0\n\t"
 		"parse_r reg,%1\n\t"
-		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8080118 | (reg << 21) | (__res << 11))\n\t"
 		:"=r"(__res)
@@ -145,10 +143,8 @@ static inline u32 csr_readl(u32 reg)
 
 	/* RDCSR reg, val */
 	__asm__ __volatile__(
-		_ASM_SET_PARSE_R
 		"parse_r __res,%0\n\t"
 		"parse_r reg,%1\n\t"
-		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8000118 | (reg << 21) | (__res << 11))\n\t"
 		:"=r"(__res)
@@ -164,10 +160,8 @@ static inline u64 csr_readq(u32 reg)
 
 	/* DRDCSR reg, val */
 	__asm__ __volatile__(
-		_ASM_SET_PARSE_R
 		"parse_r __res,%0\n\t"
 		"parse_r reg,%1\n\t"
-		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8020118 | (reg << 21) | (__res << 11))\n\t"
 		:"=r"(__res)
@@ -181,10 +175,8 @@ static inline void csr_writel(u32 val, u32 reg)
 {
 	/* WRCSR reg, val */
 	__asm__ __volatile__(
-		_ASM_SET_PARSE_R
 		"parse_r reg,%0\n\t"
 		"parse_r val,%1\n\t"
-		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8010118 | (reg << 21) | (val << 11))\n\t"
 		:
@@ -197,10 +189,8 @@ static inline void csr_writeq(u64 val, u32 reg)
 {
 	/* DWRCSR reg, val */
 	__asm__ __volatile__(
-		_ASM_SET_PARSE_R
 		"parse_r reg,%0\n\t"
 		"parse_r val,%1\n\t"
-		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8030118 | (reg << 21) | (val << 11))\n\t"
 		:
@@ -227,7 +217,7 @@ static inline void csr_writeq(u64 val, u32 reg)
 #define LOONGSON_CSR_NODECNT	0x408
 #define LOONGSON_CSR_CPUTEMP	0x428
 
-/* PerCore CSR, only accessible by local cores */
+/* PerCore CSR, only accessable by local cores */
 #define LOONGSON_CSR_IPI_STATUS	0x1000
 #define LOONGSON_CSR_IPI_EN	0x1004
 #define LOONGSON_CSR_IPI_SET	0x1008
@@ -253,10 +243,8 @@ static inline u64 drdtime(void)
 	u64 val = 0;
 
 	__asm__ __volatile__(
-		_ASM_SET_PARSE_R
 		"parse_r rID,%0\n\t"
 		"parse_r val,%1\n\t"
-		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8090118 | (rID << 21) | (val << 11))\n\t"
 		:"=r"(rID),"=r"(val)

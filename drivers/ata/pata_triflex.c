@@ -160,7 +160,7 @@ static void triflex_bmdma_stop(struct ata_queued_cmd *qc)
 	triflex_load_timing(qc->ap, qc->dev, qc->dev->pio_mode);
 }
 
-static const struct scsi_host_template triflex_sht = {
+static struct scsi_host_template triflex_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -198,8 +198,11 @@ static const struct pci_device_id triflex[] = {
 static int triflex_ata_pci_device_suspend(struct pci_dev *pdev, pm_message_t mesg)
 {
 	struct ata_host *host = pci_get_drvdata(pdev);
+	int rc = 0;
 
-	ata_host_suspend(host, mesg);
+	rc = ata_host_suspend(host, mesg);
+	if (rc)
+		return rc;
 
 	/*
 	 * We must not disable or powerdown the device.

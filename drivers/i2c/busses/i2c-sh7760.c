@@ -477,7 +477,7 @@ static int sh7760_i2c_probe(struct platform_device *pdev)
 
 	id->adap.nr = pdev->id;
 	id->adap.algo = &sh7760_i2c_algo;
-	id->adap.class = I2C_CLASS_HWMON;
+	id->adap.class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	id->adap.retries = 3;
 	id->adap.algo_data = id;
 	id->adap.dev.parent = &pdev->dev;
@@ -535,7 +535,7 @@ out0:
 	return ret;
 }
 
-static void sh7760_i2c_remove(struct platform_device *pdev)
+static int sh7760_i2c_remove(struct platform_device *pdev)
 {
 	struct cami2c *id = platform_get_drvdata(pdev);
 
@@ -545,6 +545,8 @@ static void sh7760_i2c_remove(struct platform_device *pdev)
 	release_resource(id->ioarea);
 	kfree(id->ioarea);
 	kfree(id);
+
+	return 0;
 }
 
 static struct platform_driver sh7760_i2c_drv = {
@@ -552,7 +554,7 @@ static struct platform_driver sh7760_i2c_drv = {
 		.name	= SH7760_I2C_DEVNAME,
 	},
 	.probe		= sh7760_i2c_probe,
-	.remove_new	= sh7760_i2c_remove,
+	.remove		= sh7760_i2c_remove,
 };
 
 module_platform_driver(sh7760_i2c_drv);

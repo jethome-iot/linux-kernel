@@ -15,8 +15,6 @@ struct sample {
 
 struct ringbuf_map {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	/* libbpf will adjust to valid page size */
-	__uint(max_entries, 1000);
 } ringbuf1 SEC(".maps"),
   ringbuf2 SEC(".maps");
 
@@ -59,6 +57,7 @@ int test_ringbuf(void *ctx)
 	int cur_pid = bpf_get_current_pid_tgid() >> 32;
 	struct sample *sample;
 	void *rb;
+	int zero = 0;
 
 	if (cur_pid != pid)
 		return 0;

@@ -18,6 +18,7 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_mdio.h>
 #include <linux/bitops.h>
 #include <linux/if_bridge.h>
@@ -928,8 +929,7 @@ static void vsc73xx_get_strings(struct dsa_switch *ds, int port, u32 stringset,
 	const struct vsc73xx_counter *cnt;
 	struct vsc73xx *vsc = ds->priv;
 	u8 indices[6];
-	u8 *buf = data;
-	int i;
+	int i, j;
 	u32 val;
 	int ret;
 
@@ -949,7 +949,10 @@ static void vsc73xx_get_strings(struct dsa_switch *ds, int port, u32 stringset,
 	indices[5] = ((val >> 26) & 0x1f); /* TX counter 2 */
 
 	/* The first counters is the RX octets */
-	ethtool_puts(&buf, "RxEtherStatsOctets");
+	j = 0;
+	strncpy(data + j * ETH_GSTRING_LEN,
+		"RxEtherStatsOctets", ETH_GSTRING_LEN);
+	j++;
 
 	/* Each port supports recording 3 RX counters and 3 TX counters,
 	 * figure out what counters we use in this set-up and return the
@@ -959,16 +962,23 @@ static void vsc73xx_get_strings(struct dsa_switch *ds, int port, u32 stringset,
 	 */
 	for (i = 0; i < 3; i++) {
 		cnt = vsc73xx_find_counter(vsc, indices[i], false);
-		ethtool_puts(&buf, cnt ? cnt->name : "");
+		if (cnt)
+			strncpy(data + j * ETH_GSTRING_LEN,
+				cnt->name, ETH_GSTRING_LEN);
+		j++;
 	}
 
 	/* TX stats begins with the number of TX octets */
-	ethtool_puts(&buf, "TxEtherStatsOctets");
+	strncpy(data + j * ETH_GSTRING_LEN,
+		"TxEtherStatsOctets", ETH_GSTRING_LEN);
+	j++;
 
 	for (i = 3; i < 6; i++) {
 		cnt = vsc73xx_find_counter(vsc, indices[i], true);
-		ethtool_puts(&buf, cnt ? cnt->name : "");
-
+		if (cnt)
+			strncpy(data + j * ETH_GSTRING_LEN,
+				cnt->name, ETH_GSTRING_LEN);
+		j++;
 	}
 }
 
@@ -1028,31 +1038,6 @@ static int vsc73xx_get_max_mtu(struct dsa_switch *ds, int port)
 	return 9600 - ETH_HLEN - ETH_FCS_LEN;
 }
 
-static void vsc73xx_phylink_get_caps(struct dsa_switch *dsa, int port,
-				     struct phylink_config *config)
-{
-	unsigned long *interfaces = config->supported_interfaces;
-
-	if (port == 5)
-		return;
-
-	if (port == CPU_PORT) {
-		__set_bit(PHY_INTERFACE_MODE_MII, interfaces);
-		__set_bit(PHY_INTERFACE_MODE_REVMII, interfaces);
-		__set_bit(PHY_INTERFACE_MODE_GMII, interfaces);
-		__set_bit(PHY_INTERFACE_MODE_RGMII, interfaces);
-	}
-
-	if (port <= 4) {
-		/* Internal PHYs */
-		__set_bit(PHY_INTERFACE_MODE_INTERNAL, interfaces);
-		/* phylib default */
-		__set_bit(PHY_INTERFACE_MODE_GMII, interfaces);
-	}
-
-	config->mac_capabilities = MAC_SYM_PAUSE | MAC_10 | MAC_100 | MAC_1000;
-}
-
 static const struct dsa_switch_ops vsc73xx_ds_ops = {
 	.get_tag_protocol = vsc73xx_get_tag_protocol,
 	.setup = vsc73xx_setup,
@@ -1066,7 +1051,6 @@ static const struct dsa_switch_ops vsc73xx_ds_ops = {
 	.port_disable = vsc73xx_port_disable,
 	.port_change_mtu = vsc73xx_change_mtu,
 	.port_max_mtu = vsc73xx_get_max_mtu,
-	.phylink_get_caps = vsc73xx_phylink_get_caps,
 };
 
 static int vsc73xx_gpio_get(struct gpio_chip *chip, unsigned int offset)
@@ -1140,6 +1124,9 @@ static int vsc73xx_gpio_probe(struct vsc73xx *vsc)
 	vsc->gc.ngpio = 4;
 	vsc->gc.owner = THIS_MODULE;
 	vsc->gc.parent = vsc->dev;
+#if IS_ENABLED(CONFIG_OF_GPIO)
+	vsc->gc.of_node = vsc->dev->of_node;
+#endif
 	vsc->gc.base = -1;
 	vsc->gc.get = vsc73xx_gpio_get;
 	vsc->gc.set = vsc73xx_gpio_set;
@@ -1231,10 +1218,12 @@ int vsc73xx_probe(struct vsc73xx *vsc)
 }
 EXPORT_SYMBOL(vsc73xx_probe);
 
-void vsc73xx_remove(struct vsc73xx *vsc)
+int vsc73xx_remove(struct vsc73xx *vsc)
 {
 	dsa_unregister_switch(vsc->ds);
 	gpiod_set_value(vsc->reset, 1);
+
+	return 0;
 }
 EXPORT_SYMBOL(vsc73xx_remove);
 

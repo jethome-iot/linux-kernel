@@ -1880,7 +1880,7 @@ static inline void mwl8k_tx_count_packet(struct ieee80211_sta *sta, u8 tid)
 	 * packets ever exceeds the ampdu_min_traffic threshold, we will allow
 	 * an ampdu stream to be started.
 	 */
-	if (time_after(jiffies, (unsigned long)tx_stats->start_time + HZ)) {
+	if (jiffies - tx_stats->start_time > HZ) {
 		tx_stats->pkts = 0;
 		tx_stats->start_time = 0;
 	} else
@@ -3250,7 +3250,7 @@ mwl8k_cmd_set_aid(struct ieee80211_hw *hw,
 
 	cmd->header.code = cpu_to_le16(MWL8K_CMD_SET_AID);
 	cmd->header.length = cpu_to_le16(sizeof(*cmd));
-	cmd->aid = cpu_to_le16(vif->cfg.aid);
+	cmd->aid = cpu_to_le16(vif->bss_conf.aid);
 	memcpy(cmd->bssid, vif->bss_conf.bssid, ETH_ALEN);
 
 	if (vif->bss_conf.use_cts_prot) {
@@ -4225,11 +4225,9 @@ struct mwl8k_cmd_set_key {
 	__le32 key_info;
 	__le32 key_id;
 	__le16 key_len;
-	struct {
-		__u8 key_material[MAX_ENCR_KEY_LENGTH];
-		__u8 tkip_tx_mic_key[MIC_KEY_LENGTH];
-		__u8 tkip_rx_mic_key[MIC_KEY_LENGTH];
-	} tkip;
+	__u8 key_material[MAX_ENCR_KEY_LENGTH];
+	__u8 tkip_tx_mic_key[MIC_KEY_LENGTH];
+	__u8 tkip_rx_mic_key[MIC_KEY_LENGTH];
 	__le16 tkip_rsc_low;
 	__le32 tkip_rsc_high;
 	__le16 tkip_tsc_low;
@@ -4377,7 +4375,7 @@ static int mwl8k_cmd_encryption_set_key(struct ieee80211_hw *hw,
 		goto done;
 	}
 
-	memcpy(&cmd->tkip, key->key, keymlen);
+	memcpy(cmd->key_material, key->key, keymlen);
 	cmd->action = cpu_to_le32(action);
 
 	rc = mwl8k_post_pervif_cmd(hw, vif, &cmd->header);
@@ -5013,13 +5011,13 @@ mwl8k_bss_info_changed_sta(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	/*
 	 * No need to capture a beacon if we're no longer associated.
 	 */
-	if ((changed & BSS_CHANGED_ASSOC) && !vif->cfg.assoc)
+	if ((changed & BSS_CHANGED_ASSOC) && !vif->bss_conf.assoc)
 		priv->capture_beacon = false;
 
 	/*
 	 * Get the AP's legacy and MCS rates.
 	 */
-	if (vif->cfg.assoc) {
+	if (vif->bss_conf.assoc) {
 		struct ieee80211_sta *ap;
 
 		rcu_read_lock();
@@ -5085,7 +5083,7 @@ mwl8k_bss_info_changed_sta(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			goto out;
 	}
 
-	if (vif->cfg.assoc && !priv->ap_fw &&
+	if (vif->bss_conf.assoc && !priv->ap_fw &&
 	    (changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_ERP_CTS_PROT |
 			BSS_CHANGED_HT))) {
 		rc = mwl8k_cmd_set_aid(hw, vif, ap_legacy_rates);
@@ -5093,7 +5091,7 @@ mwl8k_bss_info_changed_sta(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			goto out;
 	}
 
-	if (vif->cfg.assoc &&
+	if (vif->bss_conf.assoc &&
 	    (changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_BEACON_INT))) {
 		/*
 		 * Finalize the join.  Tell rx handler to process
@@ -5147,7 +5145,7 @@ mwl8k_bss_info_changed_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	if (changed & (BSS_CHANGED_BEACON_INT | BSS_CHANGED_BEACON)) {
 		struct sk_buff *skb;
 
-		skb = ieee80211_beacon_get(hw, vif, 0);
+		skb = ieee80211_beacon_get(hw, vif);
 		if (skb != NULL) {
 			mwl8k_cmd_set_beacon(hw, vif, skb->data, skb->len);
 			kfree_skb(skb);
@@ -5163,7 +5161,7 @@ out:
 
 static void
 mwl8k_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-		       struct ieee80211_bss_conf *info, u64 changed)
+		       struct ieee80211_bss_conf *info, u32 changed)
 {
 	if (vif->type == NL80211_IFTYPE_STATION)
 		mwl8k_bss_info_changed_sta(hw, vif, info, changed);
@@ -5365,8 +5363,7 @@ static int mwl8k_sta_add(struct ieee80211_hw *hw,
 }
 
 static int mwl8k_conf_tx(struct ieee80211_hw *hw,
-			 struct ieee80211_vif *vif,
-			 unsigned int link_id, u16 queue,
+			 struct ieee80211_vif *vif, u16 queue,
 			 const struct ieee80211_tx_queue_params *params)
 {
 	struct mwl8k_priv *priv = hw->priv;
@@ -5611,7 +5608,6 @@ static void mwl8k_sw_scan_complete(struct ieee80211_hw *hw,
 
 static const struct ieee80211_ops mwl8k_ops = {
 	.tx			= mwl8k_tx,
-	.wake_tx_queue		= ieee80211_handle_wake_tx_queue,
 	.start			= mwl8k_start,
 	.stop			= mwl8k_stop,
 	.add_interface		= mwl8k_add_interface,
@@ -6052,7 +6048,7 @@ static int mwl8k_reload_firmware(struct ieee80211_hw *hw, char *fw_image)
 		goto fail;
 
 	for (i = 0; i < MWL8K_TX_WMM_QUEUES; i++) {
-		rc = mwl8k_conf_tx(hw, NULL, 0, i, &priv->wmm_params[i]);
+		rc = mwl8k_conf_tx(hw, NULL, i, &priv->wmm_params[i]);
 		if (rc)
 			goto fail;
 	}

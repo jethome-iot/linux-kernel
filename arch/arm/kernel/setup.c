@@ -15,10 +15,10 @@
 #include <linux/console.h>
 #include <linux/seq_file.h>
 #include <linux/screen_info.h>
+#include <linux/of_platform.h>
 #include <linux/init.h>
 #include <linux/kexec.h>
 #include <linux/libfdt.h>
-#include <linux/of.h>
 #include <linux/of_fdt.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
@@ -59,6 +59,9 @@
 #include <asm/unwind.h>
 #include <asm/memblock.h>
 #include <asm/virt.h>
+#ifdef CONFIG_AMLOGIC_VMAP
+#include <linux/amlogic/vmap_stack.h>
+#endif
 #include <asm/kasan.h>
 
 #include "atags.h"
@@ -75,6 +78,13 @@ static int __init fpe_setup(char *line)
 
 __setup("fpe=", fpe_setup);
 #endif
+
+extern void init_default_cache_policy(unsigned long);
+extern void paging_init(const struct machine_desc *desc);
+extern void early_mm_init(const struct machine_desc *);
+extern void adjust_lowmem_bounds(void);
+extern enum reboot_mode reboot_mode;
+extern void setup_dma_zone(const struct machine_desc *desc);
 
 unsigned int processor_id;
 EXPORT_SYMBOL(processor_id);
@@ -134,10 +144,10 @@ EXPORT_SYMBOL(outer_cache);
 int __cpu_architecture __read_mostly = CPU_ARCH_UNKNOWN;
 
 struct stack {
-	u32 irq[4];
-	u32 abt[4];
-	u32 und[4];
-	u32 fiq[4];
+	u32 irq[3];
+	u32 abt[3];
+	u32 und[3];
+	u32 fiq[3];
 } ____cacheline_aligned;
 
 #ifndef CONFIG_CPU_V7M
@@ -443,8 +453,6 @@ static void __init cpuid_init_hwcaps(void)
 {
 	int block;
 	u32 isar5;
-	u32 isar6;
-	u32 pfr2;
 
 	if (cpu_architecture() < CPU_ARCH_ARMv7)
 		return;
@@ -480,18 +488,6 @@ static void __init cpuid_init_hwcaps(void)
 	block = cpuid_feature_extract_field(isar5, 16);
 	if (block >= 1)
 		elf_hwcap2 |= HWCAP2_CRC32;
-
-	/* Check for Speculation barrier instruction */
-	isar6 = read_cpuid_ext(CPUID_EXT_ISAR6);
-	block = cpuid_feature_extract_field(isar6, 12);
-	if (block >= 1)
-		elf_hwcap2 |= HWCAP2_SB;
-
-	/* Check for Speculative Store Bypassing control */
-	pfr2 = read_cpuid_ext(CPUID_EXT_PFR2);
-	block = cpuid_feature_extract_field(pfr2, 4);
-	if (block >= 1)
-		elf_hwcap2 |= HWCAP2_SSBS;
 }
 
 static void __init elf_hwcap_fixup(void)
@@ -588,6 +584,9 @@ void notrace cpu_init(void)
 	      "I" (offsetof(struct stack, fiq[0])),
 	      PLC_l (PSR_F_BIT | PSR_I_BIT | SVC_MODE)
 	    : "r14");
+#ifdef CONFIG_AMLOGIC_VMAP
+	__setup_vmap_stack(cpu);
+#endif
 #endif
 }
 
@@ -928,8 +927,9 @@ static void __init request_standard_resources(const struct machine_desc *mdesc)
 		request_resource(&ioport_resource, &lp2);
 }
 
-#if defined(CONFIG_VGA_CONSOLE)
-struct screen_info vgacon_screen_info = {
+#if defined(CONFIG_VGA_CONSOLE) || defined(CONFIG_DUMMY_CONSOLE) || \
+    defined(CONFIG_EFI)
+struct screen_info screen_info = {
  .orig_video_lines	= 30,
  .orig_video_cols	= 80,
  .orig_video_mode	= 0,
@@ -1009,10 +1009,8 @@ static void __init reserve_crashkernel(void)
 
 	total_mem = get_total_mem();
 	ret = parse_crashkernel(boot_command_line, total_mem,
-				&crash_size, &crash_base,
-				NULL, NULL);
-	/* invalid value specified or crashkernel=0 */
-	if (ret || !crash_size)
+				&crash_size, &crash_base);
+	if (ret)
 		return;
 
 	if (crash_base <= 0) {
@@ -1135,7 +1133,7 @@ void __init setup_arch(char **cmdline_p)
 	setup_initial_init_mm(_text, _etext, _edata, _end);
 
 	/* populate cmd_line too for later use, preserving boot_command_line */
-	strscpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
+	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = cmd_line;
 
 	early_fixmap_init();
@@ -1148,7 +1146,7 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	setup_dma_zone(mdesc);
 	xen_early_init();
-	arm_efi_init();
+	efi_init();
 	/*
 	 * Make sure the calculation for lowmem/highmem is set appropriately
 	 * before reserving/allocating any memory
@@ -1191,9 +1189,13 @@ void __init setup_arch(char **cmdline_p)
 
 	reserve_crashkernel();
 
+#ifdef CONFIG_GENERIC_IRQ_MULTI_HANDLER
+	handle_arch_irq = mdesc->handle_irq;
+#endif
+
 #ifdef CONFIG_VT
 #if defined(CONFIG_VGA_CONSOLE)
-	vgacon_register_screen(&vgacon_screen_info);
+	conswitchp = &vga_con;
 #endif
 #endif
 
@@ -1255,9 +1257,6 @@ static const char *hwcap_str[] = {
 	"fphp",
 	"asimdhp",
 	"asimddp",
-	"asimdfhm",
-	"asimdbf16",
-	"i8mm",
 	NULL
 };
 
@@ -1267,8 +1266,6 @@ static const char *hwcap2_str[] = {
 	"sha1",
 	"sha2",
 	"crc32",
-	"sb",
-	"ssbs",
 	NULL
 };
 

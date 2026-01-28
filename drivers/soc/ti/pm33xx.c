@@ -555,9 +555,11 @@ static int am33xx_pm_probe(struct platform_device *pdev)
 #endif /* CONFIG_SUSPEND */
 
 	pm_runtime_enable(dev);
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret < 0)
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(dev);
 		goto err_pm_runtime_disable;
+	}
 
 	ret = pm_ops->init(am33xx_do_sram_idle);
 	if (ret) {
@@ -583,7 +585,7 @@ err_wkup_m3_ipc_put:
 	return ret;
 }
 
-static void am33xx_pm_remove(struct platform_device *pdev)
+static int am33xx_pm_remove(struct platform_device *pdev)
 {
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
@@ -594,6 +596,7 @@ static void am33xx_pm_remove(struct platform_device *pdev)
 	am33xx_pm_free_sram();
 	iounmap(rtc_base_virt);
 	clk_put(rtc_fck);
+	return 0;
 }
 
 static struct platform_driver am33xx_pm_driver = {
@@ -601,7 +604,7 @@ static struct platform_driver am33xx_pm_driver = {
 		.name   = "pm33xx",
 	},
 	.probe = am33xx_pm_probe,
-	.remove_new = am33xx_pm_remove,
+	.remove = am33xx_pm_remove,
 };
 module_platform_driver(am33xx_pm_driver);
 

@@ -33,6 +33,13 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/irq.h>
 
+EXPORT_TRACEPOINT_SYMBOL_GPL(irq_handler_entry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(irq_handler_exit);
+EXPORT_TRACEPOINT_SYMBOL_GPL(softirq_entry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(softirq_exit);
+EXPORT_TRACEPOINT_SYMBOL_GPL(tasklet_entry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(tasklet_exit);
+
 /*
    - No shared variables, all the data are CPU local.
    - If a softirq needs serialization, let it serialize itself
@@ -59,6 +66,14 @@ EXPORT_PER_CPU_SYMBOL(irq_stat);
 static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
 
 DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
+EXPORT_PER_CPU_SYMBOL_GPL(ksoftirqd);
+
+/*
+ * active_softirqs -- per cpu, a mask of softirqs that are being handled,
+ * with the expectation that approximate answers are acceptable and therefore
+ * no synchronization.
+ */
+DEFINE_PER_CPU(__u32, active_softirqs);
 
 const char * const softirq_to_name[NR_SOFTIRQS] = {
 	"HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL",
@@ -207,7 +222,7 @@ void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
 	u32 pending;
 	int curcnt;
 
-	WARN_ON_ONCE(in_hardirq());
+	WARN_ON_ONCE(in_irq());
 	lockdep_assert_irqs_enabled();
 
 	local_irq_save(flags);
@@ -279,19 +294,6 @@ static inline void invoke_softirq(void)
 		wakeup_softirqd();
 }
 
-/*
- * flush_smp_call_function_queue() can raise a soft interrupt in a function
- * call. On RT kernels this is undesired and the only known functionality
- * in the block layer which does this is disabled on RT. If soft interrupts
- * get raised which haven't been raised before the flush, warn so it can be
- * investigated.
- */
-void do_softirq_post_smp_call_flush(unsigned int was_pending)
-{
-	if (WARN_ON_ONCE(was_pending != local_softirq_pending()))
-		invoke_softirq();
-}
-
 #else /* CONFIG_PREEMPT_RT */
 
 /*
@@ -303,7 +305,7 @@ void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 {
 	unsigned long flags;
 
-	WARN_ON_ONCE(in_hardirq());
+	WARN_ON_ONCE(in_irq());
 
 	raw_local_irq_save(flags);
 	/*
@@ -350,14 +352,14 @@ static void __local_bh_enable(unsigned int cnt)
  */
 void _local_bh_enable(void)
 {
-	WARN_ON_ONCE(in_hardirq());
+	WARN_ON_ONCE(in_irq());
 	__local_bh_enable(SOFTIRQ_DISABLE_OFFSET);
 }
 EXPORT_SYMBOL(_local_bh_enable);
 
 void __local_bh_enable_ip(unsigned long ip, unsigned int cnt)
 {
-	WARN_ON_ONCE(in_hardirq());
+	WARN_ON_ONCE(in_irq());
 	lockdep_assert_irqs_enabled();
 #ifdef CONFIG_TRACE_IRQFLAGS
 	local_irq_disable();
@@ -507,6 +509,17 @@ static inline bool lockdep_softirq_start(void) { return false; }
 static inline void lockdep_softirq_end(bool in_hardirq) { }
 #endif
 
+static inline __u32 softirq_deferred_for_rt(__u32 *pending)
+{
+	__u32 deferred = 0;
+
+	if (cpupri_check_rt()) {
+		deferred = *pending & LONG_SOFTIRQ_MASK;
+		*pending &= ~LONG_SOFTIRQ_MASK;
+	}
+	return deferred;
+}
+
 asmlinkage __visible void __softirq_entry __do_softirq(void)
 {
 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
@@ -514,6 +527,7 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 	int max_restart = MAX_SOFTIRQ_RESTART;
 	struct softirq_action *h;
 	bool in_hardirq;
+	__u32 deferred;
 	__u32 pending;
 	int softirq_bit;
 
@@ -526,13 +540,15 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 
 	pending = local_softirq_pending();
 
+	deferred = softirq_deferred_for_rt(&pending);
 	softirq_handle_begin();
 	in_hardirq = lockdep_softirq_start();
 	account_softirq_enter(current);
 
 restart:
 	/* Reset the pending bitmask before enabling irqs */
-	set_softirq_pending(0);
+	set_softirq_pending(deferred);
+	__this_cpu_write(active_softirqs, pending);
 
 	local_irq_enable();
 
@@ -562,6 +578,7 @@ restart:
 		pending >>= softirq_bit;
 	}
 
+	__this_cpu_write(active_softirqs, 0);
 	if (!IS_ENABLED(CONFIG_PREEMPT_RT) &&
 	    __this_cpu_read(ksoftirqd) == current)
 		rcu_softirq_qs();
@@ -569,13 +586,16 @@ restart:
 	local_irq_disable();
 
 	pending = local_softirq_pending();
+	deferred = softirq_deferred_for_rt(&pending);
+
 	if (pending) {
 		if (time_before(jiffies, end) && !need_resched() &&
 		    --max_restart)
 			goto restart;
-
-		wakeup_softirqd();
 	}
+
+	if (pending | deferred)
+		wakeup_softirqd();
 
 	account_softirq_exit(current);
 	lockdep_softirq_end(in_hardirq);
@@ -602,7 +622,7 @@ void irq_enter_rcu(void)
  */
 void irq_enter(void)
 {
-	ct_irq_enter();
+	rcu_irq_enter();
 	irq_enter_rcu();
 }
 
@@ -612,8 +632,8 @@ static inline void tick_irq_exit(void)
 	int cpu = smp_processor_id();
 
 	/* Make sure that timer wheel updates are propagated */
-	if ((sched_core_idle_cpu(cpu) && !need_resched()) || tick_nohz_full_cpu(cpu)) {
-		if (!in_hardirq())
+	if ((idle_cpu(cpu) && !need_resched()) || tick_nohz_full_cpu(cpu)) {
+		if (!in_irq())
 			tick_nohz_irq_exit();
 	}
 #endif
@@ -654,7 +674,7 @@ void irq_exit_rcu(void)
 void irq_exit(void)
 {
 	__irq_exit_rcu();
-	ct_irq_exit();
+	rcu_irq_exit();
 	 /* must be last! */
 	lockdep_hardirq_exit();
 }
@@ -776,13 +796,13 @@ static void tasklet_action_common(struct softirq_action *a,
 			if (!atomic_read(&t->count)) {
 				if (tasklet_clear_sched(t)) {
 					if (t->use_callback) {
-						trace_tasklet_entry(t, t->callback);
+						trace_tasklet_entry(t->callback);
 						t->callback(t);
-						trace_tasklet_exit(t, t->callback);
+						trace_tasklet_exit(t->callback);
 					} else {
-						trace_tasklet_entry(t, t->func);
+						trace_tasklet_entry(t->func);
 						t->func(t->data);
-						trace_tasklet_exit(t, t->func);
+						trace_tasklet_exit(t->func);
 					}
 				}
 				tasklet_unlock(t);

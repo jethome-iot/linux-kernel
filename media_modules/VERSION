@@ -1,0 +1,98 @@
+#Developing Version
+Major_V=6
+Minor_V=15
+DevelopingChangeId=I494c265133ff9ff6dbf554a8159dad487ddfa1e1
+LTS_FLAG=
+
+#history version
+#V6.14 pre-test Notes
+#DTV H264 MMU development
+#
+#V6.12 Release Notes
+#Support kernel 6.6
+#Fixed H264/MPEG2 memory pollution issue
+#Improved VC1 playback stability
+#V6.10 Release Notes
+#Support S7 S7D chips
+#AMMS  V2.1
+#    Memory optimization, especially suitable for low-memory projects(HTXD2 512M etc.)
+#    Memory evaluation flow release
+#S5 Error recovery improvement
+#    Optimize display effect, utilize mmu copy function in the mosaic mode
+#    Stability optimization for error streams
+#V6.8 Release Notes
+#Support QOS for v4ldec
+#AMMS(Amlogic Media Memory System)  V2.0
+#    Scatter slot/cache aggregation
+#    MV buffer memory usage decreased
+#Dual-core software decoding time optimize
+#Support DW400 decoder mode to reduce memory usage for TV project
+#
+#V6.7 Release Notes
+#Release_ChangeId_V6_7=Iabfa01c63da558d842d3252c7612559fa830ec7d
+#New feature detail information:
+#H265 dual-core mosaic mode development
+#H264\H265 save one output buffer optimization
+#Add T5D  AV1 fg support
+#Encoder bringup of C1
+#Optimization H264 software decoding time
+#V4ldec supports p010 decoding output
+#Optimized for redundant decoding memory usage
+#Decoder bringup of txhd2
+#V6.6 Release Notes
+#Release_ChangeId_V6_6=I7906e7fb1fc9cd2ae2f5e3b35a85146077f647ed
+#V6.5 Release Notes
+#Release_ChangeId_V6_5=I1fb4d74a26b20c810af5fabe70d11b30038f52cd
+#V6.4 Release Notes
+#Release_ChangeId_V6_4=I3e3ba6e50ff95c9bdee77ecf9b6a14054c7db016
+#V6.3 Release Notes
+#Release_ChangeId_V6_3=Id88c63edf8568ce8f5c52203db4020db6ad12d54
+#V6.2 Release Notes
+#Release_ChangeId_V6_2=I38197e6c418dee6183605006ca63b85337be2b19
+#V6.1 Release Notes
+#Release_ChangeId_V6_1=I3343779b4ad29ab1be55a002fbc43ecdbc440993
+#Support T7C, T3
+#Support new DOS Reg management
+#V6.0 Release Notes
+#Release_ChangeId_V6_0=Ie5dd8015a9663f3be43a0867348b70812bdfb25e
+#Support DMABUF heap Feature
+#Support Decoder new Buffer management for V4Ldec
+#Support  Kernel 5.15
+#Support non-V4ldec  feature of the all V5 version and so on
+#Kernel 5.15 Support Chip SC2
+#Support Codec2 for Android T, all CTS test clean
+#V5.0 Release Notes
+#Release_ChangeId_V5_0=I6053e02900215d9006469c38ca375ace498b849f
+#upgrade Kernel version to 5.4
+#Android R + v4l2dec (no vpp)   xts clean
+#v4ldec driver separate from amports drivers
+#
+#V4.0.0 Release Notes
+#upgrade Kernel version to 4.19
+#v4l2 support  for h264/h265/vp9
+#add fra support in decoder driver
+#
+#V3.0.0 Release Notes
+#upgrade Kernel version to 4.9
+#media_module remove from kernel
+#new firmware management
+#mjpeg/mpeg12/mpeg2 multi-instance decoder support
+#h264 4k afbc support
+#AVS2 decoder support
+#vdec double write support
+#add av1 decoder support
+#add decoder QOS info report
+#upgrade TA ucode to 0.2 version
+#
+#V2.0.0 Release Notes
+#upgrade  Kernel version to 3.14
+#Introduce codec_mm memory management
+#add afbc scatter memory support
+#add vp9 decoder support
+#add 264/265/vp9 multi-instance decoder support
+#
+#V1.0.0 Release Notes
+#based kernel to 3.10
+#add H264 4K decoder support
+#add H265 video decoder support
+#H265 decoder support afbc output

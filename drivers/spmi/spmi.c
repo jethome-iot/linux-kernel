@@ -35,7 +35,7 @@ static void spmi_ctrl_release(struct device *dev)
 {
 	struct spmi_controller *ctrl = to_spmi_controller(dev);
 
-	ida_free(&ctrl_ida, ctrl->nr);
+	ida_simple_remove(&ctrl_ida, ctrl->nr);
 	kfree(ctrl);
 }
 
@@ -367,7 +367,7 @@ static void spmi_drv_shutdown(struct device *dev)
 		sdrv->shutdown(to_spmi_device(dev));
 }
 
-static int spmi_drv_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int spmi_drv_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	int ret;
 
@@ -388,27 +388,7 @@ static struct bus_type spmi_bus_type = {
 };
 
 /**
- * spmi_find_device_by_of_node() - look up an SPMI device from a device node
- *
- * @np:		device node
- *
- * Takes a reference to the embedded struct device which needs to be dropped
- * after use.
- *
- * Returns the struct spmi_device associated with a device node or NULL.
- */
-struct spmi_device *spmi_find_device_by_of_node(struct device_node *np)
-{
-	struct device *dev = bus_find_device_by_of_node(&spmi_bus_type, np);
-
-	if (dev)
-		return to_spmi_device(dev);
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(spmi_find_device_by_of_node);
-
-/**
- * spmi_device_alloc() - Allocate a new SPMI device
+ * spmi_controller_alloc() - Allocate a new SPMI device
  * @ctrl:	associated controller
  *
  * Caller is responsible for either calling spmi_device_add() to add the
@@ -448,11 +428,11 @@ struct spmi_controller *spmi_controller_alloc(struct device *parent,
 	int id;
 
 	if (WARN_ON(!parent))
-		return ERR_PTR(-EINVAL);
+		return NULL;
 
 	ctrl = kzalloc(sizeof(*ctrl) + size, GFP_KERNEL);
 	if (!ctrl)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 
 	device_initialize(&ctrl->dev);
 	ctrl->dev.type = &spmi_ctrl_type;
@@ -461,12 +441,12 @@ struct spmi_controller *spmi_controller_alloc(struct device *parent,
 	ctrl->dev.of_node = parent->of_node;
 	spmi_controller_set_drvdata(ctrl, &ctrl[1]);
 
-	id = ida_alloc(&ctrl_ida, GFP_KERNEL);
+	id = ida_simple_get(&ctrl_ida, 0, 0, GFP_KERNEL);
 	if (id < 0) {
 		dev_err(parent,
 			"unable to allocate SPMI controller identifier.\n");
 		spmi_controller_put(ctrl);
-		return ERR_PTR(id);
+		return NULL;
 	}
 
 	ctrl->nr = id;
@@ -586,9 +566,8 @@ void spmi_controller_remove(struct spmi_controller *ctrl)
 EXPORT_SYMBOL_GPL(spmi_controller_remove);
 
 /**
- * __spmi_driver_register() - Register client driver with SPMI core
+ * spmi_driver_register() - Register client driver with SPMI core
  * @sdrv:	client driver to be associated with client-device.
- * @owner:	module owner
  *
  * This API will register the client driver with the SPMI framework.
  * It is typically called from the driver's module-init function.

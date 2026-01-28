@@ -283,7 +283,7 @@ static const struct of_device_id rcar_gyroadc_match[] = {
 
 MODULE_DEVICE_TABLE(of, rcar_gyroadc_match);
 
-static const struct of_device_id rcar_gyroadc_child_match[] __maybe_unused = {
+static const struct of_device_id rcar_gyroadc_child_match[] = {
 	/* Mode 1 ADCs */
 	{
 		.compatible	= "fujitsu,mb88101a",
@@ -511,7 +511,8 @@ static int rcar_gyroadc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	priv->model = (uintptr_t)of_device_get_match_data(&pdev->dev);
+	priv->model = (enum rcar_gyroadc_model)
+		of_device_get_match_data(&pdev->dev);
 
 	platform_set_drvdata(pdev, indio_dev);
 
@@ -559,7 +560,7 @@ err_clk_if_enable:
 	return ret;
 }
 
-static void rcar_gyroadc_remove(struct platform_device *pdev)
+static int rcar_gyroadc_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct rcar_gyroadc *priv = iio_priv(indio_dev);
@@ -573,8 +574,11 @@ static void rcar_gyroadc_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(dev);
 	clk_disable_unprepare(priv->clk);
 	rcar_gyroadc_deinit_supplies(indio_dev);
+
+	return 0;
 }
 
+#if defined(CONFIG_PM)
 static int rcar_gyroadc_suspend(struct device *dev)
 {
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
@@ -594,18 +598,19 @@ static int rcar_gyroadc_resume(struct device *dev)
 
 	return 0;
 }
+#endif
 
 static const struct dev_pm_ops rcar_gyroadc_pm_ops = {
-	RUNTIME_PM_OPS(rcar_gyroadc_suspend, rcar_gyroadc_resume, NULL)
+	SET_RUNTIME_PM_OPS(rcar_gyroadc_suspend, rcar_gyroadc_resume, NULL)
 };
 
 static struct platform_driver rcar_gyroadc_driver = {
 	.probe          = rcar_gyroadc_probe,
-	.remove_new     = rcar_gyroadc_remove,
+	.remove         = rcar_gyroadc_remove,
 	.driver         = {
 		.name		= DRIVER_NAME,
 		.of_match_table	= rcar_gyroadc_match,
-		.pm		= pm_ptr(&rcar_gyroadc_pm_ops),
+		.pm		= &rcar_gyroadc_pm_ops,
 	},
 };
 

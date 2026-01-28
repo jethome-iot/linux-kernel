@@ -53,6 +53,50 @@ void cros_usbpd_unregister_notify(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(cros_usbpd_unregister_notify);
 
+/**
+ * cros_ec_pd_command - Send a command to the EC.
+ *
+ * @ec_dev: EC device
+ * @command: EC command
+ * @outdata: EC command output data
+ * @outsize: Size of outdata
+ * @indata: EC command input data
+ * @insize: Size of indata
+ *
+ * Return: >= 0 on success, negative error number on failure.
+ */
+static int cros_ec_pd_command(struct cros_ec_device *ec_dev,
+			      int command,
+			      uint8_t *outdata,
+			      int outsize,
+			      uint8_t *indata,
+			      int insize)
+{
+	struct cros_ec_command *msg;
+	int ret;
+
+	msg = kzalloc(sizeof(*msg) + max(insize, outsize), GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->command = command;
+	msg->outsize = outsize;
+	msg->insize = insize;
+
+	if (outsize)
+		memcpy(msg->data, outdata, outsize);
+
+	ret = cros_ec_cmd_xfer_status(ec_dev, msg);
+	if (ret < 0)
+		goto error;
+
+	if (insize)
+		memcpy(indata, msg->data, insize);
+error:
+	kfree(msg);
+	return ret;
+}
+
 static void cros_usbpd_get_event_and_notify(struct device  *dev,
 					    struct cros_ec_device *ec_dev)
 {
@@ -71,8 +115,10 @@ static void cros_usbpd_get_event_and_notify(struct device  *dev,
 	}
 
 	/* Check for PD host events on EC. */
-	ret = cros_ec_cmd(ec_dev, 0, EC_CMD_PD_HOST_EVENT_STATUS,
-			  NULL, 0, &host_event_status, sizeof(host_event_status));
+	ret = cros_ec_pd_command(ec_dev, EC_CMD_PD_HOST_EVENT_STATUS,
+				 NULL, 0,
+				 (uint8_t *)&host_event_status,
+				 sizeof(host_event_status));
 	if (ret < 0) {
 		dev_warn(dev, "Can't get host event status (err: %d)\n", ret);
 		goto send_notify;
@@ -134,13 +180,15 @@ static int cros_usbpd_notify_probe_acpi(struct platform_device *pdev)
 	return 0;
 }
 
-static void cros_usbpd_notify_remove_acpi(struct platform_device *pdev)
+static int cros_usbpd_notify_remove_acpi(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct acpi_device *adev = ACPI_COMPANION(dev);
 
 	acpi_remove_notify_handler(adev->handle, ACPI_ALL_NOTIFY,
 				   cros_usbpd_notify_acpi);
+
+	return 0;
 }
 
 static const struct acpi_device_id cros_usbpd_notify_acpi_device_ids[] = {
@@ -155,7 +203,7 @@ static struct platform_driver cros_usbpd_notify_acpi_driver = {
 		.acpi_match_table = cros_usbpd_notify_acpi_device_ids,
 	},
 	.probe = cros_usbpd_notify_probe_acpi,
-	.remove_new = cros_usbpd_notify_remove_acpi,
+	.remove = cros_usbpd_notify_remove_acpi,
 };
 
 #endif /* CONFIG_ACPI */
@@ -207,7 +255,7 @@ static int cros_usbpd_notify_probe_plat(struct platform_device *pdev)
 	return 0;
 }
 
-static void cros_usbpd_notify_remove_plat(struct platform_device *pdev)
+static int cros_usbpd_notify_remove_plat(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct cros_ec_dev *ecdev = dev_get_drvdata(dev->parent);
@@ -216,6 +264,8 @@ static void cros_usbpd_notify_remove_plat(struct platform_device *pdev)
 
 	blocking_notifier_chain_unregister(&ecdev->ec_dev->event_notifier,
 					   &pdnotify->nb);
+
+	return 0;
 }
 
 static struct platform_driver cros_usbpd_notify_plat_driver = {
@@ -223,7 +273,7 @@ static struct platform_driver cros_usbpd_notify_plat_driver = {
 		.name = DRV_NAME,
 	},
 	.probe = cros_usbpd_notify_probe_plat,
-	.remove_new = cros_usbpd_notify_remove_plat,
+	.remove = cros_usbpd_notify_remove_plat,
 };
 
 static int __init cros_usbpd_notify_init(void)

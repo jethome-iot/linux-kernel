@@ -16,6 +16,7 @@
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/nvmem-provider.h>
+#include <linux/android_kabi.h>
 #include <uapi/linux/rtc.h>
 
 extern int rtc_month_days(unsigned int month, unsigned int year);
@@ -66,8 +67,8 @@ struct rtc_class_ops {
 	int (*alarm_irq_enable)(struct device *, unsigned int enabled);
 	int (*read_offset)(struct device *, long *offset);
 	int (*set_offset)(struct device *, long offset);
-	int (*param_get)(struct device *, struct rtc_param *param);
-	int (*param_set)(struct device *, struct rtc_param *param);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct rtc_device;
@@ -82,7 +83,6 @@ struct rtc_timer {
 
 /* flags */
 #define RTC_DEV_BUSY 0
-#define RTC_NO_CDEV  1
 
 struct rtc_device {
 	struct device dev;
@@ -110,6 +110,8 @@ struct rtc_device {
 	struct hrtimer pie_timer; /* sub second exp, so needs hrtimer */
 	int pie_enabled;
 	struct work_struct irqwork;
+	/* Some hardware can't support UIE mode */
+	int uie_unsupported;
 
 	/*
 	 * This offset specifies the update timing of the RTC.
@@ -146,7 +148,6 @@ struct rtc_device {
 
 	time64_t range_min;
 	timeu64_t range_max;
-	timeu64_t alarm_offset_max;
 	time64_t start_secs;
 	time64_t offset_secs;
 	bool set_start_time;
@@ -161,6 +162,8 @@ struct rtc_device {
 	unsigned int uie_task_active:1;
 	unsigned int uie_timer_active:1;
 #endif
+
+	ANDROID_KABI_RESERVE(1);
 };
 #define to_rtc_device(d) container_of(d, struct rtc_device, dev)
 
@@ -223,23 +226,6 @@ void rtc_timer_do_work(struct work_struct *work);
 static inline bool is_leap_year(unsigned int year)
 {
 	return (!(year % 4) && (year % 100)) || !(year % 400);
-}
-
-/**
- * rtc_bound_alarmtime() - Return alarm time bound by rtc limit
- * @rtc: Pointer to rtc device structure
- * @requested: Requested alarm timeout
- *
- * Return: Alarm timeout bound by maximum alarm time supported by rtc.
- */
-static inline ktime_t rtc_bound_alarmtime(struct rtc_device *rtc,
-					  ktime_t requested)
-{
-	if (rtc->alarm_offset_max &&
-	    rtc->alarm_offset_max * MSEC_PER_SEC < ktime_to_ms(requested))
-		return ms_to_ktime(rtc->alarm_offset_max * MSEC_PER_SEC);
-
-	return requested;
 }
 
 #define devm_rtc_register_device(device) \

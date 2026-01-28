@@ -12,12 +12,11 @@
 #ifndef __ASM_ASSEMBLER_H
 #define __ASM_ASSEMBLER_H
 
-#include <linux/export.h>
+#include <asm-generic/export.h>
 
+#include <asm/asm-offsets.h>
 #include <asm/alternative.h>
 #include <asm/asm-bug.h>
-#include <asm/asm-extable.h>
-#include <asm/asm-offsets.h>
 #include <asm/cpufeature.h>
 #include <asm/cputype.h>
 #include <asm/debug-monitors.h>
@@ -34,12 +33,26 @@
 	wx\n	.req	w\n
 	.endr
 
+	.macro save_and_disable_daif, flags
+	mrs	\flags, daif
+	msr	daifset, #0xf
+	.endm
+
 	.macro disable_daif
 	msr	daifset, #0xf
 	.endm
 
 	.macro enable_daif
 	msr	daifclr, #0xf
+	.endm
+
+	.macro	restore_daif, flags:req
+	msr	daif, \flags
+	.endm
+
+	/* IRQ/FIQ are the lowest priority flags, unconditionally unmask the rest. */
+	.macro enable_da
+	msr	daifclr, #(8 | 4)
 	.endm
 
 /*
@@ -122,6 +135,32 @@ alternative_endif
 	nop
 	.endr
 	.endm
+
+/*
+ * Create an exception table entry for `insn`, which will branch to `fixup`
+ * when an unhandled fault is taken.
+ */
+	.macro		_asm_extable, insn, fixup
+	.pushsection	__ex_table, "a"
+	.align		3
+	.long		(\insn - .), (\fixup - .)
+	.popsection
+	.endm
+
+/*
+ * Create an exception table entry for `insn` if `fixup` is provided. Otherwise
+ * do nothing.
+ */
+	.macro		_cond_extable, insn, fixup
+	.ifnc		\fixup,
+	_asm_extable	\insn, \fixup
+	.endif
+	.endm
+
+
+#define USER(l, x...)				\
+9999:	x;					\
+	_asm_extable	9999b, l
 
 /*
  * Register aliases.
@@ -279,7 +318,7 @@ alternative_endif
 alternative_if_not ARM64_KVM_PROTECTED_MODE
 	ASM_BUG()
 alternative_else_nop_endif
-alternative_cb ARM64_ALWAYS_SYSTEM, kvm_compute_final_ctr_el0
+alternative_cb kvm_compute_final_ctr_el0
 	movz	\reg, #0
 	movk	\reg, #0, lsl #16
 	movk	\reg, #0, lsl #32
@@ -346,20 +385,6 @@ alternative_cb_end
 	.endm
 
 /*
- * idmap_get_t0sz - get the T0SZ value needed to cover the ID map
- *
- * Calculate the maximum allowed value for TCR_EL1.T0SZ so that the
- * entire ID map region can be mapped. As T0SZ == (64 - #bits used),
- * this number conveniently equals the number of leading zeroes in
- * the physical address of _end.
- */
-	.macro	idmap_get_t0sz, reg
-	adrp	\reg, _end
-	orr	\reg, \reg, #(1 << VA_BITS_MIN) - 1
-	clz	\reg, \reg
-	.endm
-
-/*
  * tcr_compute_pa_size - set TCR.(I)PS to the highest supported
  * ID_AA64MMFR0_EL1.PARange value
  *
@@ -387,19 +412,19 @@ alternative_endif
 
 /*
  * Macro to perform a data cache maintenance for the interval
- * [start, end) with dcache line size explicitly provided.
+ * [start, end)
  *
  * 	op:		operation passed to dc instruction
  * 	domain:		domain used in dsb instruciton
  * 	start:          starting virtual address of the region
  * 	end:            end virtual address of the region
- *	linesz:		dcache line size
  * 	fixup:		optional label to branch to on user fault
- * 	Corrupts:       start, end, tmp
+ * 	Corrupts:       start, end, tmp1, tmp2
  */
-	.macro dcache_by_myline_op op, domain, start, end, linesz, tmp, fixup
-	sub	\tmp, \linesz, #1
-	bic	\start, \start, \tmp
+	.macro dcache_by_line_op op, domain, start, end, tmp1, tmp2, fixup
+	dcache_line_size \tmp1, \tmp2
+	sub	\tmp2, \tmp1, #1
+	bic	\start, \start, \tmp2
 .Ldcache_op\@:
 	.ifc	\op, cvau
 	__dcache_op_workaround_clean_cache \op, \start
@@ -418,28 +443,12 @@ alternative_endif
 	.endif
 	.endif
 	.endif
-	add	\start, \start, \linesz
+	add	\start, \start, \tmp1
 	cmp	\start, \end
 	b.lo	.Ldcache_op\@
 	dsb	\domain
 
-	_cond_uaccess_extable .Ldcache_op\@, \fixup
-	.endm
-
-/*
- * Macro to perform a data cache maintenance for the interval
- * [start, end)
- *
- * 	op:		operation passed to dc instruction
- * 	domain:		domain used in dsb instruciton
- * 	start:          starting virtual address of the region
- * 	end:            end virtual address of the region
- * 	fixup:		optional label to branch to on user fault
- * 	Corrupts:       start, end, tmp1, tmp2
- */
-	.macro dcache_by_line_op op, domain, start, end, tmp1, tmp2, fixup
-	dcache_line_size \tmp1, \tmp2
-	dcache_by_myline_op \op, \domain, \start, \end, \tmp1, \tmp2, \fixup
+	_cond_extable .Ldcache_op\@, \fixup
 	.endm
 
 /*
@@ -462,35 +471,7 @@ alternative_endif
 	dsb	ish
 	isb
 
-	_cond_uaccess_extable .Licache_op\@, \fixup
-	.endm
-
-/*
- * load_ttbr1 - install @pgtbl as a TTBR1 page table
- * pgtbl preserved
- * tmp1/tmp2 clobbered, either may overlap with pgtbl
- */
-	.macro		load_ttbr1, pgtbl, tmp1, tmp2
-	phys_to_ttbr	\tmp1, \pgtbl
-	offset_ttbr1 	\tmp1, \tmp2
-	msr		ttbr1_el1, \tmp1
-	isb
-	.endm
-
-/*
- * To prevent the possibility of old and new partial table walks being visible
- * in the tlb, switch the ttbr to a zero page when we invalidate the old
- * records. D4.7.1 'General TLB maintenance requirements' in ARM DDI 0487A.i
- * Even switching to our copied tables will cause a changed output address at
- * each stage of the walk.
- */
-	.macro break_before_make_ttbr_switch zero_page, page_table, tmp, tmp2
-	phys_to_ttbr \tmp, \zero_page
-	msr	ttbr1_el1, \tmp
-	isb
-	tlbi	vmalle1
-	dsb	nsh
-	load_ttbr1 \page_table, \tmp, \tmp2
+	_cond_extable .Licache_op\@, \fixup
 	.endm
 
 /*
@@ -551,6 +532,11 @@ alternative_endif
 #define EXPORT_SYMBOL_NOKASAN(name)	EXPORT_SYMBOL(name)
 #endif
 
+#ifdef CONFIG_KASAN_HW_TAGS
+#define EXPORT_SYMBOL_NOHWKASAN(name)
+#else
+#define EXPORT_SYMBOL_NOHWKASAN(name)	EXPORT_SYMBOL_NOKASAN(name)
+#endif
 	/*
 	 * Emit a 64-bit absolute little endian symbol reference in a way that
 	 * ensures that it will be resolved at build time, even when building a
@@ -606,6 +592,17 @@ alternative_endif
 	.endm
 
 /*
+ * Perform the reverse of offset_ttbr1.
+ * bic is used as it can cover the immediate value and, in future, won't need
+ * to be nop'ed out when dealing with 52-bit kernel VAs.
+ */
+	.macro	restore_ttbr1, ttbr
+#ifdef CONFIG_ARM64_VA_BITS_52
+	bic	\ttbr, \ttbr, #TTBR1_BADDR_4852_OFFSET
+#endif
+	.endm
+
+/*
  * Arrange a physical address in a TTBR register, taking care of 52-bit
  * addresses.
  *
@@ -635,10 +632,12 @@ alternative_endif
 	.endm
 
 	.macro	pte_to_phys, phys, pte
-	and	\phys, \pte, #PTE_ADDR_MASK
 #ifdef CONFIG_ARM64_PA_BITS_52
-	orr	\phys, \phys, \phys, lsl #PTE_ADDR_HIGH_SHIFT
-	and	\phys, \phys, GENMASK_ULL(PHYS_MASK_SHIFT - 1, PAGE_SHIFT)
+	ubfiz	\phys, \pte, #(48 - 16 - 12), #16
+	bfxil	\phys, \pte, #16, #32
+	lsl	\phys, \phys, #16
+#else
+	and	\phys, \pte, #PTE_ADDR_MASK
 #endif
 	.endm
 
@@ -760,25 +759,32 @@ alternative_endif
 .endm
 
 	/*
-	 * Check whether asm code should yield as soon as it is able. This is
-	 * the case if we are currently running in task context, and the
-	 * TIF_NEED_RESCHED flag is set. (Note that the TIF_NEED_RESCHED flag
-	 * is stored negated in the top word of the thread_info::preempt_count
+	 * Check whether preempt/bh-disabled asm code should yield as soon as
+	 * it is able. This is the case if we are currently running in task
+	 * context, and either a softirq is pending, or the TIF_NEED_RESCHED
+	 * flag is set and re-enabling preemption a single time would result in
+	 * a preempt count of zero. (Note that the TIF_NEED_RESCHED flag is
+	 * stored negated in the top word of the thread_info::preempt_count
 	 * field)
 	 */
-	.macro		cond_yield, lbl:req, tmp:req, tmp2
-#ifdef CONFIG_PREEMPT_VOLUNTARY
+	.macro		cond_yield, lbl:req, tmp:req, tmp2:req
 	get_current_task \tmp
 	ldr		\tmp, [\tmp, #TSK_TI_PREEMPT]
 	/*
 	 * If we are serving a softirq, there is no point in yielding: the
 	 * softirq will not be preempted no matter what we do, so we should
-	 * run to completion as quickly as we can. The preempt_count field will
-	 * have BIT(SOFTIRQ_SHIFT) set in this case, so the zero check will
-	 * catch this case too.
+	 * run to completion as quickly as we can.
 	 */
+	tbnz		\tmp, #SOFTIRQ_SHIFT, .Lnoyield_\@
+#ifdef CONFIG_PREEMPTION
+	sub		\tmp, \tmp, #PREEMPT_DISABLE_OFFSET
 	cbz		\tmp, \lbl
 #endif
+	adr_l		\tmp, irq_stat + IRQ_CPUSTAT_SOFTIRQ_PENDING
+	get_this_cpu_offset	\tmp2
+	ldr		w\tmp, [\tmp, \tmp2]
+	cbnz		w\tmp, \lbl	// yield on pending softirq in task context
+.Lnoyield_\@:
 	.endm
 
 /*
@@ -843,7 +849,7 @@ alternative_endif
 
 	.macro __mitigate_spectre_bhb_loop      tmp
 #ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
-alternative_cb ARM64_ALWAYS_SYSTEM, spectre_bhb_patch_loop_iter
+alternative_cb  spectre_bhb_patch_loop_iter
 	mov	\tmp, #32		// Patched to correct the immediate
 alternative_cb_end
 .Lspectre_bhb_loop\@:
@@ -856,7 +862,7 @@ alternative_cb_end
 
 	.macro mitigate_spectre_bhb_loop	tmp
 #ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
-alternative_cb ARM64_ALWAYS_SYSTEM, spectre_bhb_patch_loop_mitigation_enable
+alternative_cb	spectre_bhb_patch_loop_mitigation_enable
 	b	.L_spectre_bhb_loop_done\@	// Patched to NOP
 alternative_cb_end
 	__mitigate_spectre_bhb_loop	\tmp
@@ -870,7 +876,7 @@ alternative_cb_end
 	stp	x0, x1, [sp, #-16]!
 	stp	x2, x3, [sp, #-16]!
 	mov	w0, #ARM_SMCCC_ARCH_WORKAROUND_3
-alternative_cb ARM64_ALWAYS_SYSTEM, smccc_patch_fw_mitigation_conduit
+alternative_cb	smccc_patch_fw_mitigation_conduit
 	nop					// Patched to SMC/HVC #0
 alternative_cb_end
 	ldp	x2, x3, [sp], #16
@@ -880,11 +886,26 @@ alternative_cb_end
 
 	.macro mitigate_spectre_bhb_clear_insn
 #ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
-alternative_cb ARM64_ALWAYS_SYSTEM, spectre_bhb_patch_clearbhb
+alternative_cb	spectre_bhb_patch_clearbhb
 	/* Patched to NOP when not supported */
 	clearbhb
 	isb
 alternative_cb_end
 #endif /* CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY */
 	.endm
+
+#if defined(__KVM_NVHE_HYPERVISOR__)
+/*
+ * pKVM uses the module_ops struct to expose services to modules but
+ * doesn't allow fine-grained definition of the license for each export,
+ * and doesn't have a way to check the license of the loaded module.
+ * Given that said module may be proprietary, let's seek GPL compliance
+ * by preventing the accidental export of GPL symbols to hyp modules via
+ * pKVM's module_ops struct.
+ */
+#ifdef EXPORT_SYMBOL_GPL
+#undef EXPORT_SYMBOL_GPL
+#endif
+#define EXPORT_SYMBOL_GPL(sym) ASM_BUILD_BUG()
+#endif
 #endif	/* __ASM_ASSEMBLER_H */

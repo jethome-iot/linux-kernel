@@ -9,7 +9,6 @@
 
 #define dev_fmt(fmt) "PME: " fmt
 
-#include <linux/bitfield.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -225,7 +224,7 @@ static void pcie_pme_work_fn(struct work_struct *work)
 			break;
 
 		pcie_capability_read_dword(port, PCI_EXP_RTSTA, &rtsta);
-		if (PCI_POSSIBLE_ERROR(rtsta))
+		if (rtsta == (u32) ~0)
 			break;
 
 		if (rtsta & PCI_EXP_RTSTA_PME) {
@@ -236,8 +235,7 @@ static void pcie_pme_work_fn(struct work_struct *work)
 			pcie_clear_root_pme_status(port);
 
 			spin_unlock_irq(&data->lock);
-			pcie_pme_handle_request(port,
-				    FIELD_GET(PCI_EXP_RTSTA_PME_RQ_ID, rtsta));
+			pcie_pme_handle_request(port, rtsta & 0xffff);
 			spin_lock_irq(&data->lock);
 
 			continue;
@@ -276,7 +274,7 @@ static irqreturn_t pcie_pme_irq(int irq, void *context)
 	spin_lock_irqsave(&data->lock, flags);
 	pcie_capability_read_dword(port, PCI_EXP_RTSTA, &rtsta);
 
-	if (PCI_POSSIBLE_ERROR(rtsta) || !(rtsta & PCI_EXP_RTSTA_PME)) {
+	if (rtsta == (u32) ~0 || !(rtsta & PCI_EXP_RTSTA_PME)) {
 		spin_unlock_irqrestore(&data->lock, flags);
 		return IRQ_NONE;
 	}

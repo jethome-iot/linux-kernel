@@ -46,7 +46,6 @@ enum HCLGE_MBX_OPCODE {
 	HCLGE_MBX_PUSH_PROMISC_INFO,	/* (PF -> VF) push vf promisc info */
 	HCLGE_MBX_VF_UNINIT,            /* (VF -> PF) vf is unintializing */
 	HCLGE_MBX_HANDLE_VF_TBL,	/* (VF -> PF) store/clear hw table */
-	HCLGE_MBX_GET_RING_VECTOR_MAP,	/* (VF -> PF) get ring-to-vector map */
 
 	HCLGE_MBX_GET_VF_FLR_STATUS = 200, /* (M7 -> PF) get vf flr status */
 	HCLGE_MBX_PUSH_LINK_STATUS,	/* (M7 -> PF) get port link status */
@@ -81,9 +80,6 @@ enum hclge_mbx_tbl_cfg_subcode {
 #define HCLGE_MBX_MAX_RESP_DATA_SIZE	8U
 #define HCLGE_MBX_MAX_RING_CHAIN_PARAM_NUM	4
 
-#define HCLGE_RESET_SCHED_TIMEOUT	(3 * HZ)
-#define HCLGE_MBX_SCHED_TIMEOUT	(HZ / 2)
-
 struct hclge_ring_chain_param {
 	u8 ring_type;
 	u8 tqp_index;
@@ -93,8 +89,8 @@ struct hclge_ring_chain_param {
 struct hclge_basic_info {
 	u8 hw_tc_map;
 	u8 rsv;
-	__le16 mbx_api_version;
-	__le32 pf_caps;
+	u16 mbx_api_version;
+	u32 pf_caps;
 };
 
 struct hclgevf_mbx_resp_status {
@@ -199,27 +195,6 @@ struct hclge_mbx_port_base_vlan {
 	__le16 vlan_tag;
 };
 
-struct hclge_mbx_vf_queue_info {
-	__le16 num_tqps;
-	__le16 rss_size;
-	__le16 rx_buf_len;
-};
-
-struct hclge_mbx_vf_queue_depth {
-	__le16 num_tx_desc;
-	__le16 num_rx_desc;
-};
-
-struct hclge_mbx_vlan_filter {
-	u8 is_kill;
-	__le16 vlan_id;
-	__le16 proto;
-};
-
-struct hclge_mbx_mtu_info {
-	__le32 mtu;
-};
-
 #pragma pack()
 
 /* used by VF to store the received Async responses from PF */
@@ -232,17 +207,6 @@ struct hclgevf_mbx_arq_ring {
 	atomic_t count;
 	__le16 msg_q[HCLGE_MBX_MAX_ARQ_MSG_NUM][HCLGE_MBX_MAX_ARQ_MSG_SIZE];
 };
-
-struct hclge_dev;
-
-#define HCLGE_MBX_OPCODE_MAX 256
-struct hclge_mbx_ops_param {
-	struct hclge_vport *vport;
-	struct hclge_mbx_vf_to_pf_cmd *req;
-	struct hclge_respond_to_vf_msg *resp_msg;
-};
-
-typedef int (*hclge_mbx_ops_fn)(struct hclge_mbx_ops_param *param);
 
 #define hclge_mbx_ring_ptr_move_crq(crq) \
 	(crq->next_to_use = (crq->next_to_use + 1) % crq->desc_num)

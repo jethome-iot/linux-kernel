@@ -14,7 +14,6 @@
 #include <linux/usb.h>
 #include <linux/usb/ch11.h>
 #include <linux/usb/hcd.h>
-#include <linux/usb/typec.h>
 #include "usb.h"
 
 struct usb_hub {
@@ -74,7 +73,6 @@ struct usb_hub {
 	spinlock_t		irq_urb_lock;
 	struct timer_list	irq_urb_retry;
 	struct usb_port		**ports;
-	struct list_head        onboard_hub_devs;
 };
 
 /**
@@ -83,7 +81,6 @@ struct usb_hub {
  * @dev: generic device interface
  * @port_owner: port's owner
  * @peer: related usb2 and usb3 ports (share the same connector)
- * @connector: USB Type-C connector
  * @req: default pm qos request for hubs without port power control
  * @connect_type: port's connect type
  * @state: device state of the usb device attached to the port
@@ -102,7 +99,6 @@ struct usb_port {
 	struct device dev;
 	struct usb_dev_state *port_owner;
 	struct usb_port *peer;
-	struct typec_connector *connector;
 	struct dev_pm_qos_request *req;
 	enum usb_port_connect_type connect_type;
 	enum usb_device_state state;
@@ -133,9 +129,6 @@ extern int hub_port_debounce(struct usb_hub *hub, int port1,
 		bool must_be_connected);
 extern int usb_clear_port_feature(struct usb_device *hdev,
 		int port1, int feature);
-extern int usb_hub_port_status(struct usb_hub *hub, int port1,
-		u16 *status, u16 *change);
-extern int usb_port_is_power_on(struct usb_hub *hub, unsigned int portstatus);
 
 static inline bool hub_is_port_power_switchable(struct usb_hub *hub)
 {

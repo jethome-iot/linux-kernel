@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#
+# Amlogic multimedia information
+#
+config AMLOGIC_MEDIA_INFO
+	bool "Multimedia Information"
+	default n
+	help
+		Amlogic multimedia information support

@@ -1,0 +1,3 @@
+#aml-media.ko
+CONFIG_AMLOGIC_LCD=y
+

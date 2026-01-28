@@ -10,11 +10,6 @@
 #include <sound/soc-acpi-intel-match.h>
 #include "soc-acpi-intel-sdw-mockup-match.h"
 
-static const struct snd_soc_acpi_codecs essx_83x6 = {
-	.num_codecs = 3,
-	.codecs = { "ESSX8316", "ESSX8326", "ESSX8336"},
-};
-
 static const struct snd_soc_acpi_codecs tgl_codecs = {
 	.num_codecs = 1,
 	.codecs = {"MX98357A"}
@@ -39,35 +34,6 @@ static const struct snd_soc_acpi_endpoint spk_r_endpoint = {
 	.aggregated = 1,
 	.group_position = 1,
 	.group_id = 1,
-};
-
-static const struct snd_soc_acpi_endpoint spk_2_endpoint = {
-	.num = 0,
-	.aggregated = 1,
-	.group_position = 2,
-	.group_id = 1,
-};
-
-static const struct snd_soc_acpi_endpoint spk_3_endpoint = {
-	.num = 0,
-	.aggregated = 1,
-	.group_position = 3,
-	.group_id = 1,
-};
-
-static const struct snd_soc_acpi_endpoint rt712_endpoints[] = {
-	{
-		.num = 0,
-		.aggregated = 0,
-		.group_position = 0,
-		.group_id = 0,
-	},
-	{
-		.num = 1,
-		.aggregated = 0,
-		.group_position = 0,
-		.group_id = 0,
-	},
 };
 
 static const struct snd_soc_acpi_adr_device rt711_0_adr[] = {
@@ -196,24 +162,6 @@ static const struct snd_soc_acpi_adr_device rt1316_1_single_adr[] = {
 		.num_endpoints = 1,
 		.endpoints = &single_endpoint,
 		.name_prefix = "rt1316-1"
-	}
-};
-
-static const struct snd_soc_acpi_adr_device rt712_0_single_adr[] = {
-	{
-		.adr = 0x000030025D071201ull,
-		.num_endpoints = ARRAY_SIZE(rt712_endpoints),
-		.endpoints = rt712_endpoints,
-		.name_prefix = "rt712"
-	}
-};
-
-static const struct snd_soc_acpi_adr_device rt1712_1_single_adr[] = {
-	{
-		.adr = 0x000130025D171201ull,
-		.num_endpoints = 1,
-		.endpoints = &single_endpoint,
-		.name_prefix = "rt712-dmic"
 	}
 };
 
@@ -400,78 +348,6 @@ static const struct snd_soc_acpi_link_adr tgl_3_in_1_sdca_mono[] = {
 	{}
 };
 
-static const struct snd_soc_acpi_link_adr tgl_712_only[] = {
-	{
-		.mask = BIT(0),
-		.num_adr = ARRAY_SIZE(rt712_0_single_adr),
-		.adr_d = rt712_0_single_adr,
-	},
-	{
-		.mask = BIT(1),
-		.num_adr = ARRAY_SIZE(rt1712_1_single_adr),
-		.adr_d = rt1712_1_single_adr,
-	},
-	{}
-};
-
-static const struct snd_soc_acpi_adr_device cs42l43_3_adr[] = {
-	{
-		.adr = 0x00033001FA424301ull,
-		.num_endpoints = 1,
-		.endpoints = &single_endpoint,
-		.name_prefix = "cs42l43"
-	}
-};
-
-static const struct snd_soc_acpi_adr_device cs35l56_0_adr[] = {
-	{
-		.adr = 0x00003301FA355601ull,
-		.num_endpoints = 1,
-		.endpoints = &spk_r_endpoint,
-		.name_prefix = "AMP1"
-	},
-	{
-		.adr = 0x00003201FA355601ull,
-		.num_endpoints = 1,
-		.endpoints = &spk_3_endpoint,
-		.name_prefix = "AMP2"
-	}
-};
-
-static const struct snd_soc_acpi_adr_device cs35l56_1_adr[] = {
-	{
-		.adr = 0x00013701FA355601ull,
-		.num_endpoints = 1,
-		.endpoints = &spk_l_endpoint,
-		.name_prefix = "AMP8"
-	},
-	{
-		.adr = 0x00013601FA355601ull,
-		.num_endpoints = 1,
-		.endpoints = &spk_2_endpoint,
-		.name_prefix = "AMP7"
-	}
-};
-
-static const struct snd_soc_acpi_link_adr tgl_cs42l43_cs35l56[] = {
-	{
-		.mask = BIT(3),
-		.num_adr = ARRAY_SIZE(cs42l43_3_adr),
-		.adr_d = cs42l43_3_adr,
-	},
-	{
-		.mask = BIT(0),
-		.num_adr = ARRAY_SIZE(cs35l56_0_adr),
-		.adr_d = cs35l56_0_adr,
-	},
-	{
-		.mask = BIT(1),
-		.num_adr = ARRAY_SIZE(cs35l56_1_adr),
-		.adr_d = cs35l56_1_adr,
-	},
-	{}
-};
-
 static const struct snd_soc_acpi_codecs tgl_max98373_amp = {
 	.num_codecs = 1,
 	.codecs = {"MX98373"}
@@ -482,52 +358,30 @@ static const struct snd_soc_acpi_codecs tgl_rt1011_amp = {
 	.codecs = {"10EC1011"}
 };
 
-static const struct snd_soc_acpi_codecs tgl_rt5682_rt5682s_hp = {
-	.num_codecs = 2,
-	.codecs = {"10EC5682", "RTL5682"},
-};
-
-static const struct snd_soc_acpi_codecs tgl_lt6911_hdmi = {
-	.num_codecs = 1,
-	.codecs = {"INTC10B0"}
-};
-
 struct snd_soc_acpi_mach snd_soc_acpi_intel_tgl_machines[] = {
 	{
-		.comp_ids = &tgl_rt5682_rt5682s_hp,
-		.drv_name = "tgl_mx98357_rt5682",
+		.id = "10EC5682",
+		.drv_name = "tgl_mx98357a_rt5682",
 		.machine_quirk = snd_soc_acpi_codec_list,
 		.quirk_data = &tgl_codecs,
+		.sof_fw_filename = "sof-tgl.ri",
 		.sof_tplg_filename = "sof-tgl-max98357a-rt5682.tplg",
 	},
 	{
-		.comp_ids = &tgl_rt5682_rt5682s_hp,
+		.id = "10EC5682",
 		.drv_name = "tgl_mx98373_rt5682",
 		.machine_quirk = snd_soc_acpi_codec_list,
 		.quirk_data = &tgl_max98373_amp,
+		.sof_fw_filename = "sof-tgl.ri",
 		.sof_tplg_filename = "sof-tgl-max98373-rt5682.tplg",
 	},
 	{
-		.comp_ids = &tgl_rt5682_rt5682s_hp,
+		.id = "10EC5682",
 		.drv_name = "tgl_rt1011_rt5682",
 		.machine_quirk = snd_soc_acpi_codec_list,
 		.quirk_data = &tgl_rt1011_amp,
+		.sof_fw_filename = "sof-tgl.ri",
 		.sof_tplg_filename = "sof-tgl-rt1011-rt5682.tplg",
-	},
-	{
-		.comp_ids = &essx_83x6,
-		.drv_name = "sof-essx8336",
-		.sof_tplg_filename = "sof-tgl-es8336", /* the tplg suffix is added at run time */
-		.tplg_quirk_mask = SND_SOC_ACPI_TPLG_INTEL_SSP_NUMBER |
-					SND_SOC_ACPI_TPLG_INTEL_SSP_MSB |
-					SND_SOC_ACPI_TPLG_INTEL_DMIC_NUMBER,
-	},
-	{
-		.id = "10EC1308",
-		.drv_name = "tgl_rt1308_hdmi_ssp",
-		.machine_quirk = snd_soc_acpi_codec_list,
-		.quirk_data = &tgl_lt6911_hdmi,
-		.sof_tplg_filename = "sof-tgl-rt1308-ssp2-hdmi-ssp15.tplg"
 	},
 	{},
 };
@@ -540,37 +394,28 @@ struct snd_soc_acpi_mach snd_soc_acpi_intel_tgl_sdw_machines[] = {
 		.link_mask = GENMASK(3, 0),
 		.links = sdw_mockup_headset_2amps_mic,
 		.drv_name = "sof_sdw",
+		.sof_fw_filename = "sof-tgl.ri",
 		.sof_tplg_filename = "sof-tgl-rt711-rt1308-rt715.tplg",
 	},
 	{
 		.link_mask = BIT(0) | BIT(1) | BIT(3),
 		.links = sdw_mockup_headset_1amp_mic,
 		.drv_name = "sof_sdw",
+		.sof_fw_filename = "sof-tgl.ri",
 		.sof_tplg_filename = "sof-tgl-rt711-rt1308-mono-rt715.tplg",
 	},
 	{
 		.link_mask = BIT(0) | BIT(1) | BIT(2),
 		.links = sdw_mockup_mic_headset_1amp,
 		.drv_name = "sof_sdw",
+		.sof_fw_filename = "sof-tgl.ri",
 		.sof_tplg_filename = "sof-tgl-rt715-rt711-rt1308-mono.tplg",
-	},
-	{
-		.link_mask = 0xF, /* 4 active links required */
-		.links = tgl_712_only,
-		.drv_name = "sof_sdw",
-		.sof_tplg_filename = "sof-tgl-rt712.tplg",
 	},
 	{
 		.link_mask = 0x7,
 		.links = tgl_sdw_rt711_link1_rt1308_link2_rt715_link0,
 		.drv_name = "sof_sdw",
 		.sof_tplg_filename = "sof-tgl-rt715-rt711-rt1308-mono.tplg",
-	},
-	{
-		.link_mask = 0xB,
-		.links = tgl_cs42l43_cs35l56,
-		.drv_name = "sof_sdw",
-		.sof_tplg_filename = "sof-tgl-cs42l43-l3-cs35l56-l01.tplg",
 	},
 	{
 		.link_mask = 0xF, /* 4 active links required */

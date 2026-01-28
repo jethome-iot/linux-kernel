@@ -7,7 +7,6 @@
 
 #include <linux/sysfs.h>
 #include <linux/init.h>
-#include <linux/of.h>
 #include <linux/stat.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
@@ -28,10 +27,9 @@ struct soc_device {
 	int soc_dev_num;
 };
 
-static const struct bus_type soc_bus_type = {
+static struct bus_type soc_bus_type = {
 	.name  = "soc",
 };
-static bool soc_bus_registered;
 
 static DEVICE_ATTR(machine,		0444, soc_info_show,  NULL);
 static DEVICE_ATTR(family,		0444, soc_info_show,  NULL);
@@ -106,21 +104,9 @@ static void soc_release(struct device *dev)
 {
 	struct soc_device *soc_dev = container_of(dev, struct soc_device, dev);
 
-	ida_free(&soc_ida, soc_dev->soc_dev_num);
+	ida_simple_remove(&soc_ida, soc_dev->soc_dev_num);
 	kfree(soc_dev->dev.groups);
 	kfree(soc_dev);
-}
-
-static void soc_device_get_machine(struct soc_device_attribute *soc_dev_attr)
-{
-	struct device_node *np;
-
-	if (soc_dev_attr->machine)
-		return;
-
-	np = of_find_node_by_path("/");
-	of_property_read_string(np, "model", &soc_dev_attr->machine);
-	of_node_put(np);
 }
 
 static struct soc_device_attribute *early_soc_dev_attr;
@@ -131,9 +117,7 @@ struct soc_device *soc_device_register(struct soc_device_attribute *soc_dev_attr
 	const struct attribute_group **soc_attr_groups;
 	int ret;
 
-	soc_device_get_machine(soc_dev_attr);
-
-	if (!soc_bus_registered) {
+	if (!soc_bus_type.p) {
 		if (early_soc_dev_attr)
 			return ERR_PTR(-EBUSY);
 		early_soc_dev_attr = soc_dev_attr;
@@ -155,7 +139,7 @@ struct soc_device *soc_device_register(struct soc_device_attribute *soc_dev_attr
 	soc_attr_groups[1] = soc_dev_attr->custom_attr_group;
 
 	/* Fetch a unique (reclaimable) SOC ID. */
-	ret = ida_alloc(&soc_ida, GFP_KERNEL);
+	ret = ida_simple_get(&soc_ida, 0, 0, GFP_KERNEL);
 	if (ret < 0)
 		goto out3;
 	soc_dev->soc_dev_num = ret;
@@ -199,7 +183,6 @@ static int __init soc_bus_register(void)
 	ret = bus_register(&soc_bus_type);
 	if (ret)
 		return ret;
-	soc_bus_registered = true;
 
 	if (early_soc_dev_attr)
 		return PTR_ERR(soc_device_register(early_soc_dev_attr));
@@ -258,13 +241,15 @@ static int soc_device_match_one(struct device *dev, void *arg)
 const struct soc_device_attribute *soc_device_match(
 	const struct soc_device_attribute *matches)
 {
-	int ret;
+	int ret = 0;
 
 	if (!matches)
 		return NULL;
 
-	while (matches->machine || matches->family || matches->revision ||
-	       matches->soc_id) {
+	while (!ret) {
+		if (!(matches->machine || matches->family ||
+		      matches->revision || matches->soc_id))
+			break;
 		ret = bus_for_each_dev(&soc_bus_type, NULL, (void *)matches,
 				       soc_device_match_one);
 		if (ret < 0 && early_soc_dev_attr)
@@ -272,10 +257,10 @@ const struct soc_device_attribute *soc_device_match(
 						    matches);
 		if (ret < 0)
 			return NULL;
-		if (ret)
+		if (!ret)
+			matches++;
+		else
 			return matches;
-
-		matches++;
 	}
 	return NULL;
 }

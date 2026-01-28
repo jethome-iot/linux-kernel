@@ -11,13 +11,15 @@ Video4Linux (V4L) driver-specific documentation
 
 	bttv
 	cafe_ccic
+	cpia2
 	cx88
+	davinci-vpbe
 	fimc
 	imx
 	imx7
 	ipu3
 	ivtv
-	mgb4
+	meye
 	omap3isp
 	omap4_camera
 	philips
@@ -28,7 +30,5 @@ Video4Linux (V4L) driver-specific documentation
 	si470x
 	si4713
 	si476x
-	starfive_camss
 	vimc
-	visl
 	vivid

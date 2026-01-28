@@ -104,8 +104,14 @@ struct mdp5_cfg_hw {
 	uint32_t max_clk;
 };
 
+/* platform config data (ie. from DT, or pdata) */
+struct mdp5_cfg_platform {
+	struct iommu_domain *iommu;
+};
+
 struct mdp5_cfg {
 	const struct mdp5_cfg_hw *hw;
+	struct mdp5_cfg_platform platform;
 };
 
 struct mdp5_kms;
@@ -121,5 +127,6 @@ int mdp5_cfg_get_hw_rev(struct mdp5_cfg_handler *cfg_hnd);
 
 struct mdp5_cfg_handler *mdp5_cfg_init(struct mdp5_kms *mdp5_kms,
 		uint32_t major, uint32_t minor);
+void mdp5_cfg_destroy(struct mdp5_cfg_handler *cfg_hnd);
 
 #endif /* __MDP5_CFG_H__ */

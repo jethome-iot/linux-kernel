@@ -452,12 +452,12 @@ static void pack_inode(struct ubifs_info *c, struct ubifs_ino_node *ino,
 	ino->ch.node_type = UBIFS_INO_NODE;
 	ino_key_init_flash(c, &ino->key, inode->i_ino);
 	ino->creat_sqnum = cpu_to_le64(ui->creat_sqnum);
-	ino->atime_sec  = cpu_to_le64(inode_get_atime_sec(inode));
-	ino->atime_nsec = cpu_to_le32(inode_get_atime_nsec(inode));
-	ino->ctime_sec  = cpu_to_le64(inode_get_ctime_sec(inode));
-	ino->ctime_nsec = cpu_to_le32(inode_get_ctime_nsec(inode));
-	ino->mtime_sec  = cpu_to_le64(inode_get_mtime_sec(inode));
-	ino->mtime_nsec = cpu_to_le32(inode_get_mtime_nsec(inode));
+	ino->atime_sec  = cpu_to_le64(inode->i_atime.tv_sec);
+	ino->atime_nsec = cpu_to_le32(inode->i_atime.tv_nsec);
+	ino->ctime_sec  = cpu_to_le64(inode->i_ctime.tv_sec);
+	ino->ctime_nsec = cpu_to_le32(inode->i_ctime.tv_nsec);
+	ino->mtime_sec  = cpu_to_le64(inode->i_mtime.tv_sec);
+	ino->mtime_nsec = cpu_to_le32(inode->i_mtime.tv_nsec);
 	ino->uid   = cpu_to_le32(i_uid_read(inode));
 	ino->gid   = cpu_to_le32(i_gid_read(inode));
 	ino->mode  = cpu_to_le32(inode->i_mode);
@@ -503,7 +503,7 @@ static void mark_inode_clean(struct ubifs_info *c, struct ubifs_inode *ui)
 static void set_dent_cookie(struct ubifs_info *c, struct ubifs_dent_node *dent)
 {
 	if (c->double_hash)
-		dent->cookie = (__force __le32) get_random_u32();
+		dent->cookie = (__force __le32) prandom_u32();
 	else
 		dent->cookie = 0;
 }
@@ -1201,13 +1201,9 @@ out_free:
  * ubifs_jnl_rename - rename a directory entry.
  * @c: UBIFS file-system description object
  * @old_dir: parent inode of directory entry to rename
- * @old_inode: directory entry's inode to rename
- * @old_nm: name of the old directory entry to rename
+ * @old_dentry: directory entry to rename
  * @new_dir: parent inode of directory entry to rename
- * @new_inode: new directory entry's inode (or directory entry's inode to
- *		replace)
- * @new_nm: new name of the new directory entry
- * @whiteout: whiteout inode
+ * @new_dentry: new directory entry (or directory entry to replace)
  * @sync: non-zero if the write-buffer has to be synchronized
  *
  * This function implements the re-name operation which may involve writing up
@@ -1476,25 +1472,23 @@ out_free:
  * @block: data block number
  * @dn: data node to re-compress
  * @new_len: new length
- * @dn_size: size of the data node @dn in memory
  *
  * This function is used when an inode is truncated and the last data node of
  * the inode has to be re-compressed/encrypted and re-written.
  */
 static int truncate_data_node(const struct ubifs_info *c, const struct inode *inode,
 			      unsigned int block, struct ubifs_data_node *dn,
-			      int *new_len, int dn_size)
+			      int *new_len)
 {
 	void *buf;
-	int err, dlen, compr_type, out_len, data_size;
+	int err, dlen, compr_type, out_len, old_dlen;
 
 	out_len = le32_to_cpu(dn->size);
 	buf = kmalloc_array(out_len, WORST_COMPR_FACTOR, GFP_NOFS);
 	if (!buf)
 		return -ENOMEM;
 
-	dlen = le32_to_cpu(dn->ch.len) - UBIFS_DATA_NODE_SZ;
-	data_size = dn_size - UBIFS_DATA_NODE_SZ;
+	dlen = old_dlen = le32_to_cpu(dn->ch.len) - UBIFS_DATA_NODE_SZ;
 	compr_type = le16_to_cpu(dn->compr_type);
 
 	if (IS_ENCRYPTED(inode)) {
@@ -1514,11 +1508,11 @@ static int truncate_data_node(const struct ubifs_info *c, const struct inode *in
 	}
 
 	if (IS_ENCRYPTED(inode)) {
-		err = ubifs_encrypt(inode, dn, out_len, &data_size, block);
+		err = ubifs_encrypt(inode, dn, out_len, &old_dlen, block);
 		if (err)
 			goto out;
 
-		out_len = data_size;
+		out_len = old_dlen;
 	} else {
 		dn->compr_size = 0;
 	}
@@ -1556,7 +1550,6 @@ int ubifs_jnl_truncate(struct ubifs_info *c, const struct inode *inode,
 	struct ubifs_trun_node *trun;
 	struct ubifs_data_node *dn;
 	int err, dlen, len, lnum, offs, bit, sz, sync = IS_SYNC(inode);
-	int dn_size;
 	struct ubifs_inode *ui = ubifs_inode(inode);
 	ino_t inum = inode->i_ino;
 	unsigned int blk;
@@ -1569,13 +1562,10 @@ int ubifs_jnl_truncate(struct ubifs_info *c, const struct inode *inode,
 	ubifs_assert(c, S_ISREG(inode->i_mode));
 	ubifs_assert(c, mutex_is_locked(&ui->ui_mutex));
 
-	dn_size = COMPRESSED_DATA_NODE_BUF_SZ;
+	sz = UBIFS_TRUN_NODE_SZ + UBIFS_INO_NODE_SZ +
+	     UBIFS_MAX_DATA_NODE_SZ * WORST_COMPR_FACTOR;
 
-	if (IS_ENCRYPTED(inode))
-		dn_size += UBIFS_CIPHER_BLOCK_SIZE;
-
-	sz =  UBIFS_TRUN_NODE_SZ + UBIFS_INO_NODE_SZ +
-		dn_size + ubifs_auth_node_sz(c);
+	sz += ubifs_auth_node_sz(c);
 
 	ino = kmalloc(sz, GFP_NOFS);
 	if (!ino)
@@ -1606,16 +1596,15 @@ int ubifs_jnl_truncate(struct ubifs_info *c, const struct inode *inode,
 			if (dn_len <= 0 || dn_len > UBIFS_BLOCK_SIZE) {
 				ubifs_err(c, "bad data node (block %u, inode %lu)",
 					  blk, inode->i_ino);
-				ubifs_dump_node(c, dn, dn_size);
-				err = -EUCLEAN;
+				ubifs_dump_node(c, dn, sz - UBIFS_INO_NODE_SZ -
+						UBIFS_TRUN_NODE_SZ);
 				goto out_free;
 			}
 
 			if (dn_len <= dlen)
 				dlen = 0; /* Nothing to do */
 			else {
-				err = truncate_data_node(c, inode, blk, dn,
-						&dlen, dn_size);
+				err = truncate_data_node(c, inode, blk, dn, &dlen);
 				if (err)
 					goto out_free;
 			}

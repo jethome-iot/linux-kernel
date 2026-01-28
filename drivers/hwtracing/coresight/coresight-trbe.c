@@ -91,16 +91,10 @@ struct trbe_buf {
  */
 #define TRBE_WORKAROUND_OVERWRITE_FILL_MODE	0
 #define TRBE_WORKAROUND_WRITE_OUT_OF_RANGE	1
-#define TRBE_NEEDS_DRAIN_AFTER_DISABLE		2
-#define TRBE_NEEDS_CTXT_SYNC_AFTER_ENABLE	3
-#define TRBE_IS_BROKEN				4
 
 static int trbe_errata_cpucaps[] = {
 	[TRBE_WORKAROUND_OVERWRITE_FILL_MODE] = ARM64_WORKAROUND_TRBE_OVERWRITE_FILL_MODE,
 	[TRBE_WORKAROUND_WRITE_OUT_OF_RANGE] = ARM64_WORKAROUND_TRBE_WRITE_OUT_OF_RANGE,
-	[TRBE_NEEDS_DRAIN_AFTER_DISABLE] = ARM64_WORKAROUND_2064142,
-	[TRBE_NEEDS_CTXT_SYNC_AFTER_ENABLE] = ARM64_WORKAROUND_2038923,
-	[TRBE_IS_BROKEN] = ARM64_WORKAROUND_1902691,
 	-1,		/* Sentinel, must be the last entry */
 };
 
@@ -173,32 +167,6 @@ static inline bool trbe_may_write_out_of_range(struct trbe_cpudata *cpudata)
 	return trbe_has_erratum(cpudata, TRBE_WORKAROUND_WRITE_OUT_OF_RANGE);
 }
 
-static inline bool trbe_needs_drain_after_disable(struct trbe_cpudata *cpudata)
-{
-	/*
-	 * Errata affected TRBE implementation will need TSB CSYNC and
-	 * DSB in order to prevent subsequent writes into certain TRBE
-	 * system registers from being ignored and not effected.
-	 */
-	return trbe_has_erratum(cpudata, TRBE_NEEDS_DRAIN_AFTER_DISABLE);
-}
-
-static inline bool trbe_needs_ctxt_sync_after_enable(struct trbe_cpudata *cpudata)
-{
-	/*
-	 * Errata affected TRBE implementation will need an additional
-	 * context synchronization in order to prevent an inconsistent
-	 * TRBE prohibited region view on the CPU which could possibly
-	 * corrupt the TRBE buffer or the TRBE state.
-	 */
-	return trbe_has_erratum(cpudata, TRBE_NEEDS_CTXT_SYNC_AFTER_ENABLE);
-}
-
-static inline bool trbe_is_broken(struct trbe_cpudata *cpudata)
-{
-	return trbe_has_erratum(cpudata, TRBE_IS_BROKEN);
-}
-
 static int trbe_alloc_node(struct perf_event *event)
 {
 	if (event->cpu == -1)
@@ -206,53 +174,30 @@ static int trbe_alloc_node(struct perf_event *event)
 	return cpu_to_node(event->cpu);
 }
 
-static inline void trbe_drain_buffer(void)
+static void trbe_drain_buffer(void)
 {
 	tsb_csync();
 	dsb(nsh);
 }
 
-static inline void set_trbe_enabled(struct trbe_cpudata *cpudata, u64 trblimitr)
-{
-	/*
-	 * Enable the TRBE without clearing LIMITPTR which
-	 * might be required for fetching the buffer limits.
-	 */
-	trblimitr |= TRBLIMITR_EL1_E;
-	write_sysreg_s(trblimitr, SYS_TRBLIMITR_EL1);
-
-	/* Synchronize the TRBE enable event */
-	isb();
-
-	if (trbe_needs_ctxt_sync_after_enable(cpudata))
-		isb();
-}
-
-static inline void set_trbe_disabled(struct trbe_cpudata *cpudata)
+static void trbe_drain_and_disable_local(void)
 {
 	u64 trblimitr = read_sysreg_s(SYS_TRBLIMITR_EL1);
+
+	trbe_drain_buffer();
 
 	/*
 	 * Disable the TRBE without clearing LIMITPTR which
 	 * might be required for fetching the buffer limits.
 	 */
-	trblimitr &= ~TRBLIMITR_EL1_E;
+	trblimitr &= ~TRBLIMITR_ENABLE;
 	write_sysreg_s(trblimitr, SYS_TRBLIMITR_EL1);
-
-	if (trbe_needs_drain_after_disable(cpudata))
-		trbe_drain_buffer();
 	isb();
 }
 
-static void trbe_drain_and_disable_local(struct trbe_cpudata *cpudata)
+static void trbe_reset_local(void)
 {
-	trbe_drain_buffer();
-	set_trbe_disabled(cpudata);
-}
-
-static void trbe_reset_local(struct trbe_cpudata *cpudata)
-{
-	trbe_drain_and_disable_local(cpudata);
+	trbe_drain_and_disable_local();
 	write_sysreg_s(0, SYS_TRBLIMITR_EL1);
 	write_sysreg_s(0, SYS_TRBPTR_EL1);
 	write_sysreg_s(0, SYS_TRBBASER_EL1);
@@ -289,7 +234,7 @@ static void trbe_stop_and_truncate_event(struct perf_output_handle *handle)
 	 * at event_stop(). So disable the TRBE here and leave
 	 * the update_buffer() to return a 0 size.
 	 */
-	trbe_drain_and_disable_local(buf->cpudata);
+	trbe_drain_and_disable_local();
 	perf_aux_output_flag(handle, PERF_AUX_FLAG_TRUNCATED);
 	perf_aux_output_end(handle, 0);
 	*this_cpu_ptr(buf->cpudata->drvdata->handle) = NULL;
@@ -582,27 +527,26 @@ static void clr_trbe_status(void)
 	u64 trbsr = read_sysreg_s(SYS_TRBSR_EL1);
 
 	WARN_ON(is_trbe_enabled());
-	trbsr &= ~TRBSR_EL1_IRQ;
-	trbsr &= ~TRBSR_EL1_TRG;
-	trbsr &= ~TRBSR_EL1_WRAP;
-	trbsr &= ~TRBSR_EL1_EC_MASK;
-	trbsr &= ~TRBSR_EL1_BSC_MASK;
-	trbsr &= ~TRBSR_EL1_S;
+	trbsr &= ~TRBSR_IRQ;
+	trbsr &= ~TRBSR_TRG;
+	trbsr &= ~TRBSR_WRAP;
+	trbsr &= ~(TRBSR_EC_MASK << TRBSR_EC_SHIFT);
+	trbsr &= ~(TRBSR_BSC_MASK << TRBSR_BSC_SHIFT);
+	trbsr &= ~TRBSR_STOP;
 	write_sysreg_s(trbsr, SYS_TRBSR_EL1);
 }
 
-static void set_trbe_limit_pointer_enabled(struct trbe_buf *buf)
+static void set_trbe_limit_pointer_enabled(unsigned long addr)
 {
 	u64 trblimitr = read_sysreg_s(SYS_TRBLIMITR_EL1);
-	unsigned long addr = buf->trbe_limit;
 
-	WARN_ON(!IS_ALIGNED(addr, (1UL << TRBLIMITR_EL1_LIMIT_SHIFT)));
+	WARN_ON(!IS_ALIGNED(addr, (1UL << TRBLIMITR_LIMIT_SHIFT)));
 	WARN_ON(!IS_ALIGNED(addr, PAGE_SIZE));
 
-	trblimitr &= ~TRBLIMITR_EL1_nVM;
-	trblimitr &= ~TRBLIMITR_EL1_FM_MASK;
-	trblimitr &= ~TRBLIMITR_EL1_TM_MASK;
-	trblimitr &= ~TRBLIMITR_EL1_LIMIT_MASK;
+	trblimitr &= ~TRBLIMITR_NVM;
+	trblimitr &= ~(TRBLIMITR_FILL_MODE_MASK << TRBLIMITR_FILL_MODE_SHIFT);
+	trblimitr &= ~(TRBLIMITR_TRIG_MODE_MASK << TRBLIMITR_TRIG_MODE_SHIFT);
+	trblimitr &= ~(TRBLIMITR_LIMIT_MASK << TRBLIMITR_LIMIT_SHIFT);
 
 	/*
 	 * Fill trace buffer mode is used here while configuring the
@@ -613,17 +557,21 @@ static void set_trbe_limit_pointer_enabled(struct trbe_buf *buf)
 	 * trace data in the interrupt handler, before reconfiguring
 	 * the TRBE.
 	 */
-	trblimitr |= (TRBLIMITR_EL1_FM_FILL << TRBLIMITR_EL1_FM_SHIFT) &
-		     TRBLIMITR_EL1_FM_MASK;
+	trblimitr |= (TRBE_FILL_MODE_FILL & TRBLIMITR_FILL_MODE_MASK) << TRBLIMITR_FILL_MODE_SHIFT;
 
 	/*
 	 * Trigger mode is not used here while configuring the TRBE for
 	 * the trace capture. Hence just keep this in the ignore mode.
 	 */
-	trblimitr |= (TRBLIMITR_EL1_TM_IGNR << TRBLIMITR_EL1_TM_SHIFT) &
-		     TRBLIMITR_EL1_TM_MASK;
+	trblimitr |= (TRBE_TRIG_MODE_IGNORE & TRBLIMITR_TRIG_MODE_MASK) <<
+		      TRBLIMITR_TRIG_MODE_SHIFT;
 	trblimitr |= (addr & PAGE_MASK);
-	set_trbe_enabled(buf->cpudata, trblimitr);
+
+	trblimitr |= TRBLIMITR_ENABLE;
+	write_sysreg_s(trblimitr, SYS_TRBLIMITR_EL1);
+
+	/* Synchronize the TRBE enable event */
+	isb();
 }
 
 static void trbe_enable_hw(struct trbe_buf *buf)
@@ -631,7 +579,8 @@ static void trbe_enable_hw(struct trbe_buf *buf)
 	WARN_ON(buf->trbe_hw_base < buf->trbe_base);
 	WARN_ON(buf->trbe_write < buf->trbe_hw_base);
 	WARN_ON(buf->trbe_write >= buf->trbe_limit);
-	set_trbe_disabled(buf->cpudata);
+	set_trbe_disabled();
+	isb();
 	clr_trbe_status();
 	set_trbe_base_pointer(buf->trbe_hw_base);
 	set_trbe_write_pointer(buf->trbe_write);
@@ -641,7 +590,7 @@ static void trbe_enable_hw(struct trbe_buf *buf)
 	 * till now before enabling the TRBE.
 	 */
 	isb();
-	set_trbe_limit_pointer_enabled(buf);
+	set_trbe_limit_pointer_enabled(buf->trbe_limit);
 }
 
 static enum trbe_fault_action trbe_get_fault_act(struct perf_output_handle *handle,
@@ -826,7 +775,7 @@ static unsigned long arm_trbe_update_buffer(struct coresight_device *csdev,
 	 * the TRBE here will ensure that no IRQ could be generated when the perf
 	 * handle gets freed in etm_event_stop().
 	 */
-	trbe_drain_and_disable_local(cpudata);
+	trbe_drain_and_disable_local();
 
 	/* Check if there is a pending interrupt and handle it here */
 	status = read_sysreg_s(SYS_TRBSR_EL1);
@@ -1006,8 +955,7 @@ err:
 	return ret;
 }
 
-static int arm_trbe_enable(struct coresight_device *csdev, enum cs_mode mode,
-			   void *data)
+static int arm_trbe_enable(struct coresight_device *csdev, u32 mode, void *data)
 {
 	struct trbe_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 	struct trbe_cpudata *cpudata = dev_get_drvdata(&csdev->dev);
@@ -1038,7 +986,7 @@ static int arm_trbe_disable(struct coresight_device *csdev)
 	if (cpudata->mode != CS_MODE_PERF)
 		return -EINVAL;
 
-	trbe_drain_and_disable_local(cpudata);
+	trbe_drain_and_disable_local();
 	buf->cpudata = NULL;
 	cpudata->buf = NULL;
 	cpudata->mode = CS_MODE_DISABLED;
@@ -1047,15 +995,16 @@ static int arm_trbe_disable(struct coresight_device *csdev)
 
 static void trbe_handle_spurious(struct perf_output_handle *handle)
 {
-	struct trbe_buf *buf = etm_perf_sink_config(handle);
-	u64 trblimitr = read_sysreg_s(SYS_TRBLIMITR_EL1);
+	u64 limitr = read_sysreg_s(SYS_TRBLIMITR_EL1);
 
 	/*
 	 * If the IRQ was spurious, simply re-enable the TRBE
 	 * back without modifying the buffer parameters to
 	 * retain the trace collected so far.
 	 */
-	set_trbe_enabled(buf->cpudata, trblimitr);
+	limitr |= TRBLIMITR_ENABLE;
+	write_sysreg_s(limitr, SYS_TRBLIMITR_EL1);
+	isb();
 }
 
 static int trbe_handle_overflow(struct perf_output_handle *handle)
@@ -1079,7 +1028,7 @@ static int trbe_handle_overflow(struct perf_output_handle *handle)
 		 * is able to detect this with a disconnected handle
 		 * (handle->event = NULL).
 		 */
-		trbe_drain_and_disable_local(buf->cpudata);
+		trbe_drain_and_disable_local();
 		*this_cpu_ptr(buf->cpudata->drvdata->handle) = NULL;
 		return -EINVAL;
 	}
@@ -1113,7 +1062,6 @@ static irqreturn_t arm_trbe_irq_handler(int irq, void *dev)
 {
 	struct perf_output_handle **handle_ptr = dev;
 	struct perf_output_handle *handle = *handle_ptr;
-	struct trbe_buf *buf = etm_perf_sink_config(handle);
 	enum trbe_fault_action act;
 	u64 status;
 	bool truncated = false;
@@ -1134,7 +1082,7 @@ static irqreturn_t arm_trbe_irq_handler(int irq, void *dev)
 	 * Ensure the trace is visible to the CPUs and
 	 * any external aborts have been resolved.
 	 */
-	trbe_drain_and_disable_local(buf->cpudata);
+	trbe_drain_and_disable_local();
 	clr_trbe_irq();
 	isb();
 
@@ -1219,21 +1167,10 @@ static const struct attribute_group *arm_trbe_groups[] = {
 static void arm_trbe_enable_cpu(void *info)
 {
 	struct trbe_drvdata *drvdata = info;
-	struct trbe_cpudata *cpudata = this_cpu_ptr(drvdata->cpudata);
 
-	trbe_reset_local(cpudata);
+	trbe_reset_local();
 	enable_percpu_irq(drvdata->irq, IRQ_TYPE_NONE);
 }
-
-static void arm_trbe_disable_cpu(void *info)
-{
-	struct trbe_drvdata *drvdata = info;
-	struct trbe_cpudata *cpudata = this_cpu_ptr(drvdata->cpudata);
-
-	disable_percpu_irq(drvdata->irq);
-	trbe_reset_local(cpudata);
-}
-
 
 static void arm_trbe_register_coresight_cpu(struct trbe_drvdata *drvdata, int cpu)
 {
@@ -1253,24 +1190,11 @@ static void arm_trbe_register_coresight_cpu(struct trbe_drvdata *drvdata, int cp
 	desc.name = devm_kasprintf(dev, GFP_KERNEL, "trbe%d", cpu);
 	if (!desc.name)
 		goto cpu_clear;
-	/*
-	 * TRBE coresight devices do not need regular connections
-	 * information, as the paths get built between all percpu
-	 * source and their respective percpu sink devices. Though
-	 * coresight_register() expect device connections via the
-	 * platform_data, which TRBE devices do not have. As they
-	 * are not real ACPI devices, coresight_get_platform_data()
-	 * ends up failing. Instead let's allocate a dummy zeroed
-	 * coresight_platform_data structure and assign that back
-	 * into the device for that purpose.
-	 */
-	desc.pdata = devm_kzalloc(dev, sizeof(*desc.pdata), GFP_KERNEL);
-	if (IS_ERR(desc.pdata))
-		goto cpu_clear;
 
 	desc.type = CORESIGHT_DEV_TYPE_SINK;
 	desc.subtype.sink_subtype = CORESIGHT_DEV_SUBTYPE_SINK_PERCPU_SYSMEM;
 	desc.ops = &arm_trbe_cs_ops;
+	desc.pdata = dev_get_platdata(dev);
 	desc.groups = arm_trbe_groups;
 	desc.dev = dev;
 	trbe_csdev = coresight_register(&desc);
@@ -1320,11 +1244,6 @@ static void arm_trbe_probe_cpu(void *info)
 	 */
 	trbe_check_errata(cpudata);
 
-	if (trbe_is_broken(cpudata)) {
-		pr_err("Disabling TRBE on cpu%d due to erratum\n", cpu);
-		goto cpu_clear;
-	}
-
 	/*
 	 * If the TRBE is affected by erratum TRBE_WORKAROUND_OVERWRITE_FILL_MODE,
 	 * we must always program the TBRPTR_EL1, 256bytes from a page
@@ -1349,12 +1268,18 @@ cpu_clear:
 	cpumask_clear_cpu(cpu, &drvdata->supported_cpus);
 }
 
-static void arm_trbe_remove_coresight_cpu(struct trbe_drvdata *drvdata, int cpu)
+static void arm_trbe_remove_coresight_cpu(void *info)
 {
+	int cpu = smp_processor_id();
+	struct trbe_drvdata *drvdata = info;
+	struct trbe_cpudata *cpudata = per_cpu_ptr(drvdata->cpudata, cpu);
 	struct coresight_device *trbe_csdev = coresight_get_percpu_sink(cpu);
 
+	disable_percpu_irq(drvdata->irq);
+	trbe_reset_local();
 	if (trbe_csdev) {
 		coresight_unregister(trbe_csdev);
+		cpudata->drvdata = NULL;
 		coresight_set_percpu_sink(cpu, NULL);
 	}
 }
@@ -1383,10 +1308,8 @@ static int arm_trbe_remove_coresight(struct trbe_drvdata *drvdata)
 {
 	int cpu;
 
-	for_each_cpu(cpu, &drvdata->supported_cpus) {
-		smp_call_function_single(cpu, arm_trbe_disable_cpu, drvdata, 1);
-		arm_trbe_remove_coresight_cpu(drvdata, cpu);
-	}
+	for_each_cpu(cpu, &drvdata->supported_cpus)
+		smp_call_function_single(cpu, arm_trbe_remove_coresight_cpu, drvdata, 1);
 	free_percpu(drvdata->cpudata);
 	return 0;
 }
@@ -1425,8 +1348,10 @@ static int arm_trbe_cpu_teardown(unsigned int cpu, struct hlist_node *node)
 {
 	struct trbe_drvdata *drvdata = hlist_entry_safe(node, struct trbe_drvdata, hotplug_node);
 
-	if (cpumask_test_cpu(cpu, &drvdata->supported_cpus))
-		arm_trbe_disable_cpu(drvdata);
+	if (cpumask_test_cpu(cpu, &drvdata->supported_cpus)) {
+		disable_percpu_irq(drvdata->irq);
+		trbe_reset_local();
+	}
 	return 0;
 }
 
@@ -1494,21 +1419,21 @@ static void arm_trbe_remove_irq(struct trbe_drvdata *drvdata)
 
 static int arm_trbe_device_probe(struct platform_device *pdev)
 {
+	struct coresight_platform_data *pdata;
 	struct trbe_drvdata *drvdata;
 	struct device *dev = &pdev->dev;
 	int ret;
-
-	/* Trace capture is not possible with kernel page table isolation */
-	if (arm64_kernel_unmapped_at_el0()) {
-		pr_err("TRBE wouldn't work if kernel gets unmapped at EL0\n");
-		return -EOPNOTSUPP;
-	}
 
 	drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL);
 	if (!drvdata)
 		return -ENOMEM;
 
+	pdata = coresight_get_platform_data(dev);
+	if (IS_ERR(pdata))
+		return PTR_ERR(pdata);
+
 	dev_set_drvdata(dev, drvdata);
+	dev->platform_data = pdata;
 	drvdata->pdev = pdev;
 	ret = arm_trbe_probe_irq(pdev, drvdata);
 	if (ret)
@@ -1530,13 +1455,14 @@ probe_failed:
 	return ret;
 }
 
-static void arm_trbe_device_remove(struct platform_device *pdev)
+static int arm_trbe_device_remove(struct platform_device *pdev)
 {
 	struct trbe_drvdata *drvdata = platform_get_drvdata(pdev);
 
 	arm_trbe_remove_cpuhp(drvdata);
 	arm_trbe_remove_coresight(drvdata);
 	arm_trbe_remove_irq(drvdata);
+	return 0;
 }
 
 static const struct of_device_id arm_trbe_of_match[] = {
@@ -1545,28 +1471,24 @@ static const struct of_device_id arm_trbe_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, arm_trbe_of_match);
 
-#ifdef CONFIG_ACPI
-static const struct platform_device_id arm_trbe_acpi_match[] = {
-	{ ARMV8_TRBE_PDEV_NAME, 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(platform, arm_trbe_acpi_match);
-#endif
-
 static struct platform_driver arm_trbe_driver = {
-	.id_table = ACPI_PTR(arm_trbe_acpi_match),
 	.driver	= {
 		.name = DRVNAME,
 		.of_match_table = of_match_ptr(arm_trbe_of_match),
 		.suppress_bind_attrs = true,
 	},
 	.probe	= arm_trbe_device_probe,
-	.remove_new = arm_trbe_device_remove,
+	.remove	= arm_trbe_device_remove,
 };
 
 static int __init arm_trbe_init(void)
 {
 	int ret;
+
+	if (arm64_kernel_unmapped_at_el0()) {
+		pr_err("TRBE wouldn't work if kernel gets unmapped at EL0\n");
+		return -EOPNOTSUPP;
+	}
 
 	ret = platform_driver_register(&arm_trbe_driver);
 	if (!ret)

@@ -238,7 +238,7 @@ static void gfs2_end_log_write(struct bio *bio)
  * there is no pending bio, then this is a no-op.
  */
 
-void gfs2_log_submit_bio(struct bio **biop, blk_opf_t opf)
+void gfs2_log_submit_bio(struct bio **biop, int opf)
 {
 	struct bio *bio = *biop;
 	if (bio) {
@@ -265,9 +265,10 @@ static struct bio *gfs2_log_alloc_bio(struct gfs2_sbd *sdp, u64 blkno,
 				      bio_end_io_t *end_io)
 {
 	struct super_block *sb = sdp->sd_vfs;
-	struct bio *bio = bio_alloc(sb->s_bdev, BIO_MAX_VECS, 0, GFP_NOIO);
+	struct bio *bio = bio_alloc(GFP_NOIO, BIO_MAX_VECS);
 
 	bio->bi_iter.bi_sector = blkno << sdp->sd_fsb2bb_shift;
+	bio_set_dev(bio, sb->s_bdev);
 	bio->bi_end_io = end_io;
 	bio->bi_private = sdp;
 
@@ -292,7 +293,7 @@ static struct bio *gfs2_log_alloc_bio(struct gfs2_sbd *sdp, u64 blkno,
  */
 
 static struct bio *gfs2_log_get_bio(struct gfs2_sbd *sdp, u64 blkno,
-				    struct bio **biop, enum req_op op,
+				    struct bio **biop, int op,
 				    bio_end_io_t *end_io, bool flush)
 {
 	struct bio *bio = *biop;
@@ -391,15 +392,22 @@ static void gfs2_log_write_page(struct gfs2_sbd *sdp, struct page *page)
  * Simply unlock the pages in the bio. The main thread will wait on them and
  * process them in order as necessary.
  */
+
 static void gfs2_end_log_read(struct bio *bio)
 {
-	int error = blk_status_to_errno(bio->bi_status);
-	struct folio_iter fi;
+	struct page *page;
+	struct bio_vec *bvec;
+	struct bvec_iter_all iter_all;
 
-	bio_for_each_folio_all(fi, bio) {
-		/* We're abusing wb_err to get the error to gfs2_find_jhead */
-		filemap_set_wb_err(fi.folio->mapping, error);
-		folio_end_read(fi.folio, !error);
+	bio_for_each_segment_all(bvec, bio, iter_all) {
+		page = bvec->bv_page;
+		if (bio->bi_status) {
+			int err = blk_status_to_errno(bio->bi_status);
+
+			SetPageError(page);
+			mapping_set_error(page->mapping, err);
+		}
+		unlock_page(page);
 	}
 
 	bio_put(bio);
@@ -420,11 +428,10 @@ static bool gfs2_jhead_pg_srch(struct gfs2_jdesc *jd,
 {
 	struct gfs2_sbd *sdp = GFS2_SB(jd->jd_inode);
 	struct gfs2_log_header_host lh;
-	void *kaddr;
+	void *kaddr = kmap_atomic(page);
 	unsigned int offset;
 	bool ret = false;
 
-	kaddr = kmap_local_page(page);
 	for (offset = 0; offset < PAGE_SIZE; offset += sdp->sd_sb.sb_bsize) {
 		if (!__get_log_header(sdp, kaddr + offset, 0, &lh)) {
 			if (lh.lh_sequence >= head->lh_sequence)
@@ -435,7 +442,7 @@ static bool gfs2_jhead_pg_srch(struct gfs2_jdesc *jd,
 			}
 		}
 	}
-	kunmap_local(kaddr);
+	kunmap_atomic(kaddr);
 	return ret;
 }
 
@@ -446,45 +453,47 @@ static bool gfs2_jhead_pg_srch(struct gfs2_jdesc *jd,
  * @head: The journal head to start from
  * @done: If set, perform only cleanup, else search and set if found.
  *
- * Find the folio with 'index' in the journal's mapping. Search the folio for
+ * Find the page with 'index' in the journal's mapping. Search the page for
  * the journal head if requested (cleanup == false). Release refs on the
- * folio so the page cache can reclaim it. We grabbed a
- * reference on this folio twice, first when we did a grab_cache_page()
- * to obtain the folio to add it to the bio and second when we do a
- * filemap_get_folio() here to get the folio to wait on while I/O on it is being
+ * page so the page cache can reclaim it (put_page() twice). We grabbed a
+ * reference on this page two times, first when we did a find_or_create_page()
+ * to obtain the page to add it to the bio and second when we do a
+ * find_get_page() here to get the page to wait on while I/O on it is being
  * completed.
- * This function is also used to free up a folio we might've grabbed but not
+ * This function is also used to free up a page we might've grabbed but not
  * used. Maybe we added it to a bio, but not submitted it for I/O. Or we
  * submitted the I/O, but we already found the jhead so we only need to drop
- * our references to the folio.
+ * our references to the page.
  */
 
 static void gfs2_jhead_process_page(struct gfs2_jdesc *jd, unsigned long index,
 				    struct gfs2_log_header_host *head,
 				    bool *done)
 {
-	struct folio *folio;
+	struct page *page;
 
-	folio = filemap_get_folio(jd->jd_inode->i_mapping, index);
+	page = find_get_page(jd->jd_inode->i_mapping, index);
+	wait_on_page_locked(page);
 
-	folio_wait_locked(folio);
-	if (!folio_test_uptodate(folio))
+	if (PageError(page))
 		*done = true;
 
 	if (!*done)
-		*done = gfs2_jhead_pg_srch(jd, head, &folio->page);
+		*done = gfs2_jhead_pg_srch(jd, head, page);
 
-	/* filemap_get_folio() and the earlier grab_cache_page() */
-	folio_put_refs(folio, 2);
+	put_page(page); /* Once for find_get_page */
+	put_page(page); /* Once more for find_or_create_page */
 }
 
 static struct bio *gfs2_chain_bio(struct bio *prev, unsigned int nr_iovecs)
 {
 	struct bio *new;
 
-	new = bio_alloc(prev->bi_bdev, nr_iovecs, prev->bi_opf, GFP_NOIO);
-	bio_clone_blkg_association(new, prev);
+	new = bio_alloc(GFP_NOIO, nr_iovecs);
+	bio_copy_dev(new, prev);
 	new->bi_iter.bi_sector = bio_end_sector(prev);
+	new->bi_opf = prev->bi_opf;
+	new->bi_write_hint = prev->bi_write_hint;
 	bio_chain(new, prev);
 	submit_bio(prev);
 	return new;
@@ -528,7 +537,8 @@ int gfs2_find_jhead(struct gfs2_jdesc *jd, struct gfs2_log_header_host *head,
 
 		for (; block < je->lblock + je->blocks; block++, dblock++) {
 			if (!page) {
-				page = grab_cache_page(mapping, block >> shift);
+				page = find_or_create_page(mapping,
+						block >> shift, GFP_NOFS);
 				if (!page) {
 					ret = -ENOMEM;
 					done = true;
@@ -619,11 +629,11 @@ static void gfs2_check_magic(struct buffer_head *bh)
 	__be32 *ptr;
 
 	clear_buffer_escaped(bh);
-	kaddr = kmap_local_page(bh->b_page);
+	kaddr = kmap_atomic(bh->b_page);
 	ptr = kaddr + bh_offset(bh);
 	if (*ptr == cpu_to_be32(GFS2_MAGIC))
 		set_buffer_escaped(bh);
-	kunmap_local(kaddr);
+	kunmap_atomic(kaddr);
 }
 
 static int blocknr_cmp(void *priv, const struct list_head *a,
@@ -689,12 +699,14 @@ static void gfs2_before_commit(struct gfs2_sbd *sdp, unsigned int limit,
 			lock_buffer(bd2->bd_bh);
 
 			if (buffer_escaped(bd2->bd_bh)) {
-				void *p;
-
+				void *kaddr;
 				page = mempool_alloc(gfs2_page_pool, GFP_NOIO);
-				p = page_address(page);
-				memcpy_from_page(p, page, bh_offset(bd2->bd_bh), bd2->bd_bh->b_size);
-				*(__be32 *)p = 0;
+				ptr = page_address(page);
+				kaddr = kmap_atomic(bd2->bd_bh->b_page);
+				memcpy(ptr, kaddr + bh_offset(bd2->bd_bh),
+				       bd2->bd_bh->b_size);
+				kunmap_atomic(kaddr);
+				*(__be32 *)ptr = 0;
 				clear_buffer_escaped(bd2->bd_bh);
 				unlock_buffer(bd2->bd_bh);
 				brelse(bd2->bd_bh);

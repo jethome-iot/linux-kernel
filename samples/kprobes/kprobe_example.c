@@ -16,8 +16,9 @@
 #include <linux/module.h>
 #include <linux/kprobes.h>
 
-static char symbol[KSYM_NAME_LEN] = "kernel_clone";
-module_param_string(symbol, symbol, KSYM_NAME_LEN, 0644);
+#define MAX_SYMBOL_LEN	64
+static char symbol[MAX_SYMBOL_LEN] = "kernel_clone";
+module_param_string(symbol, symbol, sizeof(symbol), 0644);
 
 /* For each probe you need to allocate a kprobe structure */
 static struct kprobe kp = {
@@ -55,10 +56,6 @@ static int __kprobes handler_pre(struct kprobe *p, struct pt_regs *regs)
 	pr_info("<%s> p->addr, 0x%p, ip = 0x%lx, flags = 0x%lx\n",
 		p->symbol_name, p->addr, regs->psw.addr, regs->flags);
 #endif
-#ifdef CONFIG_LOONGARCH
-	pr_info("<%s> p->addr = 0x%p, era = 0x%lx, estat = 0x%lx\n",
-		p->symbol_name, p->addr, regs->csr_era, regs->csr_estat);
-#endif
 
 	/* A dump_stack() here will give a stack backtrace */
 	return 0;
@@ -95,10 +92,6 @@ static void __kprobes handler_post(struct kprobe *p, struct pt_regs *regs,
 #ifdef CONFIG_S390
 	pr_info("<%s> p->addr, 0x%p, flags = 0x%lx\n",
 		p->symbol_name, p->addr, regs->flags);
-#endif
-#ifdef CONFIG_LOONGARCH
-	pr_info("<%s> p->addr = 0x%p, estat = 0x%lx\n",
-		p->symbol_name, p->addr, regs->csr_estat);
 #endif
 }
 

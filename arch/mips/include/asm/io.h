@@ -12,7 +12,10 @@
 #ifndef _ASM_IO_H
 #define _ASM_IO_H
 
+#define ARCH_HAS_IOREMAP_WC
+
 #include <linux/compiler.h>
+#include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/irqflags.h>
 
@@ -22,8 +25,10 @@
 #include <asm/byteorder.h>
 #include <asm/cpu.h>
 #include <asm/cpu-features.h>
+#include <asm-generic/iomap.h>
 #include <asm/page.h>
 #include <asm/pgtable-bits.h>
+#include <asm/processor.h>
 #include <asm/string.h>
 #include <mangle-port.h>
 
@@ -38,11 +43,6 @@
 # define __raw_ioswabl(a, x)	(x)
 # define __raw_ioswabq(a, x)	(x)
 # define ____raw_ioswabq(a, x)	(x)
-
-# define _ioswabb ioswabb
-# define _ioswabw ioswabw
-# define _ioswabl ioswabl
-# define _ioswabq ioswabq
 
 # define __relaxed_ioswabb ioswabb
 # define __relaxed_ioswabw ioswabw
@@ -118,12 +118,43 @@ static inline phys_addr_t virt_to_phys(const volatile void *x)
 }
 
 /*
+ *     phys_to_virt    -       map physical address to virtual
+ *     @address: address to remap
+ *
+ *     The returned virtual address is a current CPU mapping for
+ *     the memory address given. It is only valid to use this function on
+ *     addresses that have a kernel mapping
+ *
+ *     This function does not handle bus mappings for DMA transfers. In
+ *     almost all conceivable cases a device driver should not be using
+ *     this function
+ */
+static inline void * phys_to_virt(unsigned long address)
+{
+	return (void *)(address + PAGE_OFFSET - PHYS_OFFSET);
+}
+
+/*
  * ISA I/O bus memory addresses are 1:1 with the physical address.
  */
 static inline unsigned long isa_virt_to_bus(volatile void *address)
 {
 	return virt_to_phys(address);
 }
+
+static inline void *isa_bus_to_virt(unsigned long address)
+{
+	return phys_to_virt(address);
+}
+
+/*
+ * However PCI ones are not necessarily 1:1 and therefore these interfaces
+ * are forbidden in portable PCI drivers.
+ *
+ * Allow them for x86 for legacy drivers, though.
+ */
+#define virt_to_bus virt_to_phys
+#define bus_to_virt phys_to_virt
 
 /*
  * Change "struct page" to physical address.
@@ -147,6 +178,7 @@ void iounmap(const volatile void __iomem *addr);
  */
 #define ioremap(offset, size)						\
 	ioremap_prot((offset), (size), _CACHE_UNCACHED)
+#define ioremap_uc		ioremap
 
 /*
  * ioremap_cache -	map bus memory into CPU space
@@ -159,7 +191,7 @@ void iounmap(const volatile void __iomem *addr);
  * address is not guaranteed to be usable directly as a virtual
  * address.
  *
- * This version of ioremap ensures that the memory is marked cacheable by
+ * This version of ioremap ensures that the memory is marked cachable by
  * the CPU.  Also enables full write-combining.	 Useful for some
  * memory-like regions on I/O busses.
  */
@@ -177,7 +209,7 @@ void iounmap(const volatile void __iomem *addr);
  * address is not guaranteed to be usable directly as a virtual
  * address.
  *
- * This version of ioremap ensures that the memory is marked uncacheable
+ * This version of ioremap ensures that the memory is marked uncachable
  * but accelerated by means of write-combining feature. It is specifically
  * useful for PCIe prefetchable windows, which may vastly improve a
  * communications performance. If it was determined on boot stage, what
@@ -187,7 +219,7 @@ void iounmap(const volatile void __iomem *addr);
 #define ioremap_wc(offset, size)					\
 	ioremap_prot((offset), (size), boot_cpu_data.writecombine)
 
-#if defined(CONFIG_CPU_CAVIUM_OCTEON)
+#if defined(CONFIG_CPU_CAVIUM_OCTEON) || defined(CONFIG_CPU_LOONGSON64)
 #define war_io_reorder_wmb()		wmb()
 #else
 #define war_io_reorder_wmb()		barrier()
@@ -274,9 +306,9 @@ static inline type pfx##read##bwlq(const volatile void __iomem *mem)	\
 	return pfx##ioswab##bwlq(__mem, __val);				\
 }
 
-#define __BUILD_IOPORT_SINGLE(pfx, bwlq, type, barrier, relax)		\
+#define __BUILD_IOPORT_SINGLE(pfx, bwlq, type, barrier, relax, p)	\
 									\
-static inline void pfx##out##bwlq(type val, unsigned long port)		\
+static inline void pfx##out##bwlq##p(type val, unsigned long port)	\
 {									\
 	volatile type *__addr;						\
 	type __val;							\
@@ -296,7 +328,7 @@ static inline void pfx##out##bwlq(type val, unsigned long port)		\
 	*__addr = __val;						\
 }									\
 									\
-static inline type pfx##in##bwlq(unsigned long port)			\
+static inline type pfx##in##bwlq##p(unsigned long port)			\
 {									\
 	volatile type *__addr;						\
 	type __val;							\
@@ -338,10 +370,11 @@ __BUILD_MEMORY_PFX(__mem_, q, u64, 0)
 #endif
 
 #define __BUILD_IOPORT_PFX(bus, bwlq, type)				\
-	__BUILD_IOPORT_SINGLE(bus, bwlq, type, 1, 0)
+	__BUILD_IOPORT_SINGLE(bus, bwlq, type, 1, 0,)			\
+	__BUILD_IOPORT_SINGLE(bus, bwlq, type, 1, 0, _p)
 
 #define BUILDIO_IOPORT(bwlq, type)					\
-	__BUILD_IOPORT_PFX(_, bwlq, type)				\
+	__BUILD_IOPORT_PFX(, bwlq, type)				\
 	__BUILD_IOPORT_PFX(__mem_, bwlq, type)
 
 BUILDIO_IOPORT(b, u8)
@@ -388,6 +421,14 @@ __BUILDIO(q, u64)
 	__raw_writel(cpu_to_be32((val)), (__force unsigned *)(addr))
 #define writeq_be(val, addr)						\
 	__raw_writeq(cpu_to_be64((val)), (__force unsigned *)(addr))
+
+/*
+ * Some code tests for these symbols
+ */
+#ifdef CONFIG_64BIT
+#define readq				readq
+#define writeq				writeq
+#endif
 
 #define __BUILD_MEMORY_STRING(bwlq, type)				\
 									\
@@ -449,6 +490,18 @@ BUILDSTRING(l, u32)
 BUILDSTRING(q, u64)
 #endif
 
+static inline void memset_io(volatile void __iomem *addr, unsigned char val, int count)
+{
+	memset((void __force *) addr, val, count);
+}
+static inline void memcpy_fromio(void *dst, const volatile void __iomem *src, int count)
+{
+	memcpy(dst, (void __force *) src, count);
+}
+static inline void memcpy_toio(volatile void __iomem *dst, const void *src, int count)
+{
+	memcpy((void __force *) dst, src, count);
+}
 
 /*
  * The caches on some architectures aren't dma-coherent and have need to
@@ -505,66 +558,12 @@ extern void (*_dma_cache_inv)(unsigned long start, unsigned long size);
 #define csr_out32(v, a) (*(volatile u32 *)((unsigned long)(a) + __CSR_32_ADJUST) = (v))
 #define csr_in32(a)    (*(volatile u32 *)((unsigned long)(a) + __CSR_32_ADJUST))
 
-#define __raw_readb __raw_readb
-#define __raw_readw __raw_readw
-#define __raw_readl __raw_readl
-#ifdef CONFIG_64BIT
-#define __raw_readq __raw_readq
-#endif
-#define __raw_writeb __raw_writeb
-#define __raw_writew __raw_writew
-#define __raw_writel __raw_writel
-#ifdef CONFIG_64BIT
-#define __raw_writeq __raw_writeq
-#endif
-
-#define readb readb
-#define readw readw
-#define readl readl
-#ifdef CONFIG_64BIT
-#define readq readq
-#endif
-#define writeb writeb
-#define writew writew
-#define writel writel
-#ifdef CONFIG_64BIT
-#define writeq writeq
-#endif
-
-#define readsb readsb
-#define readsw readsw
-#define readsl readsl
-#ifdef CONFIG_64BIT
-#define readsq readsq
-#endif
-#define writesb writesb
-#define writesw writesw
-#define writesl writesl
-#ifdef CONFIG_64BIT
-#define writesq writesq
-#endif
-
-#define _inb _inb
-#define _inw _inw
-#define _inl _inl
-#define insb insb
-#define insw insw
-#define insl insl
-
-#define _outb _outb
-#define _outw _outw
-#define _outl _outl
-#define outsb outsb
-#define outsw outsw
-#define outsl outsl
+/*
+ * Convert a physical pointer to a virtual kernel pointer for /dev/mem
+ * access
+ */
+#define xlate_dev_mem_ptr(p)	__va(p)
 
 void __ioread64_copy(void *to, const void __iomem *from, size_t count);
-
-#include <asm-generic/io.h>
-
-static inline void *isa_bus_to_virt(unsigned long address)
-{
-	return phys_to_virt(address);
-}
 
 #endif /* _ASM_IO_H */

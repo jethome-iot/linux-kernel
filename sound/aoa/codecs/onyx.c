@@ -30,7 +30,6 @@
  */
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/slab.h>
 MODULE_AUTHOR("Johannes Berg <johannes@sipsolutions.net>");
 MODULE_LICENSE("GPL");
@@ -991,7 +990,8 @@ static void onyx_exit_codec(struct aoa_codec *codec)
 	onyx->codec.soundbus_dev->detach_codec(onyx->codec.soundbus_dev, onyx);
 }
 
-static int onyx_i2c_probe(struct i2c_client *client)
+static int onyx_i2c_probe(struct i2c_client *client,
+			  const struct i2c_device_id *id)
 {
 	struct device_node *node = client->dev.of_node;
 	struct onyx *onyx;
@@ -1029,7 +1029,7 @@ static int onyx_i2c_probe(struct i2c_client *client)
 	return -ENODEV;
 }
 
-static void onyx_i2c_remove(struct i2c_client *client)
+static int onyx_i2c_remove(struct i2c_client *client)
 {
 	struct onyx *onyx = i2c_get_clientdata(client);
 
@@ -1037,6 +1037,7 @@ static void onyx_i2c_remove(struct i2c_client *client)
 	of_node_put(onyx->codec.node);
 	kfree(onyx->codec_info);
 	kfree(onyx);
+	return 0;
 }
 
 static const struct i2c_device_id onyx_i2c_id[] = {

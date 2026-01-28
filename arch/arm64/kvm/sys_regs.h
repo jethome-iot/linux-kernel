@@ -27,13 +27,6 @@ struct sys_reg_params {
 	bool	is_write;
 };
 
-#define encoding_to_params(reg)						\
-	((struct sys_reg_params){ .Op0 = sys_reg_Op0(reg),		\
-				  .Op1 = sys_reg_Op1(reg),		\
-				  .CRn = sys_reg_CRn(reg),		\
-				  .CRm = sys_reg_CRm(reg),		\
-				  .Op2 = sys_reg_Op2(reg) })
-
 #define esr_sys64_to_params(esr)                                               \
 	((struct sys_reg_params){ .Op0 = ((esr) >> 20) & 3,                    \
 				  .Op1 = ((esr) >> 14) & 0x7,                  \
@@ -71,16 +64,13 @@ struct sys_reg_desc {
 		       struct sys_reg_params *,
 		       const struct sys_reg_desc *);
 
-	/*
-	 * Initialization for vcpu. Return initialized value, or KVM
-	 * sanitized value for ID registers.
-	 */
-	u64 (*reset)(struct kvm_vcpu *, const struct sys_reg_desc *);
+	/* Initialization for vcpu. */
+	void (*reset)(struct kvm_vcpu *, const struct sys_reg_desc *);
 
 	/* Index into sys_reg[], or 0 if we don't need to save it. */
 	int reg;
 
-	/* Value (usually reset value), or write mask for idregs */
+	/* Value (usually reset value) */
 	u64 val;
 
 	/* Custom get/set_user functions, fallback to generic if NULL */
@@ -95,9 +85,8 @@ struct sys_reg_desc {
 };
 
 #define REG_HIDDEN		(1 << 0) /* hidden from userspace and guest */
-#define REG_HIDDEN_USER		(1 << 1) /* hidden from userspace only */
-#define REG_RAZ			(1 << 2) /* RAZ from userspace and guest */
-#define REG_USER_WI		(1 << 3) /* WI from userspace only */
+#define REG_RAZ			(1 << 1) /* RAZ from userspace and guest */
+#define REG_USER_WI		(1 << 2) /* WI from userspace only */
 
 static __printf(2, 3)
 inline void print_sys_reg_msg(const struct sys_reg_params *p,
@@ -133,21 +122,19 @@ static inline bool read_zero(struct kvm_vcpu *vcpu,
 }
 
 /* Reset functions */
-static inline u64 reset_unknown(struct kvm_vcpu *vcpu,
+static inline void reset_unknown(struct kvm_vcpu *vcpu,
 				 const struct sys_reg_desc *r)
 {
 	BUG_ON(!r->reg);
 	BUG_ON(r->reg >= NR_SYS_REGS);
 	__vcpu_sys_reg(vcpu, r->reg) = 0x1de7ec7edbadc0deULL;
-	return __vcpu_sys_reg(vcpu, r->reg);
 }
 
-static inline u64 reset_val(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
+static inline void reset_val(struct kvm_vcpu *vcpu, const struct sys_reg_desc *r)
 {
 	BUG_ON(!r->reg);
 	BUG_ON(r->reg >= NR_SYS_REGS);
 	__vcpu_sys_reg(vcpu, r->reg) = r->val;
-	return __vcpu_sys_reg(vcpu, r->reg);
 }
 
 static inline unsigned int sysreg_visibility(const struct kvm_vcpu *vcpu,
@@ -163,15 +150,6 @@ static inline bool sysreg_hidden(const struct kvm_vcpu *vcpu,
 				 const struct sys_reg_desc *r)
 {
 	return sysreg_visibility(vcpu, r) & REG_HIDDEN;
-}
-
-static inline bool sysreg_hidden_user(const struct kvm_vcpu *vcpu,
-				      const struct sys_reg_desc *r)
-{
-	if (likely(!r->visibility))
-		return false;
-
-	return r->visibility(vcpu, r) & (REG_HIDDEN | REG_HIDDEN_USER);
 }
 
 static inline bool sysreg_visible_as_raz(const struct kvm_vcpu *vcpu,
@@ -220,6 +198,25 @@ find_reg(const struct sys_reg_params *params, const struct sys_reg_desc table[],
 	unsigned long pval = reg_to_encoding(params);
 
 	return __inline_bsearch((void *)pval, table, num, sizeof(table[0]), match_sys_reg);
+}
+
+static inline u64 calculate_mpidr(const struct kvm_vcpu *vcpu)
+{
+	u64 mpidr;
+
+	/*
+	 * Map the vcpu_id into the first three affinity level fields of
+	 * the MPIDR. We limit the number of VCPUs in level 0 due to a
+	 * limitation to 16 CPUs in that level in the ICC_SGIxR registers
+	 * of the GICv3 to be able to address each CPU directly when
+	 * sending IPIs.
+	 */
+	mpidr = (vcpu->vcpu_id & 0x0f) << MPIDR_LEVEL_SHIFT(0);
+	mpidr |= ((vcpu->vcpu_id >> 4) & 0xff) << MPIDR_LEVEL_SHIFT(1);
+	mpidr |= ((vcpu->vcpu_id >> 12) & 0xff) << MPIDR_LEVEL_SHIFT(2);
+	mpidr |= (1ULL << 31);
+
+	return mpidr;
 }
 
 const struct sys_reg_desc *get_reg_by_id(u64 id,

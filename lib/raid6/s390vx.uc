@@ -13,7 +13,8 @@
 
 #include <linux/raid/pq.h>
 #include <asm/fpu/api.h>
-#include <asm/vx-insn.h>
+
+asm(".include \"asm/vx-insn.h\"\n");
 
 #define NSIZE 16
 
@@ -158,7 +159,7 @@ static void raid6_s390vx$#_xor_syndrome(int disks, int start, int stop,
 
 static int raid6_s390vx$#_valid(void)
 {
-	return cpu_has_vx();
+	return MACHINE_HAS_VX;
 }
 
 const struct raid6_calls raid6_s390vx$# = {

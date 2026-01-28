@@ -27,7 +27,6 @@
 #include <linux/firmware.h>
 #include <crypto/hash.h>
 #include <linux/usb/r8152.h>
-#include <net/gso.h>
 
 /* Information for net-next */
 #define NETNEXT_VERSION		"12"
@@ -773,17 +772,11 @@ enum rtl8152_flags {
 	SCHEDULE_TASKLET,
 	GREEN_ETHERNET,
 	RX_EPROTO,
-	IN_PRE_RESET,
-	PROBED_WITH_NO_ERRORS,
-	PROBE_SHOULD_RETRY,
 };
 
-#define DEVICE_ID_LENOVO_USB_C_TRAVEL_HUB		0x721e
 #define DEVICE_ID_THINKPAD_ONELINK_PLUS_DOCK		0x3054
 #define DEVICE_ID_THINKPAD_THUNDERBOLT3_DOCK_GEN2	0x3082
-#define DEVICE_ID_THINKPAD_USB_C_DONGLE			0x720c
 #define DEVICE_ID_THINKPAD_USB_C_DOCK_GEN2		0xa387
-#define DEVICE_ID_THINKPAD_USB_C_DOCK_GEN3		0x3062
 
 struct tally_counter {
 	__le64	tx_packets;
@@ -956,8 +949,6 @@ struct r8152 {
 	u8 version;
 	u8 duplex;
 	u8 autoneg;
-
-	unsigned int reg_access_reset_count;
 };
 
 /**
@@ -1205,96 +1196,6 @@ static unsigned int agg_buf_sz = 16384;
 
 #define RTL_LIMITED_TSO_SIZE	(size_to_mtu(agg_buf_sz) - sizeof(struct tx_desc))
 
-/* If register access fails then we block access and issue a reset. If this
- * happens too many times in a row without a successful access then we stop
- * trying to reset and just leave access blocked.
- */
-#define REGISTER_ACCESS_MAX_RESETS	3
-
-static void rtl_set_inaccessible(struct r8152 *tp)
-{
-	set_bit(RTL8152_INACCESSIBLE, &tp->flags);
-	smp_mb__after_atomic();
-}
-
-static void rtl_set_accessible(struct r8152 *tp)
-{
-	clear_bit(RTL8152_INACCESSIBLE, &tp->flags);
-	smp_mb__after_atomic();
-}
-
-static
-int r8152_control_msg(struct r8152 *tp, unsigned int pipe, __u8 request,
-		      __u8 requesttype, __u16 value, __u16 index, void *data,
-		      __u16 size, const char *msg_tag)
-{
-	struct usb_device *udev = tp->udev;
-	int ret;
-
-	if (test_bit(RTL8152_INACCESSIBLE, &tp->flags))
-		return -ENODEV;
-
-	ret = usb_control_msg(udev, pipe, request, requesttype,
-			      value, index, data, size,
-			      USB_CTRL_GET_TIMEOUT);
-
-	/* No need to issue a reset to report an error if the USB device got
-	 * unplugged; just return immediately.
-	 */
-	if (ret == -ENODEV)
-		return ret;
-
-	/* If the write was successful then we're done */
-	if (ret >= 0) {
-		tp->reg_access_reset_count = 0;
-		return ret;
-	}
-
-	dev_err(&udev->dev,
-		"Failed to %s %d bytes at %#06x/%#06x (%d)\n",
-		msg_tag, size, value, index, ret);
-
-	/* Block all future register access until we reset. Much of the code
-	 * in the driver doesn't check for errors. Notably, many parts of the
-	 * driver do a read/modify/write of a register value without
-	 * confirming that the read succeeded. Writing back modified garbage
-	 * like this can fully wedge the adapter, requiring a power cycle.
-	 */
-	rtl_set_inaccessible(tp);
-
-	/* If probe hasn't yet finished, then we'll request a retry of the
-	 * whole probe routine if we get any control transfer errors. We
-	 * never have to clear this bit since we free/reallocate the whole "tp"
-	 * structure if we retry probe.
-	 */
-	if (!test_bit(PROBED_WITH_NO_ERRORS, &tp->flags)) {
-		set_bit(PROBE_SHOULD_RETRY, &tp->flags);
-		return ret;
-	}
-
-	/* Failing to access registers in pre-reset is not surprising since we
-	 * wouldn't be resetting if things were behaving normally. The register
-	 * access we do in pre-reset isn't truly mandatory--we're just reusing
-	 * the disable() function and trying to be nice by powering the
-	 * adapter down before resetting it. Thus, if we're in pre-reset,
-	 * we'll return right away and not try to queue up yet another reset.
-	 * We know the post-reset is already coming.
-	 */
-	if (test_bit(IN_PRE_RESET, &tp->flags))
-		return ret;
-
-	if (tp->reg_access_reset_count < REGISTER_ACCESS_MAX_RESETS) {
-		usb_queue_reset_device(tp->intf);
-		tp->reg_access_reset_count++;
-	} else if (tp->reg_access_reset_count == REGISTER_ACCESS_MAX_RESETS) {
-		dev_err(&udev->dev,
-			"Tried to reset %d times; giving up.\n",
-			REGISTER_ACCESS_MAX_RESETS);
-	}
-
-	return ret;
-}
-
 static
 int get_registers(struct r8152 *tp, u16 value, u16 index, u16 size, void *data)
 {
@@ -1305,10 +1206,9 @@ int get_registers(struct r8152 *tp, u16 value, u16 index, u16 size, void *data)
 	if (!tmp)
 		return -ENOMEM;
 
-	ret = r8152_control_msg(tp, tp->pipe_ctrl_in,
-				RTL8152_REQ_GET_REGS, RTL8152_REQT_READ,
-				value, index, tmp, size, "read");
-
+	ret = usb_control_msg(tp->udev, tp->pipe_ctrl_in,
+			      RTL8152_REQ_GET_REGS, RTL8152_REQT_READ,
+			      value, index, tmp, size, USB_CTRL_GET_TIMEOUT);
 	if (ret < 0)
 		memset(data, 0xff, size);
 	else
@@ -1329,9 +1229,9 @@ int set_registers(struct r8152 *tp, u16 value, u16 index, u16 size, void *data)
 	if (!tmp)
 		return -ENOMEM;
 
-	ret = r8152_control_msg(tp, tp->pipe_ctrl_out,
-				RTL8152_REQ_SET_REGS, RTL8152_REQT_WRITE,
-				value, index, tmp, size, "write");
+	ret = usb_control_msg(tp->udev, tp->pipe_ctrl_out,
+			      RTL8152_REQ_SET_REGS, RTL8152_REQT_WRITE,
+			      value, index, tmp, size, USB_CTRL_SET_TIMEOUT);
 
 	kfree(tmp);
 
@@ -1340,8 +1240,10 @@ int set_registers(struct r8152 *tp, u16 value, u16 index, u16 size, void *data)
 
 static void rtl_set_unplug(struct r8152 *tp)
 {
-	if (tp->udev->state == USB_STATE_NOTATTACHED)
-		rtl_set_inaccessible(tp);
+	if (tp->udev->state == USB_STATE_NOTATTACHED) {
+		set_bit(RTL8152_INACCESSIBLE, &tp->flags);
+		smp_mb__after_atomic();
+	}
 }
 
 static int generic_ocp_read(struct r8152 *tp, u16 index, u16 size,
@@ -1408,24 +1310,16 @@ static int generic_ocp_write(struct r8152 *tp, u16 index, u16 byteen,
 	byteen_end = byteen & BYTE_EN_END_MASK;
 
 	byen = byteen_start | (byteen_start << 4);
+	ret = set_registers(tp, index, type | byen, 4, data);
+	if (ret < 0)
+		goto error1;
 
-	/* Split the first DWORD if the byte_en is not 0xff */
-	if (byen != BYTE_EN_DWORD) {
-		ret = set_registers(tp, index, type | byen, 4, data);
-		if (ret < 0)
-			goto error1;
-
-		index += 4;
-		data += 4;
-		size -= 4;
-	}
+	index += 4;
+	data += 4;
+	size -= 4;
 
 	if (size) {
-		byen = byteen_end | (byteen_end >> 4);
-
-		/* Split the last DWORD if the byte_en is not 0xff */
-		if (byen != BYTE_EN_DWORD)
-			size -= 4;
+		size -= 4;
 
 		while (size) {
 			if (size > limit) {
@@ -1452,9 +1346,10 @@ static int generic_ocp_write(struct r8152 *tp, u16 index, u16 byteen,
 			}
 		}
 
-		/* Set the last DWORD */
-		if (byen != BYTE_EN_DWORD)
-			ret = set_registers(tp, index, type | byen, 4, data);
+		byen = byteen_end | (byteen_end >> 4);
+		ret = set_registers(tp, index, type | byen, 4, data);
+		if (ret < 0)
+			goto error1;
 	}
 
 error1:
@@ -1681,7 +1576,7 @@ static int __rtl8152_set_mac_address(struct net_device *netdev, void *p,
 
 	mutex_lock(&tp->control);
 
-	eth_hw_addr_set(netdev, addr->sa_data);
+	memcpy(netdev->dev_addr, addr->sa_data, netdev->addr_len);
 
 	ocp_write_byte(tp, MCU_TYPE_PLA, PLA_CRWECR, CRWECR_CONFIG);
 	pla_ocp_write(tp, PLA_IDR, BYTE_EN_SIX_BYTES, 8, addr->sa_data);
@@ -1829,7 +1724,7 @@ static int set_ethernet_addr(struct r8152 *tp, bool in_resume)
 		return ret;
 
 	if (tp->version == RTL_VER_01)
-		eth_hw_addr_set(dev, sa.sa_data);
+		ether_addr_copy(dev->dev_addr, sa.sa_data);
 	else
 		ret = __rtl8152_set_mac_address(dev, &sa, in_resume);
 
@@ -2049,7 +1944,7 @@ static struct rx_agg *alloc_rx_agg(struct r8152 *tp, gfp_t mflags)
 	if (!rx_agg)
 		return NULL;
 
-	rx_agg->page = alloc_pages(mflags | __GFP_COMP | __GFP_NOWARN, order);
+	rx_agg->page = alloc_pages(mflags | __GFP_COMP, order);
 	if (!rx_agg->page)
 		goto free_rx;
 
@@ -2266,7 +2161,7 @@ static inline void rtl_rx_vlan_tag(struct rx_desc *desc, struct sk_buff *skb)
 }
 
 static int r8152_tx_csum(struct r8152 *tp, struct tx_desc *desc,
-			 struct sk_buff *skb, u32 len)
+			 struct sk_buff *skb, u32 len, u32 transport_offset)
 {
 	u32 mss = skb_shinfo(skb)->gso_size;
 	u32 opts1, opts2 = 0;
@@ -2277,8 +2172,6 @@ static int r8152_tx_csum(struct r8152 *tp, struct tx_desc *desc,
 	opts1 = len | TX_FS | TX_LS;
 
 	if (mss) {
-		u32 transport_offset = (u32)skb_transport_offset(skb);
-
 		if (transport_offset > GTTCPHO_MAX) {
 			netif_warn(tp, tx_err, tp->netdev,
 				   "Invalid transport offset 0x%x for TSO\n",
@@ -2309,7 +2202,6 @@ static int r8152_tx_csum(struct r8152 *tp, struct tx_desc *desc,
 		opts1 |= transport_offset << GTTCPHO_SHIFT;
 		opts2 |= min(mss, MSS_MAX) << MSS_SHIFT;
 	} else if (skb->ip_summed == CHECKSUM_PARTIAL) {
-		u32 transport_offset = (u32)skb_transport_offset(skb);
 		u8 ip_protocol;
 
 		if (transport_offset > TCPHO_MAX) {
@@ -2373,6 +2265,7 @@ static int r8152_tx_agg_fill(struct r8152 *tp, struct tx_agg *agg)
 		struct tx_desc *tx_desc;
 		struct sk_buff *skb;
 		unsigned int len;
+		u32 offset;
 
 		skb = __skb_dequeue(&skb_head);
 		if (!skb)
@@ -2388,7 +2281,9 @@ static int r8152_tx_agg_fill(struct r8152 *tp, struct tx_agg *agg)
 		tx_data = tx_agg_align(tx_data);
 		tx_desc = (struct tx_desc *)tx_data;
 
-		if (r8152_tx_csum(tp, tx_desc, skb, skb->len)) {
+		offset = (u32)skb_transport_offset(skb);
+
+		if (r8152_tx_csum(tp, tx_desc, skb, skb->len, offset)) {
 			r8152_csum_workaround(tp, skb, &skb_head);
 			continue;
 		}
@@ -2543,7 +2438,7 @@ static int rx_bottom(struct r8152 *tp, int budget)
 		}
 	}
 
-	if (list_empty(&tp->rx_done) || work_done >= budget)
+	if (list_empty(&tp->rx_done))
 		goto out1;
 
 	clear_bit(RX_EPROTO, &tp->flags);
@@ -2558,15 +2453,6 @@ static int rx_bottom(struct r8152 *tp, int budget)
 		int len_used = 0;
 		struct urb *urb;
 		u8 *rx_data;
-
-		/* A bulk transfer of USB may contain may packets, so the
-		 * total packets may more than the budget. Deal with all
-		 * packets in current bulk transfer, and stop to handle the
-		 * next bulk transfer until next schedule, if budget is
-		 * exhausted.
-		 */
-		if (work_done >= budget)
-			break;
 
 		list_del_init(cursor);
 
@@ -2584,11 +2470,12 @@ static int rx_bottom(struct r8152 *tp, int budget)
 		while (urb->actual_length > len_used) {
 			struct net_device *netdev = tp->netdev;
 			struct net_device_stats *stats = &netdev->stats;
-			unsigned int pkt_len, rx_frag_head_sz, len;
+			unsigned int pkt_len, rx_frag_head_sz;
 			struct sk_buff *skb;
-			bool use_frags;
 
-			WARN_ON_ONCE(skb_queue_len(&tp->rx_queue) >= 1000);
+			/* limit the skb numbers for rx_queue */
+			if (unlikely(skb_queue_len(&tp->rx_queue) >= 1000))
+				break;
 
 			pkt_len = le32_to_cpu(rx_desc->opts1) & RX_LEN_MASK;
 			if (pkt_len < ETH_ZLEN)
@@ -2599,77 +2486,45 @@ static int rx_bottom(struct r8152 *tp, int budget)
 				break;
 
 			pkt_len -= ETH_FCS_LEN;
-			len = pkt_len;
 			rx_data += sizeof(struct rx_desc);
 
-			if (!agg_free || tp->rx_copybreak > len)
-				use_frags = false;
+			if (!agg_free || tp->rx_copybreak > pkt_len)
+				rx_frag_head_sz = pkt_len;
 			else
-				use_frags = true;
+				rx_frag_head_sz = tp->rx_copybreak;
 
-			if (use_frags) {
-				/* If the budget is exhausted, the packet
-				 * would be queued in the driver. That is,
-				 * napi_gro_frags() wouldn't be called, so
-				 * we couldn't use napi_get_frags().
-				 */
-				if (work_done >= budget) {
-					rx_frag_head_sz = tp->rx_copybreak;
-					skb = napi_alloc_skb(napi,
-							     rx_frag_head_sz);
-				} else {
-					rx_frag_head_sz = 0;
-					skb = napi_get_frags(napi);
-				}
-			} else {
-				rx_frag_head_sz = 0;
-				skb = napi_alloc_skb(napi, len);
-			}
-
+			skb = napi_alloc_skb(napi, rx_frag_head_sz);
 			if (!skb) {
 				stats->rx_dropped++;
 				goto find_next_rx;
 			}
 
 			skb->ip_summed = r8152_rx_csum(tp, rx_desc);
-			rtl_rx_vlan_tag(rx_desc, skb);
-
-			if (use_frags) {
-				if (rx_frag_head_sz) {
-					memcpy(skb->data, rx_data,
-					       rx_frag_head_sz);
-					skb_put(skb, rx_frag_head_sz);
-					len -= rx_frag_head_sz;
-					rx_data += rx_frag_head_sz;
-					skb->protocol = eth_type_trans(skb,
-								       netdev);
-				}
-
+			memcpy(skb->data, rx_data, rx_frag_head_sz);
+			skb_put(skb, rx_frag_head_sz);
+			pkt_len -= rx_frag_head_sz;
+			rx_data += rx_frag_head_sz;
+			if (pkt_len) {
 				skb_add_rx_frag(skb, 0, agg->page,
 						agg_offset(agg, rx_data),
-						len, SKB_DATA_ALIGN(len));
+						pkt_len,
+						SKB_DATA_ALIGN(pkt_len));
 				get_page(agg->page);
-			} else {
-				memcpy(skb->data, rx_data, len);
-				skb_put(skb, len);
-				skb->protocol = eth_type_trans(skb, netdev);
 			}
 
+			skb->protocol = eth_type_trans(skb, netdev);
+			rtl_rx_vlan_tag(rx_desc, skb);
 			if (work_done < budget) {
-				if (use_frags)
-					napi_gro_frags(napi);
-				else
-					napi_gro_receive(napi, skb);
-
 				work_done++;
 				stats->rx_packets++;
-				stats->rx_bytes += pkt_len;
+				stats->rx_bytes += skb->len;
+				napi_gro_receive(napi, skb);
 			} else {
 				__skb_queue_tail(&tp->rx_queue, skb);
 			}
 
 find_next_rx:
-			rx_data = rx_agg_align(rx_data + len + ETH_FCS_LEN);
+			rx_data = rx_agg_align(rx_data + pkt_len + ETH_FCS_LEN);
 			rx_desc = (struct rx_desc *)rx_data;
 			len_used = agg_offset(agg, rx_data);
 			len_used += sizeof(struct rx_desc);
@@ -2698,10 +2553,9 @@ submit:
 		}
 	}
 
-	/* Splice the remained list back to rx_done for next schedule */
 	if (!list_empty(&rx_queue)) {
 		spin_lock_irqsave(&tp->rx_lock, flags);
-		list_splice(&rx_queue, &tp->rx_done);
+		list_splice_tail(&rx_queue, &tp->rx_done);
 		spin_unlock_irqrestore(&tp->rx_lock, flags);
 	}
 
@@ -2880,26 +2734,22 @@ static void _rtl8152_set_rx_mode(struct net_device *netdev)
 		ocp_data |= RCR_AM | RCR_AAP;
 		mc_filter[1] = 0xffffffff;
 		mc_filter[0] = 0xffffffff;
-	} else if ((netdev->flags & IFF_MULTICAST &&
-				netdev_mc_count(netdev) > multicast_filter_limit) ||
-			   (netdev->flags & IFF_ALLMULTI)) {
+	} else if ((netdev_mc_count(netdev) > multicast_filter_limit) ||
+		   (netdev->flags & IFF_ALLMULTI)) {
 		/* Too many to filter perfectly -- accept all multicasts. */
 		ocp_data |= RCR_AM;
 		mc_filter[1] = 0xffffffff;
 		mc_filter[0] = 0xffffffff;
 	} else {
+		struct netdev_hw_addr *ha;
+
 		mc_filter[1] = 0;
 		mc_filter[0] = 0;
+		netdev_for_each_mc_addr(ha, netdev) {
+			int bit_nr = ether_crc(ETH_ALEN, ha->addr) >> 26;
 
-		if (netdev->flags & IFF_MULTICAST) {
-			struct netdev_hw_addr *ha;
-
-			netdev_for_each_mc_addr(ha, netdev) {
-				int bit_nr = ether_crc(ETH_ALEN, ha->addr) >> 26;
-
-				mc_filter[bit_nr >> 5] |= 1 << (bit_nr & 31);
-				ocp_data |= RCR_AM;
-			}
+			mc_filter[bit_nr >> 5] |= 1 << (bit_nr & 31);
+			ocp_data |= RCR_AM;
 		}
 	}
 
@@ -2917,9 +2767,9 @@ rtl8152_features_check(struct sk_buff *skb, struct net_device *dev,
 {
 	u32 mss = skb_shinfo(skb)->gso_size;
 	int max_offset = mss ? GTTCPHO_MAX : TCPHO_MAX;
+	int offset = skb_transport_offset(skb);
 
-	if ((mss || skb->ip_summed == CHECKSUM_PARTIAL) &&
-	    skb_transport_offset(skb) > max_offset)
+	if ((mss || skb->ip_summed == CHECKSUM_PARTIAL) && offset > max_offset)
 		features &= ~(NETIF_F_CSUM_MASK | NETIF_F_GSO_MASK);
 	else if ((skb->len + sizeof(struct tx_desc)) > agg_buf_sz)
 		features &= ~NETIF_F_GSO_MASK;
@@ -4126,10 +3976,29 @@ static void rtl_reset_bmu(struct r8152 *tp)
 /* Clear the bp to stop the firmware before loading a new one */
 static void rtl_clear_bp(struct r8152 *tp, u16 type)
 {
-	u16 bp[16] = {0};
-	u16 bp_num;
-
 	switch (tp->version) {
+	case RTL_VER_01:
+	case RTL_VER_02:
+	case RTL_VER_07:
+		break;
+	case RTL_VER_03:
+	case RTL_VER_04:
+	case RTL_VER_05:
+	case RTL_VER_06:
+		ocp_write_byte(tp, type, PLA_BP_EN, 0);
+		break;
+	case RTL_VER_14:
+		ocp_write_word(tp, type, USB_BP2_EN, 0);
+
+		ocp_write_word(tp, type, USB_BP_8, 0);
+		ocp_write_word(tp, type, USB_BP_9, 0);
+		ocp_write_word(tp, type, USB_BP_10, 0);
+		ocp_write_word(tp, type, USB_BP_11, 0);
+		ocp_write_word(tp, type, USB_BP_12, 0);
+		ocp_write_word(tp, type, USB_BP_13, 0);
+		ocp_write_word(tp, type, USB_BP_14, 0);
+		ocp_write_word(tp, type, USB_BP_15, 0);
+		break;
 	case RTL_VER_08:
 	case RTL_VER_09:
 	case RTL_VER_10:
@@ -4137,31 +4006,32 @@ static void rtl_clear_bp(struct r8152 *tp, u16 type)
 	case RTL_VER_12:
 	case RTL_VER_13:
 	case RTL_VER_15:
+	default:
 		if (type == MCU_TYPE_USB) {
 			ocp_write_word(tp, MCU_TYPE_USB, USB_BP2_EN, 0);
-			bp_num = 16;
-			break;
+
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_8, 0);
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_9, 0);
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_10, 0);
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_11, 0);
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_12, 0);
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_13, 0);
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_14, 0);
+			ocp_write_word(tp, MCU_TYPE_USB, USB_BP_15, 0);
+		} else {
+			ocp_write_byte(tp, MCU_TYPE_PLA, PLA_BP_EN, 0);
 		}
-		fallthrough;
-	case RTL_VER_03:
-	case RTL_VER_04:
-	case RTL_VER_05:
-	case RTL_VER_06:
-		ocp_write_byte(tp, type, PLA_BP_EN, 0);
-		fallthrough;
-	case RTL_VER_01:
-	case RTL_VER_02:
-	case RTL_VER_07:
-		bp_num = 8;
-		break;
-	case RTL_VER_14:
-	default:
-		ocp_write_word(tp, type, USB_BP2_EN, 0);
-		bp_num = 16;
 		break;
 	}
 
-	generic_ocp_write(tp, PLA_BP_0, BYTE_EN_DWORD, bp_num << 1, bp, type);
+	ocp_write_word(tp, type, PLA_BP_0, 0);
+	ocp_write_word(tp, type, PLA_BP_1, 0);
+	ocp_write_word(tp, type, PLA_BP_2, 0);
+	ocp_write_word(tp, type, PLA_BP_3, 0);
+	ocp_write_word(tp, type, PLA_BP_4, 0);
+	ocp_write_word(tp, type, PLA_BP_5, 0);
+	ocp_write_word(tp, type, PLA_BP_6, 0);
+	ocp_write_word(tp, type, PLA_BP_7, 0);
 
 	/* wait 3 ms to make sure the firmware is stopped */
 	usleep_range(3000, 6000);
@@ -5138,9 +5008,10 @@ static void rtl8152_fw_phy_nc_apply(struct r8152 *tp, struct fw_phy_nc *phy)
 
 static void rtl8152_fw_mac_apply(struct r8152 *tp, struct fw_mac *mac)
 {
-	u16 bp_en_addr, type, fw_ver_reg;
+	u16 bp_en_addr, bp_index, type, bp_num, fw_ver_reg;
 	u32 length;
 	u8 *data;
+	int i;
 
 	switch (__le32_to_cpu(mac->blk_hdr.type)) {
 	case RTL_FW_PLA:
@@ -5182,8 +5053,12 @@ static void rtl8152_fw_mac_apply(struct r8152 *tp, struct fw_mac *mac)
 	ocp_write_word(tp, type, __le16_to_cpu(mac->bp_ba_addr),
 		       __le16_to_cpu(mac->bp_ba_value));
 
-	generic_ocp_write(tp, __le16_to_cpu(mac->bp_start), BYTE_EN_DWORD,
-			  __le16_to_cpu(mac->bp_num) << 1, mac->bp, type);
+	bp_index = __le16_to_cpu(mac->bp_start);
+	bp_num = __le16_to_cpu(mac->bp_num);
+	for (i = 0; i < bp_num; i++) {
+		ocp_write_word(tp, type, bp_index, __le16_to_cpu(mac->bp[i]));
+		bp_index += 2;
+	}
 
 	bp_en_addr = __le16_to_cpu(mac->bp_en_addr);
 	if (bp_en_addr)
@@ -8411,9 +8286,7 @@ static int rtl8152_pre_reset(struct usb_interface *intf)
 	struct r8152 *tp = usb_get_intfdata(intf);
 	struct net_device *netdev;
 
-	rtnl_lock();
-
-	if (!tp || !test_bit(PROBED_WITH_NO_ERRORS, &tp->flags))
+	if (!tp)
 		return 0;
 
 	netdev = tp->netdev;
@@ -8428,9 +8301,7 @@ static int rtl8152_pre_reset(struct usb_interface *intf)
 	napi_disable(&tp->napi);
 	if (netif_carrier_ok(netdev)) {
 		mutex_lock(&tp->control);
-		set_bit(IN_PRE_RESET, &tp->flags);
 		tp->rtl_ops.disable(tp);
-		clear_bit(IN_PRE_RESET, &tp->flags);
 		mutex_unlock(&tp->control);
 	}
 
@@ -8443,18 +8314,19 @@ static int rtl8152_post_reset(struct usb_interface *intf)
 	struct net_device *netdev;
 	struct sockaddr sa;
 
-	if (!tp || !test_bit(PROBED_WITH_NO_ERRORS, &tp->flags))
-		goto exit;
-
-	rtl_set_accessible(tp);
+	if (!tp)
+		return 0;
 
 	/* reset the MAC address in case of policy change */
-	if (determine_ethernet_addr(tp, &sa) >= 0)
+	if (determine_ethernet_addr(tp, &sa) >= 0) {
+		rtnl_lock();
 		dev_set_mac_address (tp->netdev, &sa, NULL);
+		rtnl_unlock();
+	}
 
 	netdev = tp->netdev;
 	if (!netif_running(netdev))
-		goto exit;
+		return 0;
 
 	set_bit(WORK_ENABLE, &tp->flags);
 	if (netif_carrier_ok(netdev)) {
@@ -8473,8 +8345,6 @@ static int rtl8152_post_reset(struct usb_interface *intf)
 	if (!list_empty(&tp->rx_done))
 		napi_schedule(&tp->napi);
 
-exit:
-	rtnl_unlock();
 	return 0;
 }
 
@@ -8751,11 +8621,11 @@ static void rtl8152_get_drvinfo(struct net_device *netdev,
 {
 	struct r8152 *tp = netdev_priv(netdev);
 
-	strscpy(info->driver, MODULENAME, sizeof(info->driver));
-	strscpy(info->version, DRIVER_VERSION, sizeof(info->version));
+	strlcpy(info->driver, MODULENAME, sizeof(info->driver));
+	strlcpy(info->version, DRIVER_VERSION, sizeof(info->version));
 	usb_make_path(tp->udev, info->bus_info, sizeof(info->bus_info));
 	if (!IS_ERR_OR_NULL(tp->rtl_fw.fw))
-		strscpy(info->fw_version, tp->rtl_fw.version,
+		strlcpy(info->fw_version, tp->rtl_fw.version,
 			sizeof(info->fw_version));
 }
 
@@ -9179,9 +9049,7 @@ static int rtl8152_set_tunable(struct net_device *netdev,
 }
 
 static void rtl8152_get_ringparam(struct net_device *netdev,
-				  struct ethtool_ringparam *ring,
-				  struct kernel_ethtool_ringparam *kernel_ring,
-				  struct netlink_ext_ack *extack)
+				  struct ethtool_ringparam *ring)
 {
 	struct r8152 *tp = netdev_priv(netdev);
 
@@ -9190,9 +9058,7 @@ static void rtl8152_get_ringparam(struct net_device *netdev,
 }
 
 static int rtl8152_set_ringparam(struct net_device *netdev,
-				 struct ethtool_ringparam *ring,
-				 struct kernel_ethtool_ringparam *kernel_ring,
-				 struct netlink_ext_ack *extack)
+				 struct ethtool_ringparam *ring)
 {
 	struct r8152 *tp = netdev_priv(netdev);
 
@@ -9648,29 +9514,17 @@ static u8 __rtl_get_hw_ver(struct usb_device *udev)
 	__le32 *tmp;
 	u8 version;
 	int ret;
-	int i;
 
 	tmp = kmalloc(sizeof(*tmp), GFP_KERNEL);
 	if (!tmp)
 		return 0;
 
-	/* Retry up to 3 times in case there is a transitory error. We do this
-	 * since retrying a read of the version is always safe and this
-	 * function doesn't take advantage of r8152_control_msg().
-	 */
-	for (i = 0; i < 3; i++) {
-		ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
-				      RTL8152_REQ_GET_REGS, RTL8152_REQT_READ,
-				      PLA_TCR0, MCU_TYPE_PLA, tmp, sizeof(*tmp),
-				      USB_CTRL_GET_TIMEOUT);
-		if (ret > 0) {
-			ocp_data = (__le32_to_cpu(*tmp) >> 16) & VERSION_MASK;
-			break;
-		}
-	}
-
-	if (i != 0 && ret > 0)
-		dev_warn(&udev->dev, "Needed %d retries to read version\n", i);
+	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
+			      RTL8152_REQ_GET_REGS, RTL8152_REQT_READ,
+			      PLA_TCR0, MCU_TYPE_PLA, tmp, sizeof(*tmp),
+			      USB_CTRL_GET_TIMEOUT);
+	if (ret > 0)
+		ocp_data = (__le32_to_cpu(*tmp) >> 16) & VERSION_MASK;
 
 	kfree(tmp);
 
@@ -9744,38 +9598,23 @@ u8 rtl8152_get_version(struct usb_interface *intf)
 }
 EXPORT_SYMBOL_GPL(rtl8152_get_version);
 
-static bool rtl8152_supports_lenovo_macpassthru(struct usb_device *udev)
-{
-	int parent_vendor_id = le16_to_cpu(udev->parent->descriptor.idVendor);
-	int product_id = le16_to_cpu(udev->descriptor.idProduct);
-	int vendor_id = le16_to_cpu(udev->descriptor.idVendor);
-
-	if (vendor_id == VENDOR_ID_LENOVO) {
-		switch (product_id) {
-		case DEVICE_ID_LENOVO_USB_C_TRAVEL_HUB:
-		case DEVICE_ID_THINKPAD_ONELINK_PLUS_DOCK:
-		case DEVICE_ID_THINKPAD_THUNDERBOLT3_DOCK_GEN2:
-		case DEVICE_ID_THINKPAD_USB_C_DOCK_GEN2:
-		case DEVICE_ID_THINKPAD_USB_C_DOCK_GEN3:
-		case DEVICE_ID_THINKPAD_USB_C_DONGLE:
-			return 1;
-		}
-	} else if (vendor_id == VENDOR_ID_REALTEK && parent_vendor_id == VENDOR_ID_LENOVO) {
-		switch (product_id) {
-		case 0x8153:
-			return 1;
-		}
-	}
-	return 0;
-}
-
-static int rtl8152_probe_once(struct usb_interface *intf,
-			      const struct usb_device_id *id, u8 version)
+static int rtl8152_probe(struct usb_interface *intf,
+			 const struct usb_device_id *id)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
+	u8 version = rtl8152_get_version(intf);
 	struct r8152 *tp;
 	struct net_device *netdev;
 	int ret;
+
+	if (version == RTL_VER_UNKNOWN)
+		return -ENODEV;
+
+	if (intf->cur_altsetting->desc.bInterfaceClass != USB_CLASS_VENDOR_SPEC)
+		return -ENODEV;
+
+	if (!rtl_check_vendor_ok(intf))
+		return -ENODEV;
 
 	usb_reset_device(udev);
 	netdev = alloc_etherdev(sizeof(struct r8152));
@@ -9842,7 +9681,14 @@ static int rtl8152_probe_once(struct usb_interface *intf,
 		netdev->hw_features &= ~NETIF_F_RXCSUM;
 	}
 
-	tp->lenovo_macpassthru = rtl8152_supports_lenovo_macpassthru(udev);
+	if (le16_to_cpu(udev->descriptor.idVendor) == VENDOR_ID_LENOVO) {
+		switch (le16_to_cpu(udev->descriptor.idProduct)) {
+		case DEVICE_ID_THINKPAD_ONELINK_PLUS_DOCK:
+		case DEVICE_ID_THINKPAD_THUNDERBOLT3_DOCK_GEN2:
+		case DEVICE_ID_THINKPAD_USB_C_DOCK_GEN2:
+			tp->lenovo_macpassthru = 1;
+		}
+	}
 
 	if (le16_to_cpu(udev->descriptor.bcdDevice) == 0x3011 && udev->serial &&
 	    (!strcmp(udev->serial, "000001000000") ||
@@ -9852,7 +9698,7 @@ static int rtl8152_probe_once(struct usb_interface *intf,
 	}
 
 	netdev->ethtool_ops = &ops;
-	netif_set_tso_max_size(netdev, RTL_LIMITED_TSO_SIZE);
+	netif_set_gso_max_size(netdev, RTL_LIMITED_TSO_SIZE);
 
 	/* MTU range: 68 - 1500 or 9194 */
 	netdev->min_mtu = ETH_MIN_MTU;
@@ -9926,7 +9772,10 @@ static int rtl8152_probe_once(struct usb_interface *intf,
 
 	usb_set_intfdata(intf, tp);
 
-	netif_napi_add(netdev, &tp->napi, r8152_poll);
+	if (tp->support_2500full)
+		netif_napi_add(netdev, &tp->napi, r8152_poll, 256);
+	else
+		netif_napi_add(netdev, &tp->napi, r8152_poll, 64);
 
 	ret = register_netdev(netdev);
 	if (ret != 0) {
@@ -9939,19 +9788,9 @@ static int rtl8152_probe_once(struct usb_interface *intf,
 	else
 		device_set_wakeup_enable(&udev->dev, false);
 
-	/* If we saw a control transfer error while probing then we may
-	 * want to try probe() again. Consider this an error.
-	 */
-	if (test_bit(PROBE_SHOULD_RETRY, &tp->flags))
-		goto out2;
-
-	set_bit(PROBED_WITH_NO_ERRORS, &tp->flags);
 	netif_info(tp, probe, netdev, "%s\n", DRIVER_VERSION);
 
 	return 0;
-
-out2:
-	unregister_netdev(netdev);
 
 out1:
 	tasklet_kill(&tp->tx_tl);
@@ -9961,43 +9800,7 @@ out1:
 	rtl8152_release_firmware(tp);
 	usb_set_intfdata(intf, NULL);
 out:
-	if (test_bit(PROBE_SHOULD_RETRY, &tp->flags))
-		ret = -EAGAIN;
-
 	free_netdev(netdev);
-	return ret;
-}
-
-#define RTL8152_PROBE_TRIES	3
-
-static int rtl8152_probe(struct usb_interface *intf,
-			 const struct usb_device_id *id)
-{
-	u8 version;
-	int ret;
-	int i;
-
-	if (intf->cur_altsetting->desc.bInterfaceClass != USB_CLASS_VENDOR_SPEC)
-		return -ENODEV;
-
-	if (!rtl_check_vendor_ok(intf))
-		return -ENODEV;
-
-	version = rtl8152_get_version(intf);
-	if (version == RTL_VER_UNKNOWN)
-		return -ENODEV;
-
-	for (i = 0; i < RTL8152_PROBE_TRIES; i++) {
-		ret = rtl8152_probe_once(intf, id, version);
-		if (ret != -EAGAIN)
-			break;
-	}
-	if (ret == -EAGAIN) {
-		dev_err(&intf->dev,
-			"r8152 failed probe after %d tries; giving up\n", i);
-		return -ENODEV;
-	}
-
 	return ret;
 }
 
@@ -10069,7 +9872,7 @@ static struct usb_driver rtl8152_driver = {
 	.disable_hub_initiated_lpm = 1,
 };
 
-static int rtl8152_cfgselector_choose_configuration(struct usb_device *udev)
+static int rtl8152_cfgselector_probe(struct usb_device *udev)
 {
 	struct usb_host_config *c;
 	int i, num_configs;
@@ -10096,13 +9899,19 @@ static int rtl8152_cfgselector_choose_configuration(struct usb_device *udev)
 	if (i == num_configs)
 		return -ENODEV;
 
-	return c->desc.bConfigurationValue;
+	if (usb_set_configuration(udev, c->desc.bConfigurationValue)) {
+		dev_err(&udev->dev, "Failed to set configuration %d\n",
+			c->desc.bConfigurationValue);
+		return -ENODEV;
+	}
+
+	return 0;
 }
 
 static struct usb_device_driver rtl8152_cfgselector_driver = {
-	.name =	MODULENAME "-cfgselector",
-	.choose_configuration = rtl8152_cfgselector_choose_configuration,
-	.id_table = rtl8152_table,
+	.name =		MODULENAME "-cfgselector",
+	.probe =	rtl8152_cfgselector_probe,
+	.id_table =	rtl8152_table,
 	.generic_subclass = 1,
 	.supports_autosuspend = 1,
 };

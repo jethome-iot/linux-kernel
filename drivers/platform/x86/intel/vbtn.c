@@ -200,9 +200,6 @@ static void notify_handler(acpi_handle handle, u32 event, void *context)
 	autorelease = val && (!ke_rel || ke_rel->type == KE_IGNORE);
 
 	sparse_keymap_report_event(input_dev, event, val, autorelease);
-
-	/* Some devices need this to report further events */
-	acpi_evaluate_object(handle, "VBDL", NULL, NULL);
 }
 
 /*
@@ -330,12 +327,18 @@ static int intel_vbtn_probe(struct platform_device *device)
 	return 0;
 }
 
-static void intel_vbtn_remove(struct platform_device *device)
+static int intel_vbtn_remove(struct platform_device *device)
 {
 	acpi_handle handle = ACPI_HANDLE(&device->dev);
 
 	device_init_wakeup(&device->dev, false);
 	acpi_remove_notify_handler(handle, ACPI_DEVICE_NOTIFY, notify_handler);
+
+	/*
+	 * Even if we failed to shut off the event stream, we can still
+	 * safely detach from the device.
+	 */
+	return 0;
 }
 
 static int intel_vbtn_pm_prepare(struct device *dev)
@@ -382,16 +385,19 @@ static struct platform_driver intel_vbtn_pl_driver = {
 		.pm = &intel_vbtn_pm_ops,
 	},
 	.probe = intel_vbtn_probe,
-	.remove_new = intel_vbtn_remove,
+	.remove = intel_vbtn_remove,
 };
 
 static acpi_status __init
 check_acpi_dev(acpi_handle handle, u32 lvl, void *context, void **rv)
 {
 	const struct acpi_device_id *ids = context;
-	struct acpi_device *dev = acpi_fetch_acpi_dev(handle);
+	struct acpi_device *dev;
 
-	if (dev && acpi_match_device_ids(dev, ids) == 0)
+	if (acpi_bus_get_device(handle, &dev) != 0)
+		return AE_OK;
+
+	if (acpi_match_device_ids(dev, ids) == 0)
 		if (!IS_ERR_OR_NULL(acpi_create_platform_device(dev, NULL)))
 			dev_info(&dev->dev,
 				 "intel-vbtn: created platform device\n");

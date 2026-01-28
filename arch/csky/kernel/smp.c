@@ -140,7 +140,7 @@ void smp_send_stop(void)
 	on_each_cpu(ipi_stop, NULL, 1);
 }
 
-void arch_smp_send_reschedule(int cpu)
+void smp_send_reschedule(int cpu)
 {
 	send_ipi_message(cpumask_of(cpu), IPI_RESCHEDULE);
 }
@@ -180,13 +180,15 @@ void __init setup_smp_ipi(void)
 void __init setup_smp(void)
 {
 	struct device_node *node = NULL;
-	unsigned int cpu;
+	int cpu;
 
 	for_each_of_cpu_node(node) {
 		if (!of_device_is_available(node))
 			continue;
 
-		cpu = of_get_cpu_hwid(node, 0);
+		if (of_property_read_u32(node, "reg", &cpu))
+			continue;
+
 		if (cpu >= NR_CPUS)
 			continue;
 
@@ -243,6 +245,11 @@ void __init smp_cpus_done(unsigned int max_cpus)
 {
 }
 
+int setup_profiling_timer(unsigned int multiplier)
+{
+	return -EINVAL;
+}
+
 void csky_start_secondary(void)
 {
 	struct mm_struct *mm = &init_mm;
@@ -291,21 +298,25 @@ int __cpu_disable(void)
 	return 0;
 }
 
-void arch_cpuhp_cleanup_dead_cpu(unsigned int cpu)
+void __cpu_die(unsigned int cpu)
 {
+	if (!cpu_wait_death(cpu, 5)) {
+		pr_crit("CPU%u: shutdown failed\n", cpu);
+		return;
+	}
 	pr_notice("CPU%u: shutdown\n", cpu);
 }
 
-void __noreturn arch_cpu_idle_dead(void)
+void arch_cpu_idle_dead(void)
 {
 	idle_task_exit();
 
-	cpuhp_ap_report_dead();
+	cpu_report_death();
 
 	while (!secondary_stack)
 		arch_cpu_idle();
 
-	raw_local_irq_disable();
+	local_irq_disable();
 
 	asm volatile(
 		"mov	sp, %0\n"
@@ -313,7 +324,5 @@ void __noreturn arch_cpu_idle_dead(void)
 		"jmpi	csky_start_secondary"
 		:
 		: "r" (secondary_stack));
-
-	BUG();
 }
 #endif

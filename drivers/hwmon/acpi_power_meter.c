@@ -485,7 +485,7 @@ static struct sensor_template meter_attrs[] = {
 	RO_SENSOR_TEMPLATE("power1_average_interval_max", show_val, 1),
 	RO_SENSOR_TEMPLATE("power1_is_battery", show_val, 5),
 	RW_SENSOR_TEMPLATE(POWER_AVG_INTERVAL_NAME, show_avg_interval,
-			   set_avg_interval, 0),
+		set_avg_interval, 0),
 	{},
 };
 
@@ -534,13 +534,12 @@ static void remove_domain_devices(struct acpi_power_meter_resource *resource)
 
 	for (i = 0; i < resource->num_domain_devices; i++) {
 		struct acpi_device *obj = resource->domain_devices[i];
-
 		if (!obj)
 			continue;
 
 		sysfs_remove_link(resource->holders_dir,
 				  kobject_name(&obj->dev.kobj));
-		acpi_dev_put(obj);
+		put_device(&obj->dev);
 	}
 
 	kfree(resource->domain_devices);
@@ -585,7 +584,7 @@ static int read_domain_devices(struct acpi_power_meter_resource *resource)
 	}
 
 	resource->holders_dir = kobject_create_and_add("measures",
-						       &resource->acpi_dev->dev.kobj);
+					&resource->acpi_dev->dev.kobj);
 	if (!resource->holders_dir) {
 		res = -ENOMEM;
 		goto exit_free;
@@ -595,22 +594,25 @@ static int read_domain_devices(struct acpi_power_meter_resource *resource)
 
 	for (i = 0; i < pss->package.count; i++) {
 		struct acpi_device *obj;
-		union acpi_object *element = &pss->package.elements[i];
+		union acpi_object *element = &(pss->package.elements[i]);
 
 		/* Refuse non-references */
 		if (element->type != ACPI_TYPE_LOCAL_REFERENCE)
 			continue;
 
 		/* Create a symlink to domain objects */
-		obj = acpi_get_acpi_dev(element->reference.handle);
-		resource->domain_devices[i] = obj;
-		if (!obj)
+		resource->domain_devices[i] = NULL;
+		if (acpi_bus_get_device(element->reference.handle,
+					&resource->domain_devices[i]))
 			continue;
 
+		obj = resource->domain_devices[i];
+		get_device(&obj->dev);
+
 		res = sysfs_create_link(resource->holders_dir, &obj->dev.kobj,
-					kobject_name(&obj->dev.kobj));
+				      kobject_name(&obj->dev.kobj));
 		if (res) {
-			acpi_dev_put(obj);
+			put_device(&obj->dev);
 			resource->domain_devices[i] = NULL;
 		}
 	}
@@ -793,20 +795,21 @@ static int read_capabilities(struct acpi_power_meter_resource *resource)
 	str = &resource->model_number;
 
 	for (i = 11; i < 14; i++) {
-		union acpi_object *element = &pss->package.elements[i];
+		union acpi_object *element = &(pss->package.elements[i]);
 
 		if (element->type != ACPI_TYPE_STRING) {
 			res = -EINVAL;
 			goto error;
 		}
 
-		*str = kmemdup_nul(element->string.pointer, element->string.length,
-				   GFP_KERNEL);
+		*str = kcalloc(element->string.length + 1, sizeof(u8),
+			       GFP_KERNEL);
 		if (!*str) {
 			res = -ENOMEM;
 			goto error;
 		}
 
+		strncpy(*str, element->string.pointer, element->string.length);
 		str++;
 	}
 
@@ -872,7 +875,8 @@ static int acpi_power_meter_add(struct acpi_device *device)
 	if (!device)
 		return -EINVAL;
 
-	resource = kzalloc(sizeof(*resource), GFP_KERNEL);
+	resource = kzalloc(sizeof(struct acpi_power_meter_resource),
+			   GFP_KERNEL);
 	if (!resource)
 		return -ENOMEM;
 
@@ -887,8 +891,7 @@ static int acpi_power_meter_add(struct acpi_device *device)
 	if (res)
 		goto exit_free;
 
-	resource->trip[0] = -1;
-	resource->trip[1] = -1;
+	resource->trip[0] = resource->trip[1] = -1;
 
 	res = setup_attrs(resource);
 	if (res)
@@ -913,12 +916,12 @@ exit:
 	return res;
 }
 
-static void acpi_power_meter_remove(struct acpi_device *device)
+static int acpi_power_meter_remove(struct acpi_device *device)
 {
 	struct acpi_power_meter_resource *resource;
 
 	if (!device || !acpi_driver_data(device))
-		return;
+		return -EINVAL;
 
 	resource = acpi_driver_data(device);
 	hwmon_device_unregister(resource->hwmon_dev);
@@ -927,7 +930,10 @@ static void acpi_power_meter_remove(struct acpi_device *device)
 	free_capabilities(resource);
 
 	kfree(resource);
+	return 0;
 }
+
+#ifdef CONFIG_PM_SLEEP
 
 static int acpi_power_meter_resume(struct device *dev)
 {
@@ -946,8 +952,9 @@ static int acpi_power_meter_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(acpi_power_meter_pm, NULL,
-				acpi_power_meter_resume);
+#endif /* CONFIG_PM_SLEEP */
+
+static SIMPLE_DEV_PM_OPS(acpi_power_meter_pm, NULL, acpi_power_meter_resume);
 
 static struct acpi_driver acpi_power_meter_driver = {
 	.name = "power_meter",
@@ -958,7 +965,7 @@ static struct acpi_driver acpi_power_meter_driver = {
 		.remove = acpi_power_meter_remove,
 		.notify = acpi_power_meter_notify,
 		},
-	.drv.pm = pm_sleep_ptr(&acpi_power_meter_pm),
+	.drv.pm = &acpi_power_meter_pm,
 };
 
 /* Module init/exit routines */

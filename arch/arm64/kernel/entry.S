@@ -101,11 +101,12 @@
 .org .Lventry_start\@ + 128	// Did we overflow the ventry slot?
 	.endm
 
-	.macro	tramp_alias, dst, sym
-	.set	.Lalias\@, TRAMP_VALIAS + \sym - .entry.tramp.text
-	movz	\dst, :abs_g2_s:.Lalias\@
-	movk	\dst, :abs_g1_nc:.Lalias\@
-	movk	\dst, :abs_g0_nc:.Lalias\@
+	.macro tramp_alias, dst, sym, tmp
+	mov_q	\dst, TRAMP_VALIAS
+	adr_l	\tmp, \sym
+	add	\dst, \dst, \tmp
+	adr_l	\tmp, .entry.tramp.text
+	sub	\dst, \dst, \tmp
 	.endm
 
 	/*
@@ -113,7 +114,7 @@
 	 * them if required.
 	 */
 	.macro	apply_ssbd, state, tmp1, tmp2
-alternative_cb	ARM64_ALWAYS_SYSTEM, spectre_v4_patch_fw_mitigation_enable
+alternative_cb	spectre_v4_patch_fw_mitigation_enable
 	b	.L__asm_ssbd_skip\@		// Patched to NOP
 alternative_cb_end
 	ldr_this_cpu	\tmp2, arm64_ssbd_callback_required, \tmp1
@@ -122,7 +123,7 @@ alternative_cb_end
 	tbnz	\tmp2, #TIF_SSBD, .L__asm_ssbd_skip\@
 	mov	w0, #ARM_SMCCC_ARCH_WORKAROUND_2
 	mov	w1, #\state
-alternative_cb	ARM64_ALWAYS_SYSTEM, smccc_patch_fw_mitigation_conduit
+alternative_cb	smccc_patch_fw_mitigation_conduit
 	nop					// Patched to SMC/HVC #0
 alternative_cb_end
 .L__asm_ssbd_skip\@:
@@ -174,7 +175,7 @@ alternative_else_nop_endif
 
 	.macro mte_set_kernel_gcr, tmp, tmp2
 #ifdef CONFIG_KASAN_HW_TAGS
-alternative_cb	ARM64_ALWAYS_SYSTEM, kasan_hw_tags_enable
+alternative_cb	kasan_hw_tags_enable
 	b	1f
 alternative_cb_end
 	mov	\tmp, KERNEL_GCR_EL1
@@ -185,7 +186,7 @@ alternative_cb_end
 
 	.macro mte_set_user_gcr, tsk, tmp, tmp2
 #ifdef CONFIG_KASAN_HW_TAGS
-alternative_cb	ARM64_ALWAYS_SYSTEM, kasan_hw_tags_enable
+alternative_cb	kasan_hw_tags_enable
 	b	1f
 alternative_cb_end
 	ldr	\tmp, [\tsk, #THREAD_MTE_CTRL]
@@ -196,9 +197,6 @@ alternative_cb_end
 	.endm
 
 	.macro	kernel_entry, el, regsize = 64
-	.if	\el == 0
-	alternative_insn nop, SET_PSTATE_DIT(1), ARM64_HAS_DIT
-	.endif
 	.if	\regsize == 32
 	mov	w0, w0				// zero upper 32 bits of x0
 	.endif
@@ -309,18 +307,13 @@ alternative_else_nop_endif
 	str	w21, [sp, #S_SYSCALLNO]
 	.endif
 
-#ifdef CONFIG_ARM64_PSEUDO_NMI
-alternative_if_not ARM64_HAS_GIC_PRIO_MASKING
-	b	.Lskip_pmr_save\@
-alternative_else_nop_endif
-
+	/* Save pmr */
+alternative_if ARM64_HAS_IRQ_PRIO_MASKING
 	mrs_s	x20, SYS_ICC_PMR_EL1
 	str	x20, [sp, #S_PMR_SAVE]
 	mov	x20, #GIC_PRIO_IRQON | GIC_PRIO_PSR_I_SET
 	msr_s	SYS_ICC_PMR_EL1, x20
-
-.Lskip_pmr_save\@:
-#endif
+alternative_else_nop_endif
 
 	/*
 	 * Registers that may be useful after this macro is invoked:
@@ -332,26 +325,24 @@ alternative_else_nop_endif
 	*/
 	.endm
 
+#ifdef CONFIG_AMLOGIC_VMAP
+	.macro  kernel_exit, el, swap = 0
+#else
 	.macro	kernel_exit, el
+#endif /* CONFIG_AMLOGIC_VMAP */
 	.if	\el != 0
 	disable_daif
 	.endif
 
-#ifdef CONFIG_ARM64_PSEUDO_NMI
-alternative_if_not ARM64_HAS_GIC_PRIO_MASKING
-	b	.Lskip_pmr_restore\@
-alternative_else_nop_endif
-
+	/* Restore pmr */
+alternative_if ARM64_HAS_IRQ_PRIO_MASKING
 	ldr	x20, [sp, #S_PMR_SAVE]
 	msr_s	SYS_ICC_PMR_EL1, x20
-
-	/* Ensure priority change is seen by redistributor */
-alternative_if_not ARM64_HAS_GIC_PRIO_RELAXED_SYNC
-	dsb	sy
+	mrs_s	x21, SYS_ICC_CTLR_EL1
+	tbz	x21, #6, .L__skip_pmr_sync\@	// Check for ICC_CTLR_EL1.PMHE
+	dsb	sy				// Ensure priority change is seen by redistributor
+.L__skip_pmr_sync\@:
 alternative_else_nop_endif
-
-.Lskip_pmr_restore\@:
-#endif
 
 	ldp	x21, x22, [sp, #S_PC]		// load ELR, SPSR
 
@@ -428,37 +419,41 @@ alternative_else_nop_endif
 	ldp	x28, x29, [sp, #16 * 14]
 
 	.if	\el == 0
-#ifdef CONFIG_UNMAP_KERNEL_AT_EL0
-	alternative_insn "b .L_skip_tramp_exit_\@", nop, ARM64_UNMAP_KERNEL_AT_EL0
-
-	msr	far_el1, x29
-
-	ldr_this_cpu	x30, this_cpu_vector, x29
-	tramp_alias	x29, tramp_exit
-	msr		vbar_el1, x30		// install vector table
-	ldr		lr, [sp, #S_LR]		// restore x30
-	add		sp, sp, #PT_REGS_SIZE	// restore sp
-	br		x29
-
-.L_skip_tramp_exit_\@:
-#endif
-	.endif
-
+alternative_if_not ARM64_UNMAP_KERNEL_AT_EL0
 	ldr	lr, [sp, #S_LR]
 	add	sp, sp, #PT_REGS_SIZE		// restore sp
-
-	.if \el == 0
-	/* This must be after the last explicit memory access */
-alternative_if ARM64_WORKAROUND_SPECULATIVE_UNPRIV_LOAD
-	tlbi	vale1, xzr
-	dsb	nsh
+	eret
 alternative_else_nop_endif
+#ifdef CONFIG_UNMAP_KERNEL_AT_EL0
+	bne	4f
+	msr	far_el1, x29
+	tramp_alias	x30, tramp_exit_native, x29
+	br	x30
+4:
+	tramp_alias	x30, tramp_exit_compat, x29
+	br	x30
+#endif
 	.else
+	ldr	lr, [sp, #S_LR]
+#ifdef CONFIG_AMLOGIC_VMAP
+	/* restore context sp and per-cpu vmap stack */
+	.if     \swap == 1
+	stp     x19, x20, [sp]
+	mov     x20, sp
+	add     x19, x20, #PT_REGS_SIZE
+	msr     DBGWVR3_EL1, x19
+	mrs     x19, DBGWVR2_EL1
+	mov     sp,  x19
+	ldp     x19, x20, [x20]
+	.endif
+#endif /* CONFIG_AMLOGIC_VMAP */
+	add	sp, sp, #PT_REGS_SIZE		// restore sp
+
 	/* Ensure any device/NC reads complete */
 	alternative_insn nop, "dmb sy", ARM64_WORKAROUND_1508412
-	.endif
 
 	eret
+	.endif
 	sb
 	.endm
 
@@ -519,7 +514,7 @@ tsk	.req	x28		// current thread_info
 SYM_CODE_START(vectors)
 	kernel_ventry	1, t, 64, sync		// Synchronous EL1t
 	kernel_ventry	1, t, 64, irq		// IRQ EL1t
-	kernel_ventry	1, t, 64, fiq		// FIQ EL1t
+	kernel_ventry	1, t, 64, fiq		// FIQ EL1h
 	kernel_ventry	1, t, 64, error		// Error EL1t
 
 	kernel_ventry	1, h, 64, sync		// Synchronous EL1h
@@ -569,8 +564,34 @@ SYM_CODE_END(__bad_stack)
 #endif /* CONFIG_VMAP_STACK */
 
 
+#ifdef CONFIG_AMLOGIC_VMAP
+	.macro entry_handler el:req, ht:req, regsize:req, label:req, vmap = 0
+#else
 	.macro entry_handler el:req, ht:req, regsize:req, label:req
+#endif
 SYM_CODE_START_LOCAL(el\el\ht\()_\regsize\()_\label)
+#ifdef CONFIG_AMLOGIC_VMAP
+	.if \vmap == 1
+	/*
+	 * register using:
+	 * DBGWVR2_EL1: temp register and back up for sp_el1 of exception
+	 * DBGWVR3_EL1: always point to per-cpu vmap stack
+	 * switch sp_el1 to per-cpu vmap stack and using DBGWVR2_EL1
+	 * to back up sp_el1 under exception
+	 */
+	msr     DBGWVR2_EL1, x29
+	mrs     x29, DBGWVR3_EL1
+	sub     x29, x29, #PT_REGS_SIZE
+	msr     DBGWVR3_EL1, x29
+	stp     x19, x20, [x29]
+	mov     x19, sp
+	mrs     x20, DBGWVR2_EL1
+	msr     DBGWVR2_EL1, x19
+	mov     sp,  x29
+	mov     x29, x20
+	ldp     x19, x20, [sp]
+	.endif
+#endif /* CONFIG_AMLOGIC_VMAP */
 	kernel_entry \el, \regsize
 	mov	x0, sp
 	bl	el\el\ht\()_\regsize\()_\label\()_handler
@@ -590,8 +611,14 @@ SYM_CODE_END(el\el\ht\()_\regsize\()_\label)
 	entry_handler	1, t, 64, fiq
 	entry_handler	1, t, 64, error
 
+#ifdef CONFIG_AMLOGIC_VMAP
+	/* pad vmap option */
+	entry_handler   1, h, 64, sync, 1
+	entry_handler   1, h, 64, irq,  1
+#else
 	entry_handler	1, h, 64, sync
 	entry_handler	1, h, 64, irq
+#endif
 	entry_handler	1, h, 64, fiq
 	entry_handler	1, h, 64, error
 
@@ -613,7 +640,7 @@ SYM_CODE_START_LOCAL(ret_to_user)
 	ldr	x19, [tsk, #TSK_TI_FLAGS]	// re-check for single-step
 	enable_step_tsk x19, x2
 #ifdef CONFIG_GCC_PLUGIN_STACKLEAK
-	bl	stackleak_erase_on_task_stack
+	bl	stackleak_erase
 #endif
 	kernel_exit 0
 SYM_CODE_END(ret_to_user)
@@ -653,28 +680,18 @@ alternative_else_nop_endif
 	 */
 	.endm
 
-	.macro		tramp_data_read_var	dst, var
-#ifdef CONFIG_RELOCATABLE
-	ldr		\dst, .L__tramp_data_\var
-	.ifndef		.L__tramp_data_\var
-	.pushsection	".entry.tramp.rodata", "a", %progbits
-	.align		3
-.L__tramp_data_\var:
-	.quad		\var
-	.popsection
-	.endif
+	.macro tramp_data_page	dst
+	adr_l	\dst, .entry.tramp.text
+	sub	\dst, \dst, PAGE_SIZE
+	.endm
+
+	.macro tramp_data_read_var	dst, var
+#ifdef CONFIG_RANDOMIZE_BASE
+	tramp_data_page		\dst
+	add	\dst, \dst, #:lo12:__entry_tramp_data_\var
+	ldr	\dst, [\dst]
 #else
-	/*
-	 * As !RELOCATABLE implies !RANDOMIZE_BASE the address is always a
-	 * compile time constant (and hence not secret and not worth hiding).
-	 *
-	 * As statically allocated kernel code and data always live in the top
-	 * 47 bits of the address space we can sign-extend bit 47 and avoid an
-	 * instruction to load the upper 16 bits (which must be 0xFFFF).
-	 */
-	movz		\dst, :abs_g2_s:\var
-	movk		\dst, :abs_g1_nc:\var
-	movk		\dst, :abs_g0_nc:\var
+	ldr	\dst, =\var
 #endif
 	.endm
 
@@ -722,7 +739,7 @@ alternative_else_nop_endif
 	msr	vbar_el1, x30
 	isb
 	.else
-	adr_l	x30, vectors
+	ldr	x30, =vectors
 	.endif // \kpti == 1
 
 	.if	\bhb == BHB_MITIGATION_FW
@@ -737,6 +754,22 @@ alternative_else_nop_endif
 	add	x30, x30, #(1b - \vector_start + 4)
 	ret
 .org 1b + 128	// Did we overflow the ventry slot?
+	.endm
+
+	.macro tramp_exit, regsize = 64
+	tramp_data_read_var	x30, this_cpu_vector
+	get_this_cpu_offset x29
+	ldr	x30, [x30, x29]
+
+	msr	vbar_el1, x30
+	ldr	lr, [sp, #S_LR]
+	tramp_unmap_kernel	x29
+	.if	\regsize == 64
+	mrs	x29, far_el1
+	.endif
+	add	sp, sp, #PT_REGS_SIZE		// restore sp
+	eret
+	sb
 	.endm
 
 	.macro	generate_tramp_vector,	kpti, bhb
@@ -759,7 +792,7 @@ alternative_else_nop_endif
  */
 	.pushsection ".entry.tramp.text", "ax"
 	.align	11
-SYM_CODE_START_LOCAL_NOALIGN(tramp_vectors)
+SYM_CODE_START_NOALIGN(tramp_vectors)
 #ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
 	generate_tramp_vector	kpti=1, bhb=BHB_MITIGATION_LOOP
 	generate_tramp_vector	kpti=1, bhb=BHB_MITIGATION_FW
@@ -768,13 +801,31 @@ SYM_CODE_START_LOCAL_NOALIGN(tramp_vectors)
 	generate_tramp_vector	kpti=1, bhb=BHB_MITIGATION_NONE
 SYM_CODE_END(tramp_vectors)
 
-SYM_CODE_START_LOCAL(tramp_exit)
-	tramp_unmap_kernel	x29
-	mrs		x29, far_el1		// restore x29
-	eret
-	sb
-SYM_CODE_END(tramp_exit)
+SYM_CODE_START(tramp_exit_native)
+	tramp_exit
+SYM_CODE_END(tramp_exit_native)
+
+SYM_CODE_START(tramp_exit_compat)
+	tramp_exit	32
+SYM_CODE_END(tramp_exit_compat)
+
+	.ltorg
 	.popsection				// .entry.tramp.text
+#ifdef CONFIG_RANDOMIZE_BASE
+	.pushsection ".rodata", "a"
+	.align PAGE_SHIFT
+SYM_DATA_START(__entry_tramp_data_start)
+__entry_tramp_data_vectors:
+	.quad	vectors
+#ifdef CONFIG_ARM_SDE_INTERFACE
+__entry_tramp_data___sdei_asm_handler:
+	.quad	__sdei_asm_handler
+#endif /* CONFIG_ARM_SDE_INTERFACE */
+__entry_tramp_data_this_cpu_vector:
+	.quad	this_cpu_vector
+SYM_DATA_END(__entry_tramp_data_start)
+	.popsection				// .rodata
+#endif /* CONFIG_RANDOMIZE_BASE */
 #endif /* CONFIG_UNMAP_KERNEL_AT_EL0 */
 
 /*
@@ -923,6 +974,7 @@ NOKPROBE(call_on_irq_stack)
  * This clobbers x4, __sdei_handler() will restore this from firmware's
  * copy.
  */
+.ltorg
 .pushsection ".entry.tramp.text", "ax"
 SYM_CODE_START(__sdei_asm_entry_trampoline)
 	mrs	x4, ttbr1_el1
@@ -957,6 +1009,7 @@ SYM_CODE_START(__sdei_asm_exit_trampoline)
 1:	sdei_handler_exit exit_mode=x2
 SYM_CODE_END(__sdei_asm_exit_trampoline)
 NOKPROBE(__sdei_asm_exit_trampoline)
+	.ltorg
 .popsection		// .entry.tramp.text
 #endif /* CONFIG_UNMAP_KERNEL_AT_EL0 */
 
@@ -1056,10 +1109,8 @@ SYM_CODE_START(__sdei_asm_handler)
 	mov	sp, x1
 
 	mov	x1, x0			// address to complete_and_resume
-	/* x0 = (x0 <= SDEI_EV_FAILED) ?
-	 * EVENT_COMPLETE:EVENT_COMPLETE_AND_RESUME
-	 */
-	cmp	x0, #SDEI_EV_FAILED
+	/* x0 = (x0 <= 1) ? EVENT_COMPLETE:EVENT_COMPLETE_AND_RESUME */
+	cmp	x0, #1
 	mov_q	x2, SDEI_1_0_FN_SDEI_EVENT_COMPLETE
 	mov_q	x3, SDEI_1_0_FN_SDEI_EVENT_COMPLETE_AND_RESUME
 	csel	x0, x2, x3, ls
@@ -1079,7 +1130,7 @@ alternative_if_not ARM64_UNMAP_KERNEL_AT_EL0
 alternative_else_nop_endif
 
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
-	tramp_alias	dst=x5, sym=__sdei_asm_exit_trampoline
+	tramp_alias	dst=x5, sym=__sdei_asm_exit_trampoline, tmp=x3
 	br	x5
 #endif
 SYM_CODE_END(__sdei_asm_handler)
@@ -1096,3 +1147,77 @@ SYM_CODE_START(__sdei_handler_abort)
 SYM_CODE_END(__sdei_handler_abort)
 NOKPROBE(__sdei_handler_abort)
 #endif /* CONFIG_ARM_SDE_INTERFACE */
+
+#ifdef CONFIG_AMLOGIC_VMAP
+SYM_CODE_START(__setup_vmap_stack)
+	ldr		x10, =vmap_stack
+	add		x10, x10, x0
+	mov		x0, x10
+	mov		x1, #0
+	mov		x2, #THREAD_SIZE
+	mov		x17, lr
+#ifdef CONFIG_KASAN
+	bl		__memset		/* clear stack buffer */
+#else
+	bl		memset			/* clear stack buffer */
+#endif
+	mov		lr, x17
+	mov		x0, #THREAD_START_SP
+	add		x10, x10, x0		/* set stack top */
+	msr		DBGWVR3_EL1, x10
+	ret
+SYM_CODE_END(__setup_vmap_stack)
+
+SYM_CODE_START(__vmap_exit)
+	mov		sp, x0
+	kernel_exit 1, 1	/* return from vmap stack fault */
+SYM_CODE_END(__vmap_exit)
+
+	/* switch conext from vmap handler to normal handler */
+SYM_CODE_START(switch_vmap_context)
+	/*
+	 * Not a vmap fault, copy context saved in per-cpu vmap stack
+	 * to task stack, then switch stack back to task stack under
+	 * exception
+	 *          -------
+	 *          |     |  vmap context
+	 *          |     |
+	 *   x0 ->  |-----|
+	 *          |     |  function stack (diff is x3)
+	 *   sp ->  -------
+	 */
+	mov	x1, sp
+	sub	x3, x0, x1
+	mrs	x0, DBGWVR2_EL1			// load raw context sp
+	sub	x0, x0, x3
+	add	x2, x3, #PT_REGS_SIZE
+	stp	x19, x20, [sp, #-16]!
+	stp	x30, xzr, [sp, #-16]!
+	mov	x19, x2
+	mov	x20, x3
+#ifdef CONFIG_KASAN
+	bl	__memcpy
+#else
+	bl	memcpy
+#endif
+	add	x17, x0, x19
+	add	x19, x20, #S_SP
+	str	x17, [x0, x19]			// restore sp in context
+	add	x29, x0, x20			// old fp
+
+	mrs	x16, DBGWVR3_EL1
+	add	x16, x16, #PT_REGS_SIZE
+	msr	DBGWVR3_EL1, x16		// restore pcp vmap stack
+
+	mov	x17, x0				// sp in function context
+	add	x0,  x0, x20			// real pt-regs
+
+	ldp	x30, xzr, [sp], #16
+	ldp	x19, x20, [sp], #16
+	mov	sp, x17
+	add	x29, x29, #S_STACKFRAME
+	str	x29, [sp]			// restore frame pointer
+	mov	x29, sp
+	ret
+SYM_CODE_END(switch_vmap_context)
+#endif /* CONFIG_AMLOGIC_VMAP */

@@ -1112,7 +1112,7 @@ static void bnx2x_get_drvinfo(struct net_device *dev,
 	int ext_dev_info_offset;
 	u32 mbi;
 
-	strscpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
+	strlcpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
 
 	if (SHMEM2_HAS(bp, extended_dev_info_shared_addr)) {
 		ext_dev_info_offset = SHMEM2_RD(bp,
@@ -1126,7 +1126,7 @@ static void bnx2x_get_drvinfo(struct net_device *dev,
 				 (mbi & 0xff000000) >> 24,
 				 (mbi & 0x00ff0000) >> 16,
 				 (mbi & 0x0000ff00) >> 8);
-			strscpy(info->fw_version, version,
+			strlcpy(info->fw_version, version,
 				sizeof(info->fw_version));
 		}
 	}
@@ -1135,7 +1135,7 @@ static void bnx2x_get_drvinfo(struct net_device *dev,
 	bnx2x_fill_fw_str(bp, version, ETHTOOL_FWVERS_LEN);
 	strlcat(info->fw_version, version, sizeof(info->fw_version));
 
-	strscpy(info->bus_info, pci_name(bp->pdev), sizeof(info->bus_info));
+	strlcpy(info->bus_info, pci_name(bp->pdev), sizeof(info->bus_info));
 }
 
 static void bnx2x_get_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
@@ -1914,9 +1914,7 @@ static int bnx2x_set_coalesce(struct net_device *dev,
 }
 
 static void bnx2x_get_ringparam(struct net_device *dev,
-				struct ethtool_ringparam *ering,
-				struct kernel_ethtool_ringparam *kernel_ering,
-				struct netlink_ext_ack *extack)
+				struct ethtool_ringparam *ering)
 {
 	struct bnx2x *bp = netdev_priv(dev);
 
@@ -1940,9 +1938,7 @@ static void bnx2x_get_ringparam(struct net_device *dev,
 }
 
 static int bnx2x_set_ringparam(struct net_device *dev,
-			       struct ethtool_ringparam *ering,
-			       struct kernel_ethtool_ringparam *kernel_ering,
-			       struct netlink_ext_ack *extack)
+			       struct ethtool_ringparam *ering)
 {
 	struct bnx2x *bp = netdev_priv(dev);
 
@@ -3486,15 +3482,16 @@ static u32 bnx2x_get_rxfh_indir_size(struct net_device *dev)
 	return T_ETH_INDIRECTION_TABLE_SIZE;
 }
 
-static int bnx2x_get_rxfh(struct net_device *dev,
-			  struct ethtool_rxfh_param *rxfh)
+static int bnx2x_get_rxfh(struct net_device *dev, u32 *indir, u8 *key,
+			  u8 *hfunc)
 {
 	struct bnx2x *bp = netdev_priv(dev);
 	u8 ind_table[T_ETH_INDIRECTION_TABLE_SIZE] = {0};
 	size_t i;
 
-	rxfh->hfunc = ETH_RSS_HASH_TOP;
-	if (!rxfh->indir)
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
+	if (!indir)
 		return 0;
 
 	/* Get the current configuration of the RSS indirection table */
@@ -3510,14 +3507,13 @@ static int bnx2x_get_rxfh(struct net_device *dev,
 	 * queue.
 	 */
 	for (i = 0; i < T_ETH_INDIRECTION_TABLE_SIZE; i++)
-		rxfh->indir[i] = ind_table[i] - bp->fp->cl_id;
+		indir[i] = ind_table[i] - bp->fp->cl_id;
 
 	return 0;
 }
 
-static int bnx2x_set_rxfh(struct net_device *dev,
-			  struct ethtool_rxfh_param *rxfh,
-			  struct netlink_ext_ack *extack)
+static int bnx2x_set_rxfh(struct net_device *dev, const u32 *indir,
+			  const u8 *key, const u8 hfunc)
 {
 	struct bnx2x *bp = netdev_priv(dev);
 	size_t i;
@@ -3525,12 +3521,11 @@ static int bnx2x_set_rxfh(struct net_device *dev,
 	/* We require at least one supported parameter to be changed and no
 	 * change in any of the unsupported parameters
 	 */
-	if (rxfh->key ||
-	    (rxfh->hfunc != ETH_RSS_HASH_NO_CHANGE &&
-	     rxfh->hfunc != ETH_RSS_HASH_TOP))
+	if (key ||
+	    (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP))
 		return -EOPNOTSUPP;
 
-	if (!rxfh->indir)
+	if (!indir)
 		return 0;
 
 	for (i = 0; i < T_ETH_INDIRECTION_TABLE_SIZE; i++) {
@@ -3543,7 +3538,7 @@ static int bnx2x_set_rxfh(struct net_device *dev,
 		 * align the received table to the Client ID of the leading RSS
 		 * queue
 		 */
-		bp->rss_conf_obj.ind_table[i] = rxfh->indir[i] + bp->fp->cl_id;
+		bp->rss_conf_obj.ind_table[i] = indir[i] + bp->fp->cl_id;
 	}
 
 	if (bp->state == BNX2X_STATE_OPEN)

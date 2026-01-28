@@ -93,8 +93,8 @@ static int ppp_sync_ioctl(struct ppp_channel *chan, unsigned int cmd,
 static void ppp_sync_process(struct tasklet_struct *t);
 static int ppp_sync_push(struct syncppp *ap);
 static void ppp_sync_flush_output(struct syncppp *ap);
-static void ppp_sync_input(struct syncppp *ap, const u8 *buf, const u8 *flags,
-			   int count);
+static void ppp_sync_input(struct syncppp *ap, const unsigned char *buf,
+			   const char *flags, int count);
 
 static const struct ppp_channel_ops sync_ops = {
 	.start_xmit = ppp_sync_send,
@@ -245,9 +245,10 @@ ppp_sync_close(struct tty_struct *tty)
  * Wait for I/O to driver to complete and unregister PPP channel.
  * This is already done by the close routine, so just call that.
  */
-static void ppp_sync_hangup(struct tty_struct *tty)
+static int ppp_sync_hangup(struct tty_struct *tty)
 {
 	ppp_sync_close(tty);
+	return 0;
 }
 
 /*
@@ -255,7 +256,8 @@ static void ppp_sync_hangup(struct tty_struct *tty)
  * Pppd reads and writes packets via /dev/ppp instead.
  */
 static ssize_t
-ppp_sync_read(struct tty_struct *tty, struct file *file, u8 *buf, size_t count,
+ppp_sync_read(struct tty_struct *tty, struct file *file,
+	      unsigned char *buf, size_t count,
 	      void **cookie, unsigned long offset)
 {
 	return -EAGAIN;
@@ -266,14 +268,15 @@ ppp_sync_read(struct tty_struct *tty, struct file *file, u8 *buf, size_t count,
  * from the ppp generic stuff.
  */
 static ssize_t
-ppp_sync_write(struct tty_struct *tty, struct file *file, const u8 *buf,
-	       size_t count)
+ppp_sync_write(struct tty_struct *tty, struct file *file,
+		const unsigned char *buf, size_t count)
 {
 	return -EAGAIN;
 }
 
 static int
-ppp_synctty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
+ppp_synctty_ioctl(struct tty_struct *tty, struct file *file,
+		  unsigned int cmd, unsigned long arg)
 {
 	struct syncppp *ap = sp_get(tty);
 	int __user *p = (int __user *)arg;
@@ -301,7 +304,7 @@ ppp_synctty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
 		/* flush our buffers and the serial port's buffer */
 		if (arg == TCIOFLUSH || arg == TCOFLUSH)
 			ppp_sync_flush_output(ap);
-		err = n_tty_ioctl_helper(tty, cmd, arg);
+		err = n_tty_ioctl_helper(tty, file, cmd, arg);
 		break;
 
 	case FIONREAD:
@@ -312,7 +315,7 @@ ppp_synctty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
 		break;
 
 	default:
-		err = tty_mode_ioctl(tty, cmd, arg);
+		err = tty_mode_ioctl(tty, file, cmd, arg);
 		break;
 	}
 
@@ -320,10 +323,17 @@ ppp_synctty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
 	return err;
 }
 
+/* No kernel lock - fine */
+static __poll_t
+ppp_sync_poll(struct tty_struct *tty, struct file *file, poll_table *wait)
+{
+	return 0;
+}
+
 /* May sleep, don't call from interrupt level or with interrupts disabled */
 static void
-ppp_sync_receive(struct tty_struct *tty, const u8 *buf, const u8 *cflags,
-		 size_t count)
+ppp_sync_receive(struct tty_struct *tty, const unsigned char *buf,
+		  const char *cflags, int count)
 {
 	struct syncppp *ap = sp_get(tty);
 	unsigned long flags;
@@ -363,6 +373,7 @@ static struct tty_ldisc_ops ppp_sync_ldisc = {
 	.read	= ppp_sync_read,
 	.write	= ppp_sync_write,
 	.ioctl	= ppp_synctty_ioctl,
+	.poll	= ppp_sync_poll,
 	.receive_buf = ppp_sync_receive,
 	.write_wakeup = ppp_sync_wakeup,
 };
@@ -658,7 +669,8 @@ ppp_sync_flush_output(struct syncppp *ap)
  * frame is considered to be in error and is tossed.
  */
 static void
-ppp_sync_input(struct syncppp *ap, const u8 *buf, const u8 *flags, int count)
+ppp_sync_input(struct syncppp *ap, const unsigned char *buf,
+		const char *flags, int count)
 {
 	struct sk_buff *skb;
 	unsigned char *p;

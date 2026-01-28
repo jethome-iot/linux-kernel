@@ -31,7 +31,6 @@ struct ingenic_soc_info {
 	unsigned int num_channels;
 	bool has_ost;
 	bool has_tcu_clk;
-	bool allow_missing_tcu_clk;
 };
 
 struct ingenic_tcu_clk_info {
@@ -178,21 +177,18 @@ static u8 ingenic_tcu_get_prescale(unsigned long rate, unsigned long req_rate)
 	return 5; /* /1024 divider */
 }
 
-static int ingenic_tcu_determine_rate(struct clk_hw *hw,
-				      struct clk_rate_request *req)
+static long ingenic_tcu_round_rate(struct clk_hw *hw, unsigned long req_rate,
+		unsigned long *parent_rate)
 {
-	unsigned long rate = req->best_parent_rate;
+	unsigned long rate = *parent_rate;
 	u8 prescale;
 
-	if (req->rate > rate) {
-		req->rate = rate;
-		return 0;
-	}
+	if (req_rate > rate)
+		return rate;
 
-	prescale = ingenic_tcu_get_prescale(rate, req->rate);
+	prescale = ingenic_tcu_get_prescale(rate, req_rate);
 
-	req->rate = rate >> (prescale * 2);
-	return 0;
+	return rate >> (prescale * 2);
 }
 
 static int ingenic_tcu_set_rate(struct clk_hw *hw, unsigned long req_rate,
@@ -222,7 +218,7 @@ static const struct clk_ops ingenic_tcu_clk_ops = {
 	.set_parent	= ingenic_tcu_set_parent,
 
 	.recalc_rate	= ingenic_tcu_recalc_rate,
-	.determine_rate	= ingenic_tcu_determine_rate,
+	.round_rate	= ingenic_tcu_round_rate,
 	.set_rate	= ingenic_tcu_set_rate,
 
 	.enable		= ingenic_tcu_enable,
@@ -319,8 +315,7 @@ static const struct ingenic_soc_info jz4770_soc_info = {
 static const struct ingenic_soc_info x1000_soc_info = {
 	.num_channels = 8,
 	.has_ost = false, /* X1000 has OST, but it not belong TCU */
-	.has_tcu_clk = true,
-	.allow_missing_tcu_clk = true,
+	.has_tcu_clk = false,
 };
 
 static const struct of_device_id __maybe_unused ingenic_tcu_of_match[] __initconst = {
@@ -355,27 +350,14 @@ static int __init ingenic_tcu_probe(struct device_node *np)
 		tcu->clk = of_clk_get_by_name(np, "tcu");
 		if (IS_ERR(tcu->clk)) {
 			ret = PTR_ERR(tcu->clk);
+			pr_crit("Cannot get TCU clock\n");
+			goto err_free_tcu;
+		}
 
-			/*
-			 * Old device trees for some SoCs did not include the
-			 * TCU clock because this driver (incorrectly) didn't
-			 * use it. In this case we complain loudly and attempt
-			 * to continue without the clock, which might work if
-			 * booting with workarounds like "clk_ignore_unused".
-			 */
-			if (tcu->soc_info->allow_missing_tcu_clk && ret == -EINVAL) {
-				pr_warn("TCU clock missing from device tree, please update your device tree\n");
-				tcu->clk = NULL;
-			} else {
-				pr_crit("Cannot get TCU clock from device tree\n");
-				goto err_free_tcu;
-			}
-		} else {
-			ret = clk_prepare_enable(tcu->clk);
-			if (ret) {
-				pr_crit("Unable to enable TCU clock\n");
-				goto err_put_clk;
-			}
+		ret = clk_prepare_enable(tcu->clk);
+		if (ret) {
+			pr_crit("Unable to enable TCU clock\n");
+			goto err_put_clk;
 		}
 	}
 
@@ -445,10 +427,10 @@ err_unregister_timer_clocks:
 			clk_hw_unregister(tcu->clocks->hws[i]);
 	kfree(tcu->clocks);
 err_clk_disable:
-	if (tcu->clk)
+	if (tcu->soc_info->has_tcu_clk)
 		clk_disable_unprepare(tcu->clk);
 err_put_clk:
-	if (tcu->clk)
+	if (tcu->soc_info->has_tcu_clk)
 		clk_put(tcu->clk);
 err_free_tcu:
 	kfree(tcu);

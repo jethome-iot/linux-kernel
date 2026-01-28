@@ -35,18 +35,47 @@ DEFINE_STATIC_KEY_FALSE(mte_async_or_asymm_mode);
 EXPORT_SYMBOL_GPL(mte_async_or_asymm_mode);
 #endif
 
-void mte_sync_tags(pte_t pte, unsigned int nr_pages)
+static void mte_sync_page_tags(struct page *page, pte_t old_pte,
+			       bool check_swap, bool pte_is_tagged)
 {
-	struct page *page = pte_page(pte);
-	unsigned int i;
+	if (check_swap && is_swap_pte(old_pte)) {
+		swp_entry_t entry = pte_to_swp_entry(old_pte);
 
-	/* if PG_mte_tagged is set, tags have already been initialised */
-	for (i = 0; i < nr_pages; i++, page++) {
-		if (try_page_mte_tagging(page)) {
-			mte_clear_page_tags(page_address(page));
+		if (!non_swap_entry(entry) && mte_restore_tags(entry, page)) {
 			set_page_mte_tagged(page);
+			return;
 		}
 	}
+
+	if (!pte_is_tagged)
+		return;
+
+	/*
+	 * Test PG_mte_tagged again in case it was racing with another
+	 * set_pte_at().
+	 */
+	if (!page_mte_tagged(page)) {
+		mte_clear_page_tags(page_address(page));
+		set_page_mte_tagged(page);
+	}
+}
+
+void mte_sync_tags(pte_t old_pte, pte_t pte)
+{
+	struct page *page = pte_page(pte);
+	long i, nr_pages = compound_nr(page);
+	bool check_swap = nr_pages == 1;
+	bool pte_is_tagged = pte_tagged(pte);
+
+	/* Early out if there's nothing to do */
+	if (!check_swap && !pte_is_tagged)
+		return;
+
+	/* if PG_mte_tagged is set, tags have already been initialised */
+	for (i = 0; i < nr_pages; i++, page++)
+		if (!page_mte_tagged(page))
+			mte_sync_page_tags(page, old_pte, check_swap,
+					   pte_is_tagged);
 
 	/* ensure the tags are visible before the PTE is set */
 	smp_wmb();
@@ -79,8 +108,7 @@ int memcmp_pages(struct page *page1, struct page *page2)
 static inline void __mte_enable_kernel(const char *mode, unsigned long tcf)
 {
 	/* Enable MTE Sync Mode for EL1. */
-	sysreg_clear_set(sctlr_el1, SCTLR_EL1_TCF_MASK,
-			 SYS_FIELD_PREP(SCTLR_EL1, TCF, tcf));
+	sysreg_clear_set(sctlr_el1, SCTLR_ELx_TCF_MASK, tcf);
 	isb();
 
 	pr_info_once("MTE: enabled in %s mode at EL1\n", mode);
@@ -96,12 +124,12 @@ void mte_enable_kernel_sync(void)
 	WARN_ONCE(system_uses_mte_async_or_asymm_mode(),
 			"MTE async mode enabled system wide!");
 
-	__mte_enable_kernel("synchronous", SCTLR_EL1_TCF_SYNC);
+	__mte_enable_kernel("synchronous", SCTLR_ELx_TCF_SYNC);
 }
 
 void mte_enable_kernel_async(void)
 {
-	__mte_enable_kernel("asynchronous", SCTLR_EL1_TCF_ASYNC);
+	__mte_enable_kernel("asynchronous", SCTLR_ELx_TCF_ASYNC);
 
 	/*
 	 * MTE async mode is set system wide by the first PE that
@@ -118,7 +146,7 @@ void mte_enable_kernel_async(void)
 void mte_enable_kernel_asymm(void)
 {
 	if (cpus_have_cap(ARM64_MTE_ASYMM)) {
-		__mte_enable_kernel("asymmetric", SCTLR_EL1_TCF_ASYMM);
+		__mte_enable_kernel("asymmetric", SCTLR_ELx_TCF_ASYMM);
 
 		/*
 		 * MTE asymm mode behaves as async mode for store
@@ -190,11 +218,11 @@ static void mte_update_sctlr_user(struct task_struct *task)
 	 * default order.
 	 */
 	if (resolved_mte_tcf & MTE_CTRL_TCF_ASYMM)
-		sctlr |= SYS_FIELD_PREP_ENUM(SCTLR_EL1, TCF0, ASYMM);
+		sctlr |= SCTLR_EL1_TCF0_ASYMM;
 	else if (resolved_mte_tcf & MTE_CTRL_TCF_ASYNC)
-		sctlr |= SYS_FIELD_PREP_ENUM(SCTLR_EL1, TCF0, ASYNC);
+		sctlr |= SCTLR_EL1_TCF0_ASYNC;
 	else if (resolved_mte_tcf & MTE_CTRL_TCF_SYNC)
-		sctlr |= SYS_FIELD_PREP_ENUM(SCTLR_EL1, TCF0, SYNC);
+		sctlr |= SCTLR_EL1_TCF0_SYNC;
 	task->thread.sctlr_user = sctlr;
 }
 
@@ -393,9 +421,10 @@ long get_mte_ctrl(struct task_struct *task)
 static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 				struct iovec *kiov, unsigned int gup_flags)
 {
+	struct vm_area_struct *vma;
 	void __user *buf = kiov->iov_base;
 	size_t len = kiov->iov_len;
-	int err = 0;
+	int ret;
 	int write = gup_flags & FOLL_WRITE;
 
 	if (!access_ok(buf, len))
@@ -405,16 +434,14 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 		return -EIO;
 
 	while (len) {
-		struct vm_area_struct *vma;
 		unsigned long tags, offset;
 		void *maddr;
-		struct page *page = get_user_page_vma_remote(mm, addr,
-							     gup_flags, &vma);
+		struct page *page = NULL;
 
-		if (IS_ERR(page)) {
-			err = PTR_ERR(page);
+		ret = get_user_pages_remote(mm, addr, 1, gup_flags, &page,
+					    &vma, NULL);
+		if (ret <= 0)
 			break;
-		}
 
 		/*
 		 * Only copy tags if the page has been mapped as PROT_MTE
@@ -424,7 +451,7 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 		 * was never mapped with PROT_MTE.
 		 */
 		if (!(vma->vm_flags & VM_MTE)) {
-			err = -EOPNOTSUPP;
+			ret = -EOPNOTSUPP;
 			put_page(page);
 			break;
 		}
@@ -457,7 +484,7 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 	kiov->iov_len = buf - kiov->iov_base;
 	if (!kiov->iov_len) {
 		/* check for error accessing the tracee's address space */
-		if (err)
+		if (ret <= 0)
 			return -EIO;
 		else
 			return -EFAULT;

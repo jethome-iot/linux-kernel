@@ -9,9 +9,8 @@
 #include <linux/slab.h>
 #include "internal.h"
 
-static unsigned __read_mostly afs_volume_record_life = 60 * 60;
-
-static void afs_destroy_volume(struct work_struct *work);
+unsigned __read_mostly afs_volume_gc_delay = 10;
+unsigned __read_mostly afs_volume_record_life = 60 * 60;
 
 /*
  * Insert a volume into a cell.  If there's an existing volume record, that is
@@ -74,11 +73,15 @@ static void afs_remove_volume_from_cell(struct afs_volume *volume)
  */
 static struct afs_volume *afs_alloc_volume(struct afs_fs_context *params,
 					   struct afs_vldb_entry *vldb,
-					   struct afs_server_list **_slist)
+					   unsigned long type_mask)
 {
 	struct afs_server_list *slist;
 	struct afs_volume *volume;
-	int ret = -ENOMEM, i;
+	int ret = -ENOMEM, nr_servers = 0, i;
+
+	for (i = 0; i < vldb->nr_servers; i++)
+		if (vldb->fs_mask[i] & type_mask)
+			nr_servers++;
 
 	volume = kzalloc(sizeof(struct afs_volume), GFP_KERNEL);
 	if (!volume)
@@ -90,30 +93,20 @@ static struct afs_volume *afs_alloc_volume(struct afs_fs_context *params,
 	volume->type		= params->type;
 	volume->type_force	= params->force;
 	volume->name_len	= vldb->name_len;
-	volume->creation_time	= TIME64_MIN;
-	volume->update_time	= TIME64_MIN;
 
 	refcount_set(&volume->ref, 1);
 	INIT_HLIST_NODE(&volume->proc_link);
-	INIT_WORK(&volume->destructor, afs_destroy_volume);
 	rwlock_init(&volume->servers_lock);
-	mutex_init(&volume->volsync_lock);
-	mutex_init(&volume->cb_check_lock);
 	rwlock_init(&volume->cb_v_break_lock);
-	INIT_LIST_HEAD(&volume->open_mmaps);
-	init_rwsem(&volume->open_mmaps_lock);
 	memcpy(volume->name, vldb->name, vldb->name_len + 1);
 
-	for (i = 0; i < AFS_MAXTYPES; i++)
-		volume->vids[i] = vldb->vid[i];
-
-	slist = afs_alloc_server_list(volume, params->key, vldb);
+	slist = afs_alloc_server_list(params->cell, params->key, vldb, type_mask);
 	if (IS_ERR(slist)) {
 		ret = PTR_ERR(slist);
 		goto error_1;
 	}
 
-	*_slist = slist;
+	refcount_set(&slist->usage, 1);
 	rcu_assign_pointer(volume->servers, slist);
 	trace_afs_volume(volume->vid, 1, afs_volume_trace_alloc);
 	return volume;
@@ -129,20 +122,18 @@ error_0:
  * Look up or allocate a volume record.
  */
 static struct afs_volume *afs_lookup_volume(struct afs_fs_context *params,
-					    struct afs_vldb_entry *vldb)
+					    struct afs_vldb_entry *vldb,
+					    unsigned long type_mask)
 {
-	struct afs_server_list *slist;
 	struct afs_volume *candidate, *volume;
 
-	candidate = afs_alloc_volume(params, vldb, &slist);
+	candidate = afs_alloc_volume(params, vldb, type_mask);
 	if (IS_ERR(candidate))
 		return candidate;
 
 	volume = afs_insert_volume_into_cell(params->cell, candidate);
-	if (volume == candidate)
-		afs_attach_volume_to_servers(volume, slist);
-	else
-		afs_put_volume(candidate, afs_volume_trace_put_cell_dup);
+	if (volume != candidate)
+		afs_put_volume(params->net, candidate, afs_volume_trace_put_cell_dup);
 	return volume;
 }
 
@@ -222,7 +213,8 @@ struct afs_volume *afs_create_volume(struct afs_fs_context *params)
 		goto error;
 	}
 
-	volume = afs_lookup_volume(params, vldb);
+	type_mask = 1UL << params->type;
+	volume = afs_lookup_volume(params, vldb, type_mask);
 
 error:
 	kfree(vldb);
@@ -232,20 +224,16 @@ error:
 /*
  * Destroy a volume record
  */
-static void afs_destroy_volume(struct work_struct *work)
+static void afs_destroy_volume(struct afs_net *net, struct afs_volume *volume)
 {
-	struct afs_volume *volume = container_of(work, struct afs_volume, destructor);
-	struct afs_server_list *slist = rcu_access_pointer(volume->servers);
-
 	_enter("%p", volume);
 
 #ifdef CONFIG_AFS_FSCACHE
 	ASSERTCMP(volume->cache, ==, NULL);
 #endif
 
-	afs_detach_volume_from_servers(volume, slist);
 	afs_remove_volume_from_cell(volume);
-	afs_put_serverlist(volume->cell->net, slist);
+	afs_put_serverlist(net, rcu_access_pointer(volume->servers));
 	afs_put_cell(volume->cell, afs_cell_trace_put_vol);
 	trace_afs_volume(volume->vid, refcount_read(&volume->ref),
 			 afs_volume_trace_free);
@@ -287,7 +275,8 @@ struct afs_volume *afs_get_volume(struct afs_volume *volume,
 /*
  * Drop a reference on a volume record.
  */
-void afs_put_volume(struct afs_volume *volume, enum afs_volume_trace reason)
+void afs_put_volume(struct afs_net *net, struct afs_volume *volume,
+		    enum afs_volume_trace reason)
 {
 	if (volume) {
 		afs_volid_t vid = volume->vid;
@@ -297,37 +286,22 @@ void afs_put_volume(struct afs_volume *volume, enum afs_volume_trace reason)
 		zero = __refcount_dec_and_test(&volume->ref, &r);
 		trace_afs_volume(vid, r - 1, reason);
 		if (zero)
-			schedule_work(&volume->destructor);
+			afs_destroy_volume(net, volume);
 	}
 }
 
 /*
  * Activate a volume.
  */
-int afs_activate_volume(struct afs_volume *volume)
+void afs_activate_volume(struct afs_volume *volume)
 {
 #ifdef CONFIG_AFS_FSCACHE
-	struct fscache_volume *vcookie;
-	char *name;
-
-	name = kasprintf(GFP_KERNEL, "afs,%s,%llx",
-			 volume->cell->name, volume->vid);
-	if (!name)
-		return -ENOMEM;
-
-	vcookie = fscache_acquire_volume(name, NULL, NULL, 0);
-	if (IS_ERR(vcookie)) {
-		if (vcookie != ERR_PTR(-EBUSY)) {
-			kfree(name);
-			return PTR_ERR(vcookie);
-		}
-		pr_err("AFS: Cache volume key already in use (%s)\n", name);
-		vcookie = NULL;
-	}
-	volume->cache = vcookie;
-	kfree(name);
+	volume->cache = fscache_acquire_cookie(volume->cell->cache,
+					       &afs_volume_cache_index_def,
+					       &volume->vid, sizeof(volume->vid),
+					       NULL, 0,
+					       volume, 0, true);
 #endif
-	return 0;
 }
 
 /*
@@ -338,7 +312,7 @@ void afs_deactivate_volume(struct afs_volume *volume)
 	_enter("%s", volume->name);
 
 #ifdef CONFIG_AFS_FSCACHE
-	fscache_relinquish_volume(volume->cache, NULL,
+	fscache_relinquish_cookie(volume->cache, NULL,
 				  test_bit(AFS_VOLUME_DELETED, &volume->flags));
 	volume->cache = NULL;
 #endif
@@ -353,7 +327,7 @@ static int afs_update_volume_status(struct afs_volume *volume, struct key *key)
 {
 	struct afs_server_list *new, *old, *discard;
 	struct afs_vldb_entry *vldb;
-	char idbuf[16];
+	char idbuf[24];
 	int ret, idsz;
 
 	_enter("");
@@ -361,7 +335,7 @@ static int afs_update_volume_status(struct afs_volume *volume, struct key *key)
 	/* We look up an ID by passing it as a decimal string in the
 	 * operation's name parameter.
 	 */
-	idsz = sprintf(idbuf, "%llu", volume->vid);
+	idsz = snprintf(idbuf, sizeof(idbuf), "%llu", volume->vid);
 
 	vldb = afs_vl_lookup_vldb(volume->cell, key, idbuf, idsz);
 	if (IS_ERR(vldb)) {
@@ -378,7 +352,8 @@ static int afs_update_volume_status(struct afs_volume *volume, struct key *key)
 	}
 
 	/* See if the volume's server list got updated. */
-	new = afs_alloc_server_list(volume, key, vldb);
+	new = afs_alloc_server_list(volume->cell, key,
+				    vldb, (1 << volume->type));
 	if (IS_ERR(new)) {
 		ret = PTR_ERR(new);
 		goto error_vldb;
@@ -397,17 +372,11 @@ static int afs_update_volume_status(struct afs_volume *volume, struct key *key)
 		discard = old;
 	}
 
-	/* Check more often if replication is ongoing. */
-	if (new->ro_replicating)
-		volume->update_at = ktime_get_real_seconds() + 10 * 60;
-	else
-		volume->update_at = ktime_get_real_seconds() + afs_volume_record_life;
+	volume->update_at = ktime_get_real_seconds() + afs_volume_record_life;
 	write_unlock(&volume->servers_lock);
-
-	if (discard == old)
-		afs_reattach_volume_to_servers(volume, new, old);
-	afs_put_serverlist(volume->cell->net, discard);
 	ret = 0;
+
+	afs_put_serverlist(volume->cell->net, discard);
 error_vldb:
 	kfree(vldb);
 error:

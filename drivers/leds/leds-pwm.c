@@ -12,7 +12,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
-#include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/leds.h>
 #include <linux/err.h>
 #include <linux/pwm.h>
@@ -54,7 +54,7 @@ static int led_pwm_set(struct led_classdev *led_cdev,
 
 	led_dat->pwmstate.duty_cycle = duty;
 	led_dat->pwmstate.enabled = true;
-	return pwm_apply_might_sleep(led_dat->pwm, &led_dat->pwmstate);
+	return pwm_apply_state(led_dat->pwm, &led_dat->pwmstate);
 }
 
 __attribute__((nonnull))
@@ -138,9 +138,9 @@ static int led_pwm_create_fwnode(struct device *dev, struct led_pwm_priv *priv)
 	struct led_pwm led;
 	int ret;
 
-	device_for_each_child_node(dev, fwnode) {
-		memset(&led, 0, sizeof(led));
+	memset(&led, 0, sizeof(led));
 
+	device_for_each_child_node(dev, fwnode) {
 		ret = fwnode_property_read_string(fwnode, "label", &led.name);
 		if (ret && is_of_node(fwnode))
 			led.name = to_of_node(fwnode)->name;

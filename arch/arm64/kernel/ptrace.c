@@ -27,8 +27,8 @@
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/regset.h>
+#include <linux/tracehook.h>
 #include <linux/elf.h>
-#include <linux/rseq.h>
 
 #include <asm/compat.h>
 #include <asm/cpufeature.h>
@@ -122,7 +122,7 @@ static bool regs_within_kernel_stack(struct pt_regs *regs, unsigned long addr)
 {
 	return ((addr & ~(THREAD_SIZE - 1))  ==
 		(kernel_stack_pointer(regs) & ~(THREAD_SIZE - 1))) ||
-		on_irq_stack(addr, sizeof(unsigned long));
+		on_irq_stack(addr, sizeof(unsigned long), NULL);
 }
 
 /**
@@ -515,7 +515,9 @@ static int hw_break_set(struct task_struct *target,
 
 	/* Resource info and pad */
 	offset = offsetof(struct user_hwdebug_state, dbg_regs);
-	user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf, 0, offset);
+	ret = user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf, 0, offset);
+	if (ret)
+		return ret;
 
 	/* (address, ctrl) registers */
 	limit = regset->n * regset->size;
@@ -542,8 +544,11 @@ static int hw_break_set(struct task_struct *target,
 			return ret;
 		offset += PTRACE_HBP_CTRL_SZ;
 
-		user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf,
-					  offset, offset + PTRACE_HBP_PAD_SZ);
+		ret = user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf,
+						offset,
+						offset + PTRACE_HBP_PAD_SZ);
+		if (ret)
+			return ret;
 		offset += PTRACE_HBP_PAD_SZ;
 		idx++;
 	}
@@ -662,18 +667,10 @@ static int fpr_set(struct task_struct *target, const struct user_regset *regset,
 static int tls_get(struct task_struct *target, const struct user_regset *regset,
 		   struct membuf to)
 {
-	int ret;
-
 	if (target == current)
 		tls_preserve_current_state();
 
-	ret = membuf_store(&to, target->thread.uw.tp_value);
-	if (system_supports_tpidr2())
-		ret = membuf_store(&to, target->thread.tpidr2_el0);
-	else
-		ret = membuf_zero(&to, sizeof(u64));
-
-	return ret;
+	return membuf_store(&to, target->thread.uw.tp_value);
 }
 
 static int tls_set(struct task_struct *target, const struct user_regset *regset,
@@ -681,20 +678,13 @@ static int tls_set(struct task_struct *target, const struct user_regset *regset,
 		   const void *kbuf, const void __user *ubuf)
 {
 	int ret;
-	unsigned long tls[2];
+	unsigned long tls = target->thread.uw.tp_value;
 
-	tls[0] = target->thread.uw.tp_value;
-	if (system_supports_tpidr2())
-		tls[1] = target->thread.tpidr2_el0;
-
-	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, tls, 0, count);
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &tls, 0, -1);
 	if (ret)
 		return ret;
 
-	target->thread.uw.tp_value = tls[0];
-	if (system_supports_tpidr2())
-		target->thread.tpidr2_el0 = tls[1];
-
+	target->thread.uw.tp_value = tls;
 	return ret;
 }
 
@@ -882,18 +872,10 @@ static int sve_set_common(struct task_struct *target,
 			break;
 		case ARM64_VEC_SME:
 			target->thread.svcr |= SVCR_SM_MASK;
-
-			/*
-			 * Disable traps and ensure there is SME storage but
-			 * preserve any currently set values in ZA/ZT.
-			 */
-			sme_alloc(target, false);
-			set_tsk_thread_flag(target, TIF_SME);
 			break;
 		default:
 			WARN_ON_ONCE(1);
-			ret = -EINVAL;
-			goto out;
+			return -EINVAL;
 		}
 
 		/*
@@ -911,7 +893,8 @@ static int sve_set_common(struct task_struct *target,
 		ret = __fpr_set(target, regset, pos, count, kbuf, ubuf,
 				SVE_PT_FPSIMD_OFFSET);
 		clear_tsk_thread_flag(target, TIF_SVE);
-		target->thread.fp_type = FP_STATE_FPSIMD;
+		if (type == ARM64_VEC_SME)
+			fpsimd_force_sync_to_sve(target);
 		goto out;
 	}
 
@@ -934,21 +917,17 @@ static int sve_set_common(struct task_struct *target,
 	if (!target->thread.sve_state) {
 		ret = -ENOMEM;
 		clear_tsk_thread_flag(target, TIF_SVE);
-		target->thread.fp_type = FP_STATE_FPSIMD;
 		goto out;
 	}
 
 	/*
 	 * Ensure target->thread.sve_state is up to date with target's
 	 * FPSIMD regs, so that a short copyin leaves trailing
-	 * registers unmodified.  Only enable SVE if we are
-	 * configuring normal SVE, a system with streaming SVE may not
-	 * have normal SVE.
+	 * registers unmodified.  Always enable SVE even if going into
+	 * streaming mode.
 	 */
 	fpsimd_sync_to_sve(target);
-	if (type == ARM64_VEC_SVE)
-		set_tsk_thread_flag(target, TIF_SVE);
-	target->thread.fp_type = FP_STATE_SVE;
+	set_tsk_thread_flag(target, TIF_SVE);
 
 	BUILD_BUG_ON(SVE_PT_SVE_OFFSET != sizeof(header));
 	start = SVE_PT_SVE_OFFSET;
@@ -961,7 +940,10 @@ static int sve_set_common(struct task_struct *target,
 
 	start = end;
 	end = SVE_PT_SVE_FPSR_OFFSET(vq);
-	user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf, start, end);
+	ret = user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf,
+					start, end);
+	if (ret)
+		goto out;
 
 	/*
 	 * Copy fpsr, and fpcr which must follow contiguously in
@@ -1056,7 +1038,7 @@ static int za_get(struct task_struct *target,
 	if (thread_za_enabled(&target->thread)) {
 		start = end;
 		end = ZA_PT_SIZE(vq);
-		membuf_write(&to, target->thread.sme_state, end - start);
+		membuf_write(&to, target->thread.za_state, end - start);
 	}
 
 	/* Zero any trailing padding */
@@ -1103,18 +1085,19 @@ static int za_set(struct task_struct *target,
 	if (!target->thread.sve_state) {
 		sve_alloc(target, false);
 		if (!target->thread.sve_state) {
+			clear_thread_flag(TIF_SME);
 			ret = -ENOMEM;
 			goto out;
 		}
 	}
 
-	/*
-	 * Only flush the storage if PSTATE.ZA was not already set,
-	 * otherwise preserve any existing data.
-	 */
-	sme_alloc(target, !thread_za_enabled(&target->thread));
-	if (!target->thread.sme_state)
-		return -ENOMEM;
+	/* Allocate/reinit ZA storage */
+	sme_alloc(target);
+	if (!target->thread.za_state) {
+		ret = -ENOMEM;
+		clear_tsk_thread_flag(target, TIF_SME);
+		goto out;
+	}
 
 	/* If there is no data then disable ZA */
 	if (!count) {
@@ -1136,7 +1119,7 @@ static int za_set(struct task_struct *target,
 	start = ZA_PT_ZA_OFFSET;
 	end = ZA_PT_SIZE(vq);
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-				 target->thread.sme_state,
+				 target->thread.za_state,
 				 start, end);
 	if (ret)
 		goto out;
@@ -1147,60 +1130,6 @@ static int za_set(struct task_struct *target,
 
 out:
 	fpsimd_flush_task_state(target);
-	return ret;
-}
-
-static int zt_get(struct task_struct *target,
-		  const struct user_regset *regset,
-		  struct membuf to)
-{
-	if (!system_supports_sme2())
-		return -EINVAL;
-
-	/*
-	 * If PSTATE.ZA is not set then ZT will be zeroed when it is
-	 * enabled so report the current register value as zero.
-	 */
-	if (thread_za_enabled(&target->thread))
-		membuf_write(&to, thread_zt_state(&target->thread),
-			     ZT_SIG_REG_BYTES);
-	else
-		membuf_zero(&to, ZT_SIG_REG_BYTES);
-
-	return 0;
-}
-
-static int zt_set(struct task_struct *target,
-		  const struct user_regset *regset,
-		  unsigned int pos, unsigned int count,
-		  const void *kbuf, const void __user *ubuf)
-{
-	int ret;
-
-	if (!system_supports_sme2())
-		return -EINVAL;
-
-	/* Ensure SVE storage in case this is first use of SME */
-	sve_alloc(target, false);
-	if (!target->thread.sve_state)
-		return -ENOMEM;
-
-	if (!thread_za_enabled(&target->thread)) {
-		sme_alloc(target, true);
-		if (!target->thread.sme_state)
-			return -ENOMEM;
-	}
-
-	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-				 thread_zt_state(&target->thread),
-				 0, ZT_SIG_REG_BYTES);
-	if (ret == 0) {
-		target->thread.svcr |= SVCR_ZA_MASK;
-		set_tsk_thread_flag(target, TIF_SME);
-	}
-
-	fpsimd_flush_task_state(target);
-
 	return ret;
 }
 
@@ -1426,7 +1355,6 @@ enum aarch64_regset {
 #ifdef CONFIG_ARM64_SME
 	REGSET_SSVE,
 	REGSET_ZA,
-	REGSET_ZT,
 #endif
 #ifdef CONFIG_ARM64_PTR_AUTH
 	REGSET_PAC_MASK,
@@ -1465,7 +1393,7 @@ static const struct user_regset aarch64_regsets[] = {
 	},
 	[REGSET_TLS] = {
 		.core_note_type = NT_ARM_TLS,
-		.n = 2,
+		.n = 1,
 		.size = sizeof(void *),
 		.align = sizeof(void *),
 		.regset_get = tls_get,
@@ -1511,7 +1439,7 @@ static const struct user_regset aarch64_regsets[] = {
 #ifdef CONFIG_ARM64_SME
 	[REGSET_SSVE] = { /* Streaming mode SVE */
 		.core_note_type = NT_ARM_SSVE,
-		.n = DIV_ROUND_UP(SVE_PT_SIZE(SME_VQ_MAX, SVE_PT_REGS_SVE),
+		.n = DIV_ROUND_UP(SVE_PT_SIZE(SVE_VQ_MAX, SVE_PT_REGS_SVE),
 				  SVE_VQ_BYTES),
 		.size = SVE_VQ_BYTES,
 		.align = SVE_VQ_BYTES,
@@ -1520,27 +1448,11 @@ static const struct user_regset aarch64_regsets[] = {
 	},
 	[REGSET_ZA] = { /* SME ZA */
 		.core_note_type = NT_ARM_ZA,
-		/*
-		 * ZA is a single register but it's variably sized and
-		 * the ptrace core requires that the size of any data
-		 * be an exact multiple of the configured register
-		 * size so report as though we had SVE_VQ_BYTES
-		 * registers. These values aren't exposed to
-		 * userspace.
-		 */
-		.n = DIV_ROUND_UP(ZA_PT_SIZE(SME_VQ_MAX), SVE_VQ_BYTES),
+		.n = DIV_ROUND_UP(ZA_PT_ZA_SIZE(SVE_VQ_MAX), SVE_VQ_BYTES),
 		.size = SVE_VQ_BYTES,
 		.align = SVE_VQ_BYTES,
 		.regset_get = za_get,
 		.set = za_set,
-	},
-	[REGSET_ZT] = { /* SME ZT */
-		.core_note_type = NT_ARM_ZT,
-		.n = 1,
-		.size = ZT_SIG_REG_BYTES,
-		.align = sizeof(u64),
-		.regset_get = zt_get,
-		.set = zt_set,
 	},
 #endif
 #ifdef CONFIG_ARM64_PTR_AUTH
@@ -2146,7 +2058,8 @@ enum ptrace_syscall_dir {
 	PTRACE_SYSCALL_EXIT,
 };
 
-static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
+static void tracehook_report_syscall(struct pt_regs *regs,
+				     enum ptrace_syscall_dir dir)
 {
 	int regno;
 	unsigned long saved_reg;
@@ -2172,11 +2085,11 @@ static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
 	regs->regs[regno] = dir;
 
 	if (dir == PTRACE_SYSCALL_ENTER) {
-		if (ptrace_report_syscall_entry(regs))
+		if (tracehook_report_syscall_entry(regs))
 			forget_syscall(regs);
 		regs->regs[regno] = saved_reg;
 	} else if (!test_thread_flag(TIF_SINGLESTEP)) {
-		ptrace_report_syscall_exit(regs, 0);
+		tracehook_report_syscall_exit(regs, 0);
 		regs->regs[regno] = saved_reg;
 	} else {
 		regs->regs[regno] = saved_reg;
@@ -2186,16 +2099,16 @@ static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
 		 * tracer modifications to the registers may have rewound the
 		 * state machine.
 		 */
-		ptrace_report_syscall_exit(regs, 1);
+		tracehook_report_syscall_exit(regs, 1);
 	}
 }
 
 int syscall_trace_enter(struct pt_regs *regs)
 {
-	unsigned long flags = read_thread_flags();
+	unsigned long flags = READ_ONCE(current_thread_info()->flags);
 
 	if (flags & (_TIF_SYSCALL_EMU | _TIF_SYSCALL_TRACE)) {
-		report_syscall(regs, PTRACE_SYSCALL_ENTER);
+		tracehook_report_syscall(regs, PTRACE_SYSCALL_ENTER);
 		if (flags & _TIF_SYSCALL_EMU)
 			return NO_SYSCALL;
 	}
@@ -2215,7 +2128,7 @@ int syscall_trace_enter(struct pt_regs *regs)
 
 void syscall_trace_exit(struct pt_regs *regs)
 {
-	unsigned long flags = read_thread_flags();
+	unsigned long flags = READ_ONCE(current_thread_info()->flags);
 
 	audit_syscall_exit(regs);
 
@@ -2223,7 +2136,7 @@ void syscall_trace_exit(struct pt_regs *regs)
 		trace_sys_exit(regs, syscall_get_return_value(current, regs));
 
 	if (flags & (_TIF_SYSCALL_TRACE | _TIF_SINGLESTEP))
-		report_syscall(regs, PTRACE_SYSCALL_EXIT);
+		tracehook_report_syscall(regs, PTRACE_SYSCALL_EXIT);
 
 	rseq_syscall(regs);
 }

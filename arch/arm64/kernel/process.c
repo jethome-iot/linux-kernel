@@ -41,6 +41,8 @@
 #include <linux/thread_info.h>
 #include <linux/prctl.h>
 #include <linux/stacktrace.h>
+#include <trace/hooks/fpsimd.h>
+#include <trace/hooks/mpam.h>
 
 #include <asm/alternative.h>
 #include <asm/compat.h>
@@ -55,6 +57,9 @@
 #include <asm/stacktrace.h>
 #include <asm/switch_to.h>
 #include <asm/system_misc.h>
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+#include <linux/amlogic/user_fault.h>
+#endif
 
 #if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_STACKPROTECTOR_PER_TASK)
 #include <linux/stackprotector.h>
@@ -69,7 +74,7 @@ void (*pm_power_off)(void);
 EXPORT_SYMBOL_GPL(pm_power_off);
 
 #ifdef CONFIG_HOTPLUG_CPU
-void __noreturn arch_cpu_idle_dead(void)
+void arch_cpu_idle_dead(void)
 {
        cpu_die();
 }
@@ -111,7 +116,8 @@ void machine_power_off(void)
 {
 	local_irq_disable();
 	smp_send_stop();
-	do_kernel_power_off();
+	if (pm_power_off)
+		pm_power_off();
 }
 
 /*
@@ -212,12 +218,16 @@ void __show_regs(struct pt_regs *regs)
 		top_reg = 29;
 	}
 
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+	show_user_fault_info(regs, lr, sp);
+#endif /* CONFIG_AMLOGIC_USER_FAULT */
+
 	show_regs_print_info(KERN_DEFAULT);
 	print_pstate(regs);
 
 	if (!user_mode(regs)) {
 		printk("pc : %pS\n", (void *)regs->pc);
-		printk("lr : %pS\n", (void *)ptrauth_strip_kernel_insn_pac(lr));
+		printk("lr : %pS\n", (void *)ptrauth_strip_insn_pac(lr));
 	} else {
 		printk("pc : %016llx\n", regs->pc);
 		printk("lr : %016llx\n", lr);
@@ -238,6 +248,9 @@ void __show_regs(struct pt_regs *regs)
 
 		pr_cont("\n");
 	}
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+	show_extra_reg_data(regs);
+#endif /* CONFIG_AMLOGIC_USER_FAULT */
 }
 
 void show_regs(struct pt_regs *regs)
@@ -245,6 +258,7 @@ void show_regs(struct pt_regs *regs)
 	__show_regs(regs);
 	dump_backtrace(regs, NULL, KERN_DEFAULT);
 }
+EXPORT_SYMBOL_GPL(show_regs);
 
 static void tls_thread_flush(void)
 {
@@ -279,6 +293,10 @@ void flush_thread(void)
 	flush_tagged_addr_state();
 }
 
+void release_thread(struct task_struct *dead_task)
+{
+}
+
 void arch_release_task_struct(struct task_struct *tsk)
 {
 	fpsimd_release_task(tsk);
@@ -307,32 +325,29 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 
 	/*
 	 * In the unlikely event that we create a new thread with ZA
-	 * enabled we should retain the ZA and ZT state so duplicate
-	 * it here.  This may be shortly freed if we exec() or if
-	 * CLONE_SETTLS but it's simpler to do it here. To avoid
-	 * confusing the rest of the code ensure that we have a
-	 * sve_state allocated whenever sme_state is allocated.
+	 * enabled we should retain the ZA state so duplicate it here.
+	 * This may be shortly freed if we exec() or if CLONE_SETTLS
+	 * but it's simpler to do it here. To avoid confusing the rest
+	 * of the code ensure that we have a sve_state allocated
+	 * whenever za_state is allocated.
 	 */
 	if (thread_za_enabled(&src->thread)) {
 		dst->thread.sve_state = kzalloc(sve_state_size(src),
 						GFP_KERNEL);
 		if (!dst->thread.sve_state)
 			return -ENOMEM;
-
-		dst->thread.sme_state = kmemdup(src->thread.sme_state,
-						sme_state_size(src),
-						GFP_KERNEL);
-		if (!dst->thread.sme_state) {
+		dst->thread.za_state = kmemdup(src->thread.za_state,
+					       za_state_size(src),
+					       GFP_KERNEL);
+		if (!dst->thread.za_state) {
 			kfree(dst->thread.sve_state);
 			dst->thread.sve_state = NULL;
 			return -ENOMEM;
 		}
 	} else {
-		dst->thread.sme_state = NULL;
+		dst->thread.za_state = NULL;
 		clear_tsk_thread_flag(dst, TIF_SME);
 	}
-
-	dst->thread.fp_type = FP_STATE_FPSIMD;
 
 	/* clear any pending asynchronous tag fault raised by the parent */
 	clear_tsk_thread_flag(dst, TIF_MTE_ASYNC_FAULT);
@@ -342,11 +357,9 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 
 asmlinkage void ret_from_fork(void) asm("ret_from_fork");
 
-int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
+int copy_thread(unsigned long clone_flags, unsigned long stack_start,
+		unsigned long stk_sz, struct task_struct *p, unsigned long tls)
 {
-	unsigned long clone_flags = args->flags;
-	unsigned long stack_start = args->stack;
-	unsigned long tls = args->tls;
 	struct pt_regs *childregs = task_pt_regs(p);
 
 	memset(&p->thread.cpu_context, 0, sizeof(struct cpu_context));
@@ -362,7 +375,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 
 	ptrauth_thread_init_kernel(p);
 
-	if (likely(!args->fn)) {
+	if (likely(!(p->flags & (PF_KTHREAD | PF_IO_WORKER)))) {
 		*childregs = *current_pt_regs();
 		childregs->regs[0] = 0;
 
@@ -400,8 +413,8 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		memset(childregs, 0, sizeof(struct pt_regs));
 		childregs->pstate = PSR_MODE_EL1h | PSR_IL_BIT;
 
-		p->thread.cpu_context.x19 = (unsigned long)args->fn;
-		p->thread.cpu_context.x20 = (unsigned long)args->fn_arg;
+		p->thread.cpu_context.x19 = stack_start;
+		p->thread.cpu_context.x20 = stk_sz;
 	}
 	p->thread.cpu_context.pc = (unsigned long)ret_from_fork;
 	p->thread.cpu_context.sp = (unsigned long)childregs;
@@ -454,7 +467,7 @@ static void ssbs_thread_switch(struct task_struct *next)
 	 * If all CPUs implement the SSBS extension, then we just need to
 	 * context-switch the PSTATE field.
 	 */
-	if (alternative_has_cap_unlikely(ARM64_SSBS))
+	if (cpus_have_const_cap(ARM64_SSBS))
 		return;
 
 	spectre_v4_enable_task_mitigation(next);
@@ -535,6 +548,12 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	ptrauth_thread_switch_user(next);
 
 	/*
+	 *  vendor hook is needed before the dsb(),
+	 *  because MPAM is related to cache maintenance.
+	 */
+	trace_android_vh_mpam_set(prev, next);
+
+	/*
 	 * Complete any pending TLB or cache maintenance on this CPU in case
 	 * the thread migrates to a different CPU.
 	 * This full barrier is also required by the membarrier system
@@ -551,6 +570,8 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	/* avoid expensive SCTLR_EL1 accesses if no change */
 	if (prev->thread.sctlr_user != next->thread.sctlr_user)
 		update_sctlr_el1(next->thread.sctlr_user);
+
+	trace_android_vh_is_fpsimd_save(prev, next);
 
 	/* the actual thread switch */
 	last = cpu_switch_to(prev, next);
@@ -574,12 +595,15 @@ static bool get_wchan_cb(void *arg, unsigned long pc)
 	return wchan_info->count++ < 16;
 }
 
-unsigned long __get_wchan(struct task_struct *p)
+unsigned long get_wchan(struct task_struct *p)
 {
 	struct wchan_info wchan_info = {
 		.pc = 0,
 		.count = 0,
 	};
+
+	if (!p || p == current || task_is_running(p))
+		return 0;
 
 	if (!try_get_task_stack(p))
 		return 0;
@@ -590,11 +614,12 @@ unsigned long __get_wchan(struct task_struct *p)
 
 	return wchan_info.pc;
 }
+EXPORT_SYMBOL_GPL(get_wchan);
 
 unsigned long arch_align_stack(unsigned long sp)
 {
 	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
-		sp -= get_random_u32_below(PAGE_SIZE);
+		sp -= get_random_int() & ~PAGE_MASK;
 	return sp & ~0xf;
 }
 
@@ -724,6 +749,7 @@ static struct ctl_table tagged_addr_sysctl_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
 	},
+	{ }
 };
 
 static int __init tagged_addr_init(void)

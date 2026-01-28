@@ -395,7 +395,16 @@ out:
 static int sti_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			 const struct pwm_state *state)
 {
+	struct sti_pwm_chip *pc = to_sti_pwmchip(chip);
+	struct sti_pwm_compat_data *cdata = pc->cdata;
+	struct device *dev = pc->dev;
 	int err;
+
+	if (pwm->hwpwm >= cdata->pwm_num_devs) {
+		dev_err(dev, "device %u is not valid for pwm mode\n",
+			pwm->hwpwm);
+		return -EINVAL;
+	}
 
 	if (state->polarity != PWM_POLARITY_NORMAL)
 		return -EINVAL;
@@ -407,7 +416,7 @@ static int sti_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		return 0;
 	}
 
-	err = sti_pwm_config(chip, pwm, state->duty_cycle, state->period);
+	err = sti_pwm_config(pwm->chip, pwm, state->duty_cycle, state->period);
 	if (err)
 		return err;
 
@@ -421,6 +430,7 @@ static const struct pwm_ops sti_pwm_ops = {
 	.capture = sti_pwm_capture,
 	.apply = sti_pwm_apply,
 	.free = sti_pwm_free,
+	.owner = THIS_MODULE,
 };
 
 static irqreturn_t sti_pwm_interrupt(int irq, void *data)
@@ -646,7 +656,7 @@ static int sti_pwm_probe(struct platform_device *pdev)
 
 	pc->chip.dev = dev;
 	pc->chip.ops = &sti_pwm_ops;
-	pc->chip.npwm = pc->cdata->pwm_num_devs;
+	pc->chip.npwm = max(cdata->pwm_num_devs, cdata->cpt_num_devs);
 
 	for (i = 0; i < cdata->cpt_num_devs; i++) {
 		struct sti_cpt_ddata *ddata = &cdata->ddata[i];
@@ -667,7 +677,7 @@ static int sti_pwm_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void sti_pwm_remove(struct platform_device *pdev)
+static int sti_pwm_remove(struct platform_device *pdev)
 {
 	struct sti_pwm_chip *pc = platform_get_drvdata(pdev);
 
@@ -675,6 +685,8 @@ static void sti_pwm_remove(struct platform_device *pdev)
 
 	clk_unprepare(pc->pwm_clk);
 	clk_unprepare(pc->cpt_clk);
+
+	return 0;
 }
 
 static const struct of_device_id sti_pwm_of_match[] = {
@@ -689,7 +701,7 @@ static struct platform_driver sti_pwm_driver = {
 		.of_match_table = sti_pwm_of_match,
 	},
 	.probe = sti_pwm_probe,
-	.remove_new = sti_pwm_remove,
+	.remove = sti_pwm_remove,
 };
 module_platform_driver(sti_pwm_driver);
 

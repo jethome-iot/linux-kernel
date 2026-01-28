@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+menu "Amlogic PCI Support"
+
+config AMLOGIC_PCIE
+	tristate "Amlogic PCIE controller support"
+	default n
+	depends on PCI
+	help
+	  Amlogic PCIE controller drivers support
+
+source "$(COMMON_DRIVERS_DIR)/drivers/pci/controller/Kconfig"
+
+endmenu

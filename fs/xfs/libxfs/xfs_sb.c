@@ -25,7 +25,6 @@
 #include "xfs_da_format.h"
 #include "xfs_health.h"
 #include "xfs_ag.h"
-#include "xfs_rtbitmap.h"
 
 /*
  * Physical superblock buffer manipulations. Shared with libxfs in userspace.
@@ -173,9 +172,6 @@ xfs_sb_version_to_features(
 		features |= XFS_FEAT_BIGTIME;
 	if (sbp->sb_features_incompat & XFS_SB_FEAT_INCOMPAT_NEEDSREPAIR)
 		features |= XFS_FEAT_NEEDSREPAIR;
-	if (sbp->sb_features_incompat & XFS_SB_FEAT_INCOMPAT_NREXT64)
-		features |= XFS_FEAT_NREXT64;
-
 	return features;
 }
 
@@ -267,8 +263,7 @@ xfs_validate_sb_write(
 		return -EFSCORRUPTED;
 	}
 
-	if (!xfs_is_readonly(mp) &&
-	    xfs_sb_has_ro_compat_feature(sbp, XFS_SB_FEAT_RO_COMPAT_UNKNOWN)) {
+	if (xfs_sb_has_ro_compat_feature(sbp, XFS_SB_FEAT_RO_COMPAT_UNKNOWN)) {
 		xfs_alert(mp,
 "Corruption detected in superblock read-only compatible features (0x%x)!",
 			(sbp->sb_features_ro_compat &
@@ -414,6 +409,7 @@ xfs_validate_sb_common(
 	    sbp->sb_inodelog < XFS_DINODE_MIN_LOG			||
 	    sbp->sb_inodelog > XFS_DINODE_MAX_LOG			||
 	    sbp->sb_inodesize != (1 << sbp->sb_inodelog)		||
+	    sbp->sb_logsunit > XLOG_MAX_RECORD_BSIZE			||
 	    sbp->sb_inopblock != howmany(sbp->sb_blocksize,sbp->sb_inodesize) ||
 	    XFS_FSB_TO_B(mp, sbp->sb_agblocks) < XFS_MIN_AG_BYTES	||
 	    XFS_FSB_TO_B(mp, sbp->sb_agblocks) > XFS_MAX_AG_BYTES	||
@@ -429,61 +425,6 @@ xfs_validate_sb_common(
 	    sbp->sb_shared_vn != 0)) {
 		xfs_notice(mp, "SB sanity check failed");
 		return -EFSCORRUPTED;
-	}
-
-	/*
-	 * Logs that are too large are not supported at all. Reject them
-	 * outright. Logs that are too small are tolerated on v4 filesystems,
-	 * but we can only check that when mounting the log. Hence we skip
-	 * those checks here.
-	 */
-	if (sbp->sb_logblocks > XFS_MAX_LOG_BLOCKS) {
-		xfs_notice(mp,
-		"Log size 0x%x blocks too large, maximum size is 0x%llx blocks",
-			 sbp->sb_logblocks, XFS_MAX_LOG_BLOCKS);
-		return -EFSCORRUPTED;
-	}
-
-	if (XFS_FSB_TO_B(mp, sbp->sb_logblocks) > XFS_MAX_LOG_BYTES) {
-		xfs_warn(mp,
-		"log size 0x%llx bytes too large, maximum size is 0x%llx bytes",
-			 XFS_FSB_TO_B(mp, sbp->sb_logblocks),
-			 XFS_MAX_LOG_BYTES);
-		return -EFSCORRUPTED;
-	}
-
-	/*
-	 * Do not allow filesystems with corrupted log sector or stripe units to
-	 * be mounted. We cannot safely size the iclogs or write to the log if
-	 * the log stripe unit is not valid.
-	 */
-	if (sbp->sb_versionnum & XFS_SB_VERSION_SECTORBIT) {
-		if (sbp->sb_logsectsize != (1U << sbp->sb_logsectlog)) {
-			xfs_notice(mp,
-			"log sector size in bytes/log2 (0x%x/0x%x) must match",
-				sbp->sb_logsectsize, 1U << sbp->sb_logsectlog);
-			return -EFSCORRUPTED;
-		}
-	} else if (sbp->sb_logsectsize || sbp->sb_logsectlog) {
-		xfs_notice(mp,
-		"log sector size in bytes/log2 (0x%x/0x%x) are not zero",
-			sbp->sb_logsectsize, sbp->sb_logsectlog);
-		return -EFSCORRUPTED;
-	}
-
-	if (sbp->sb_logsunit > 1) {
-		if (sbp->sb_logsunit % sbp->sb_blocksize) {
-			xfs_notice(mp,
-		"log stripe unit 0x%x bytes must be a multiple of block size",
-				sbp->sb_logsunit);
-			return -EFSCORRUPTED;
-		}
-		if (sbp->sb_logsunit > XLOG_MAX_RECORD_BSIZE) {
-			xfs_notice(mp,
-		"log stripe unit 0x%x bytes over maximum size (0x%x bytes)",
-				sbp->sb_logsunit, XLOG_MAX_RECORD_BSIZE);
-			return -EFSCORRUPTED;
-		}
 	}
 
 	/* Validate the realtime geometry; stolen from xfs_repair */
@@ -509,9 +450,8 @@ xfs_validate_sb_common(
 		rbmblocks = howmany_64(sbp->sb_rextents,
 				       NBBY * sbp->sb_blocksize);
 
-		if (!xfs_validate_rtextents(rexts) ||
-		    sbp->sb_rextents != rexts ||
-		    sbp->sb_rextslog != xfs_compute_rextslog(rexts) ||
+		if (sbp->sb_rextents != rexts ||
+		    sbp->sb_rextslog != xfs_highbit32(sbp->sb_rextents) ||
 		    sbp->sb_rbmblocks != rbmblocks) {
 			xfs_notice(mp,
 				"realtime geometry sanity check failed");
@@ -606,7 +546,7 @@ xfs_sb_quota_from_disk(struct xfs_sb *sbp)
 static void
 __xfs_sb_from_disk(
 	struct xfs_sb	*to,
-	struct xfs_dsb	*from,
+	xfs_dsb_t	*from,
 	bool		convert_xquota)
 {
 	to->sb_magicnum = be32_to_cpu(from->sb_magicnum);
@@ -682,7 +622,7 @@ __xfs_sb_from_disk(
 void
 xfs_sb_from_disk(
 	struct xfs_sb	*to,
-	struct xfs_dsb	*from)
+	xfs_dsb_t	*from)
 {
 	__xfs_sb_from_disk(to, from, true);
 }
@@ -967,8 +907,7 @@ xfs_sb_mount_common(
 	struct xfs_mount	*mp,
 	struct xfs_sb		*sbp)
 {
-	mp->m_agfrotor = 0;
-	atomic_set(&mp->m_agirotor, 0);
+	mp->m_agfrotor = mp->m_agirotor = 0;
 	mp->m_maxagi = mp->m_sb.sb_agcount;
 	mp->m_blkbit_log = sbp->sb_blocklog + XFS_NBBYLOG;
 	mp->m_blkbb_log = sbp->sb_blocklog - BBSHIFT;
@@ -977,8 +916,6 @@ xfs_sb_mount_common(
 	mp->m_blockmask = sbp->sb_blocksize - 1;
 	mp->m_blockwsize = sbp->sb_blocksize >> XFS_WORDLOG;
 	mp->m_blockwmask = mp->m_blockwsize - 1;
-	mp->m_rtxblklog = log2_if_power2(sbp->sb_rextsize);
-	mp->m_rtxblkmask = mask64_if_power2(sbp->sb_rextsize);
 
 	mp->m_alloc_mxr[0] = xfs_allocbt_maxrecs(mp, sbp->sb_blocksize, 1);
 	mp->m_alloc_mxr[1] = xfs_allocbt_maxrecs(mp, sbp->sb_blocksize, 0);
@@ -1025,17 +962,10 @@ xfs_log_sb(
 	 * reservations that have been taken out percpu counters. If we have an
 	 * unclean shutdown, this will be corrected by log recovery rebuilding
 	 * the counters from the AGF block counts.
-	 *
-	 * Do not update sb_frextents here because it is not part of the lazy
-	 * sb counters, despite having a percpu counter. It is always kept
-	 * consistent with the ondisk rtbitmap by xfs_trans_apply_sb_deltas()
-	 * and hence we don't need have to update it here.
 	 */
 	if (xfs_has_lazysbcount(mp)) {
 		mp->m_sb.sb_icount = percpu_counter_sum(&mp->m_icount);
-		mp->m_sb.sb_ifree = min_t(uint64_t,
-				percpu_counter_sum(&mp->m_ifree),
-				mp->m_sb.sb_icount);
+		mp->m_sb.sb_ifree = percpu_counter_sum(&mp->m_ifree);
 		mp->m_sb.sb_fdblocks = percpu_counter_sum(&mp->m_fdblocks);
 	}
 
@@ -1256,8 +1186,6 @@ xfs_fs_geometry(
 	} else {
 		geo->logsectsize = BBSIZE;
 	}
-	if (xfs_has_large_extent_counts(mp))
-		geo->flags |= XFS_FSOP_GEOM_FLAGS_NREXT64;
 	geo->rtsectsize = sbp->sb_blocksize;
 	geo->dirblocksize = xfs_dir2_dirblock_bytes(sbp);
 
@@ -1376,18 +1304,4 @@ xfs_validate_stripe_geometry(
 		return false;
 	}
 	return true;
-}
-
-/*
- * Compute the maximum level number of the realtime summary file, as defined by
- * mkfs.  The historic use of highbit32 on a 64-bit quantity prohibited correct
- * use of rt volumes with more than 2^32 extents.
- */
-uint8_t
-xfs_compute_rextslog(
-	xfs_rtbxlen_t		rtextents)
-{
-	if (!rtextents)
-		return 0;
-	return xfs_highbit64(rtextents);
 }

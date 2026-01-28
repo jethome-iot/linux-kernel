@@ -165,15 +165,14 @@ static int ali15x3_setup(struct pci_dev *ALI15X3_dev)
 	}
 
 	if(force_addr) {
-		int ret;
-
 		dev_info(&ALI15X3_dev->dev, "forcing ISA address 0x%04X\n",
 			ali15x3_smba);
-		ret = pci_write_config_word(ALI15X3_dev, SMBBA, ali15x3_smba);
-		if (ret != PCIBIOS_SUCCESSFUL)
+		if (PCIBIOS_SUCCESSFUL != pci_write_config_word(ALI15X3_dev,
+								SMBBA,
+								ali15x3_smba))
 			goto error;
-		ret = pci_read_config_word(ALI15X3_dev, SMBBA, &a);
-		if (ret != PCIBIOS_SUCCESSFUL)
+		if (PCIBIOS_SUCCESSFUL != pci_read_config_word(ALI15X3_dev,
+								SMBBA, &a))
 			goto error;
 		if ((a & ~(ALI15X3_SMB_IOSIZE - 1)) != ali15x3_smba) {
 			/* make sure it works */
@@ -461,7 +460,7 @@ static const struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter ali15x3_adapter = {
 	.owner		= THIS_MODULE,
-	.class          = I2C_CLASS_HWMON,
+	.class          = I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo		= &smbus_algorithm,
 };
 

@@ -604,6 +604,7 @@ static int tw5864_querycap(struct file *file, void *priv,
 	strscpy(cap->driver, "tw5864", sizeof(cap->driver));
 	snprintf(cap->card, sizeof(cap->card), "TW5864 Encoder %d",
 		 input->nr);
+	sprintf(cap->bus_info, "PCI:%s", pci_name(input->root->pci));
 	return 0;
 }
 
@@ -1114,7 +1115,7 @@ static int tw5864_video_input_init(struct tw5864_input *input, int video_nr)
 	input->vidq.gfp_flags = 0;
 	input->vidq.buf_struct_size = sizeof(struct tw5864_buf);
 	input->vidq.lock = &input->lock;
-	input->vidq.min_queued_buffers = 2;
+	input->vidq.min_buffers_needed = 2;
 	input->vidq.dev = &input->root->pci->dev;
 	ret = vb2_queue_init(&input->vidq);
 	if (ret)

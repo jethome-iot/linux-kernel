@@ -17,11 +17,13 @@
 #include <linux/sched/debug.h>
 #include <linux/highmem.h>
 #include <linux/perf_event.h>
-#include <linux/kfence.h>
 
 #include <asm/system_misc.h>
 #include <asm/system_info.h>
 #include <asm/tlbflush.h>
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+#include <linux/amlogic/user_fault.h>
+#endif
 
 #include "fault.h"
 
@@ -38,6 +40,7 @@ void show_pte(const char *lvl, struct mm_struct *mm, unsigned long addr)
 	if (!mm)
 		mm = &init_mm;
 
+	printk("%spgd = %p\n", lvl, mm->pgd);
 	pgd = pgd_offset(mm, addr);
 	printk("%s[%08lx] *pgd=%08llx", lvl, addr, (long long)pgd_val(*pgd));
 
@@ -85,9 +88,6 @@ void show_pte(const char *lvl, struct mm_struct *mm, unsigned long addr)
 			break;
 
 		pte = pte_offset_map(pmd, addr);
-		if (!pte)
-			break;
-
 		pr_cont(", *pte=%08llx", (long long)pte_val(*pte));
 #ifndef CONFIG_ARM_LPAE
 		pr_cont(", *ppte=%08llx",
@@ -103,40 +103,6 @@ void show_pte(const char *lvl, struct mm_struct *mm, unsigned long addr)
 { }
 #endif					/* CONFIG_MMU */
 
-static inline bool is_write_fault(unsigned int fsr)
-{
-	return (fsr & FSR_WRITE) && !(fsr & FSR_CM);
-}
-
-static inline bool is_translation_fault(unsigned int fsr)
-{
-	int fs = fsr_fs(fsr);
-#ifdef CONFIG_ARM_LPAE
-	if ((fs & FS_MMU_NOLL_MASK) == FS_TRANS_NOLL)
-		return true;
-#else
-	if (fs == FS_L1_TRANS || fs == FS_L2_TRANS)
-		return true;
-#endif
-	return false;
-}
-
-static void die_kernel_fault(const char *msg, struct mm_struct *mm,
-			     unsigned long addr, unsigned int fsr,
-			     struct pt_regs *regs)
-{
-	bust_spinlocks(1);
-	pr_alert("8<--- cut here ---\n");
-	pr_alert("Unable to handle kernel %s at virtual address %08lx when %s\n",
-		 msg, addr, fsr & FSR_LNX_PF ? "execute" :
-		 fsr & FSR_WRITE ? "write" : "read");
-
-	show_pte(KERN_ALERT, mm, addr);
-	die("Oops", regs, fsr);
-	bust_spinlocks(0);
-	make_task_dead(SIGKILL);
-}
-
 /*
  * Oops.  The kernel tried to access some page that wasn't present.
  */
@@ -144,7 +110,6 @@ static void
 __do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 		  struct pt_regs *regs)
 {
-	const char *msg;
 	/*
 	 * Are we prepared to handle this kernel fault?
 	 */
@@ -154,17 +119,16 @@ __do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 	/*
 	 * No handler, we'll have to terminate things with extreme prejudice.
 	 */
-	if (addr < PAGE_SIZE) {
-		msg = "NULL pointer dereference";
-	} else {
-		if (is_translation_fault(fsr) &&
-		    kfence_handle_page_fault(addr, is_write_fault(fsr), regs))
-			return;
+	bust_spinlocks(1);
+	pr_alert("8<--- cut here ---\n");
+	pr_alert("Unable to handle kernel %s at virtual address %08lx\n",
+		 (addr < PAGE_SIZE) ? "NULL pointer dereference" :
+		 "paging request", addr);
 
-		msg = "paging request";
-	}
-
-	die_kernel_fault(msg, mm, addr, fsr, regs);
+	show_pte(KERN_ALERT, mm, addr);
+	die("Oops", regs, fsr);
+	bust_spinlocks(0);
+	make_task_dead(SIGKILL);
 }
 
 /*
@@ -181,13 +145,28 @@ __do_user_fault(unsigned long addr, unsigned int fsr, unsigned int sig,
 		harden_branch_predictor();
 
 #ifdef CONFIG_DEBUG_USER
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+	if (unhandled_signal(tsk, sig) &&
+	    (((user_debug & UDBG_SEGV) && sig == SIGSEGV) ||
+	     ((user_debug & UDBG_BUS)  && sig == SIGBUS))) {
+#else
 	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
 	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
+#endif
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+		pr_info("%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+			tsk->comm, sig, addr, fsr);
+#else
 		pr_err("8<--- cut here ---\n");
 		pr_err("%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
 		       tsk->comm, sig, addr, fsr);
+#endif
 		show_pte(KERN_ERR, tsk->mm, addr);
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+		show_debug_ratelimited(regs, 1);
+#else
 		show_regs(regs);
+#endif
 	}
 #endif
 #ifndef CONFIG_KUSER_HELPERS
@@ -219,35 +198,76 @@ void do_bad_area(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 }
 
 #ifdef CONFIG_MMU
-#define VM_FAULT_BADMAP		((__force vm_fault_t)0x010000)
-#define VM_FAULT_BADACCESS	((__force vm_fault_t)0x020000)
+#define VM_FAULT_BADMAP		0x010000
+#define VM_FAULT_BADACCESS	0x020000
 
-static inline bool is_permission_fault(unsigned int fsr)
+/*
+ * Check that the permissions on the VMA allow for the fault which occurred.
+ * If we encountered a write fault, we must have write permission, otherwise
+ * we allow any permission.
+ */
+static inline bool access_error(unsigned int fsr, struct vm_area_struct *vma)
 {
-	int fs = fsr_fs(fsr);
-#ifdef CONFIG_ARM_LPAE
-	if ((fs & FS_MMU_NOLL_MASK) == FS_PERM_NOLL)
-		return true;
-#else
-	if (fs == FS_L1_PERM || fs == FS_L2_PERM)
-		return true;
-#endif
-	return false;
+	unsigned int mask = VM_ACCESS_FLAGS;
+
+	if ((fsr & FSR_WRITE) && !(fsr & FSR_CM))
+		mask = VM_WRITE;
+	if (fsr & FSR_LNX_PF)
+		mask = VM_EXEC;
+
+	return vma->vm_flags & mask ? false : true;
+}
+
+static vm_fault_t __kprobes
+__do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
+		unsigned int flags, struct task_struct *tsk,
+		struct pt_regs *regs)
+{
+	struct vm_area_struct *vma;
+	vm_fault_t fault;
+
+	vma = find_vma(mm, addr);
+	fault = VM_FAULT_BADMAP;
+	if (unlikely(!vma))
+		goto out;
+	if (unlikely(vma->vm_start > addr))
+		goto check_stack;
+
+	/*
+	 * Ok, we have a good vm_area for this
+	 * memory access, so we can handle it.
+	 */
+good_area:
+	if (access_error(fsr, vma)) {
+		fault = VM_FAULT_BADACCESS;
+		goto out;
+	}
+
+	return handle_mm_fault(vma, addr & PAGE_MASK, flags, regs);
+
+check_stack:
+	/* Don't allow expansion below FIRST_USER_ADDRESS */
+	if (vma->vm_flags & VM_GROWSDOWN &&
+	    addr >= FIRST_USER_ADDRESS && !expand_stack(vma, addr))
+		goto good_area;
+out:
+	return fault;
 }
 
 static int __kprobes
 do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
-	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma;
+	struct task_struct *tsk;
+	struct mm_struct *mm;
 	int sig, code;
 	vm_fault_t fault;
 	unsigned int flags = FAULT_FLAG_DEFAULT;
-	unsigned long vm_flags = VM_ACCESS_FLAGS;
 
 	if (kprobe_page_fault(regs, fsr))
 		return 0;
 
+	tsk = current;
+	mm  = tsk->mm;
 
 	/* Enable interrupts if they were enabled in the parent context. */
 	if (interrupts_enabled(regs))
@@ -262,66 +282,36 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 
 	if (user_mode(regs))
 		flags |= FAULT_FLAG_USER;
-
-	if (is_write_fault(fsr)) {
+	if ((fsr & FSR_WRITE) && !(fsr & FSR_CM))
 		flags |= FAULT_FLAG_WRITE;
-		vm_flags = VM_WRITE;
-	}
-
-	if (fsr & FSR_LNX_PF) {
-		vm_flags = VM_EXEC;
-
-		if (is_permission_fault(fsr) && !user_mode(regs))
-			die_kernel_fault("execution of memory",
-					 mm, addr, fsr, regs);
-	}
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
 
-	if (!(flags & FAULT_FLAG_USER))
-		goto lock_mmap;
-
-	vma = lock_vma_under_rcu(mm, addr);
-	if (!vma)
-		goto lock_mmap;
-
-	if (!(vma->vm_flags & vm_flags)) {
-		vma_end_read(vma);
-		goto lock_mmap;
-	}
-	fault = handle_mm_fault(vma, addr, flags | FAULT_FLAG_VMA_LOCK, regs);
-	if (!(fault & (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
-		vma_end_read(vma);
-
-	if (!(fault & VM_FAULT_RETRY)) {
-		count_vm_vma_lock_event(VMA_LOCK_SUCCESS);
-		goto done;
-	}
-	count_vm_vma_lock_event(VMA_LOCK_RETRY);
-
-	/* Quick path to respond to signals */
-	if (fault_signal_pending(fault, regs)) {
-		if (!user_mode(regs))
-			goto no_context;
-		return 0;
-	}
-lock_mmap:
-
-retry:
-	vma = lock_mm_and_find_vma(mm, addr, regs);
-	if (unlikely(!vma)) {
-		fault = VM_FAULT_BADMAP;
-		goto bad_area;
-	}
-
 	/*
-	 * ok, we have a good vm_area for this memory access, check the
-	 * permissions on the VMA allow for the fault which occurred.
+	 * As per x86, we may deadlock here.  However, since the kernel only
+	 * validly references user space from well defined areas of the code,
+	 * we can bug out early if this is from code which shouldn't.
 	 */
-	if (!(vma->vm_flags & vm_flags))
-		fault = VM_FAULT_BADACCESS;
-	else
-		fault = handle_mm_fault(vma, addr & PAGE_MASK, flags, regs);
+	if (!mmap_read_trylock(mm)) {
+		if (!user_mode(regs) && !search_exception_tables(regs->ARM_pc))
+			goto no_context;
+retry:
+		mmap_read_lock(mm);
+	} else {
+		/*
+		 * The above down_read_trylock() might have succeeded in
+		 * which case, we'll have missed the might_sleep() from
+		 * down_read()
+		 */
+		might_sleep();
+#ifdef CONFIG_DEBUG_VM
+		if (!user_mode(regs) &&
+		    !search_exception_tables(regs->ARM_pc))
+			goto no_context;
+#endif
+	}
+
+	fault = __do_page_fault(mm, addr, fsr, flags, tsk, regs);
 
 	/* If we need to retry but a fatal signal is pending, handle the
 	 * signal first. We do not need to release the mmap_lock because
@@ -333,11 +323,7 @@ retry:
 		return 0;
 	}
 
-	/* The fault is fully completed (including releasing mmap lock) */
-	if (fault & VM_FAULT_COMPLETED)
-		return 0;
-
-	if (!(fault & VM_FAULT_ERROR)) {
+	if (!(fault & VM_FAULT_ERROR) && flags & FAULT_FLAG_ALLOW_RETRY) {
 		if (fault & VM_FAULT_RETRY) {
 			flags |= FAULT_FLAG_TRIED;
 			goto retry;
@@ -345,7 +331,6 @@ retry:
 	}
 
 	mmap_read_unlock(mm);
-done:
 
 	/*
 	 * Handle the "normal" case first - VM_FAULT_MAJOR
@@ -353,7 +338,6 @@ done:
 	if (likely(!(fault & (VM_FAULT_ERROR | VM_FAULT_BADMAP | VM_FAULT_BADACCESS))))
 		return 0;
 
-bad_area:
 	/*
 	 * If we are in kernel mode at this point, we
 	 * have no context to handle this fault with.

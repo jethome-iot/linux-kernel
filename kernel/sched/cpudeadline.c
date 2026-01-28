@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- *  kernel/sched/cpudeadline.c
+ *  kernel/sched/cpudl.c
  *
  *  Global CPU deadline management
  *
  *  Author: Juri Lelli <j.lelli@sssup.it>
  */
+#include "sched.h"
 
 static inline int parent(int i)
 {
@@ -131,7 +132,7 @@ int cpudl_find(struct cpudl *cp, struct task_struct *p,
 			if (!dl_task_fits_capacity(p, cpu)) {
 				cpumask_clear_cpu(cpu, later_mask);
 
-				cap = arch_scale_cpu_capacity(cpu);
+				cap = capacity_orig_of(cpu);
 
 				if (cap > max_cap ||
 				    (cpu == task_cpu(p) && cap == max_cap)) {

@@ -374,8 +374,9 @@ static int xgbe_set_link_ksettings(struct net_device *netdev,
 		  __ETHTOOL_LINK_MODE_MASK_NBITS, cmd->link_modes.advertising,
 		  __ETHTOOL_LINK_MODE_MASK_NBITS, lks->link_modes.supported);
 
-	linkmode_and(advertising, cmd->link_modes.advertising,
-		     lks->link_modes.supported);
+	bitmap_and(advertising,
+		   cmd->link_modes.advertising, lks->link_modes.supported,
+		   __ETHTOOL_LINK_MODE_MASK_NBITS);
 
 	if ((cmd->base.autoneg == AUTONEG_ENABLE) &&
 	    bitmap_empty(advertising, __ETHTOOL_LINK_MODE_MASK_NBITS)) {
@@ -388,7 +389,8 @@ static int xgbe_set_link_ksettings(struct net_device *netdev,
 	pdata->phy.autoneg = cmd->base.autoneg;
 	pdata->phy.speed = speed;
 	pdata->phy.duplex = cmd->base.duplex;
-	linkmode_copy(lks->link_modes.advertising, advertising);
+	bitmap_copy(lks->link_modes.advertising, advertising,
+		    __ETHTOOL_LINK_MODE_MASK_NBITS);
 
 	if (cmd->base.autoneg == AUTONEG_ENABLE)
 		XGBE_SET_ADV(lks, Autoneg);
@@ -407,8 +409,8 @@ static void xgbe_get_drvinfo(struct net_device *netdev,
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_features *hw_feat = &pdata->hw_feat;
 
-	strscpy(drvinfo->driver, XGBE_DRV_NAME, sizeof(drvinfo->driver));
-	strscpy(drvinfo->bus_info, dev_name(pdata->dev),
+	strlcpy(drvinfo->driver, XGBE_DRV_NAME, sizeof(drvinfo->driver));
+	strlcpy(drvinfo->bus_info, dev_name(pdata->dev),
 		sizeof(drvinfo->bus_info));
 	snprintf(drvinfo->fw_version, sizeof(drvinfo->fw_version), "%d.%d.%d",
 		 XGMAC_GET_BITS(hw_feat->version, MAC_VR, USERVER),
@@ -527,48 +529,47 @@ static u32 xgbe_get_rxfh_indir_size(struct net_device *netdev)
 	return ARRAY_SIZE(pdata->rss_table);
 }
 
-static int xgbe_get_rxfh(struct net_device *netdev,
-			 struct ethtool_rxfh_param *rxfh)
+static int xgbe_get_rxfh(struct net_device *netdev, u32 *indir, u8 *key,
+			 u8 *hfunc)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	unsigned int i;
 
-	if (rxfh->indir) {
+	if (indir) {
 		for (i = 0; i < ARRAY_SIZE(pdata->rss_table); i++)
-			rxfh->indir[i] = XGMAC_GET_BITS(pdata->rss_table[i],
-							MAC_RSSDR, DMCH);
+			indir[i] = XGMAC_GET_BITS(pdata->rss_table[i],
+						  MAC_RSSDR, DMCH);
 	}
 
-	if (rxfh->key)
-		memcpy(rxfh->key, pdata->rss_key, sizeof(pdata->rss_key));
+	if (key)
+		memcpy(key, pdata->rss_key, sizeof(pdata->rss_key));
 
-	rxfh->hfunc = ETH_RSS_HASH_TOP;
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
 
 	return 0;
 }
 
-static int xgbe_set_rxfh(struct net_device *netdev,
-			 struct ethtool_rxfh_param *rxfh,
-			 struct netlink_ext_ack *extack)
+static int xgbe_set_rxfh(struct net_device *netdev, const u32 *indir,
+			 const u8 *key, const u8 hfunc)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
 	unsigned int ret;
 
-	if (rxfh->hfunc != ETH_RSS_HASH_NO_CHANGE &&
-	    rxfh->hfunc != ETH_RSS_HASH_TOP) {
+	if (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP) {
 		netdev_err(netdev, "unsupported hash function\n");
 		return -EOPNOTSUPP;
 	}
 
-	if (rxfh->indir) {
-		ret = hw_if->set_rss_lookup_table(pdata, rxfh->indir);
+	if (indir) {
+		ret = hw_if->set_rss_lookup_table(pdata, indir);
 		if (ret)
 			return ret;
 	}
 
-	if (rxfh->key) {
-		ret = hw_if->set_rss_hash_key(pdata, rxfh->key);
+	if (key) {
+		ret = hw_if->set_rss_hash_key(pdata, key);
 		if (ret)
 			return ret;
 	}
@@ -625,11 +626,8 @@ static int xgbe_get_module_eeprom(struct net_device *netdev,
 	return pdata->phy_if.module_eeprom(pdata, eeprom, data);
 }
 
-static void
-xgbe_get_ringparam(struct net_device *netdev,
-		   struct ethtool_ringparam *ringparam,
-		   struct kernel_ethtool_ringparam *kernel_ringparam,
-		   struct netlink_ext_ack *extack)
+static void xgbe_get_ringparam(struct net_device *netdev,
+			       struct ethtool_ringparam *ringparam)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 
@@ -640,9 +638,7 @@ xgbe_get_ringparam(struct net_device *netdev,
 }
 
 static int xgbe_set_ringparam(struct net_device *netdev,
-			      struct ethtool_ringparam *ringparam,
-			      struct kernel_ethtool_ringparam *kernel_ringparam,
-			      struct netlink_ext_ack *extack)
+			      struct ethtool_ringparam *ringparam)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	unsigned int rx, tx;

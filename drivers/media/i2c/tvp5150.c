@@ -1035,7 +1035,7 @@ tvp5150_get_pad_crop(struct tvp5150 *decoder,
 		return &decoder->rect;
 	case V4L2_SUBDEV_FORMAT_TRY:
 #if defined(CONFIG_VIDEO_V4L2_SUBDEV_API)
-		return v4l2_subdev_state_get_crop(sd_state, pad);
+		return v4l2_subdev_get_try_crop(&decoder->sd, sd_state, pad);
 #else
 		return ERR_PTR(-EINVAL);
 #endif
@@ -1198,10 +1198,8 @@ static int tvp5150_get_mbus_config(struct v4l2_subdev *sd,
 	struct tvp5150 *decoder = to_tvp5150(sd);
 
 	cfg->type = decoder->mbus_type;
-	cfg->bus.parallel.flags = V4L2_MBUS_MASTER
-				| V4L2_MBUS_PCLK_SAMPLE_RISING
-				| V4L2_MBUS_FIELD_EVEN_LOW
-				| V4L2_MBUS_DATA_ACTIVE_HIGH;
+	cfg->flags = V4L2_MBUS_MASTER | V4L2_MBUS_PCLK_SAMPLE_RISING
+		   | V4L2_MBUS_FIELD_EVEN_LOW | V4L2_MBUS_DATA_ACTIVE_HIGH;
 
 	return 0;
 }
@@ -1209,8 +1207,8 @@ static int tvp5150_get_mbus_config(struct v4l2_subdev *sd,
 /****************************************************************************
 			V4L2 subdev pad ops
  ****************************************************************************/
-static int tvp5150_init_state(struct v4l2_subdev *sd,
-			      struct v4l2_subdev_state *sd_state)
+static int tvp5150_init_cfg(struct v4l2_subdev *sd,
+			    struct v4l2_subdev_state *sd_state)
 {
 	struct tvp5150 *decoder = to_tvp5150(sd);
 	v4l2_std_id std;
@@ -1285,7 +1283,7 @@ static int tvp5150_disable_all_input_links(struct tvp5150 *decoder)
 	int err;
 
 	for (i = 0; i < TVP5150_NUM_PADS - 1; i++) {
-		connector_pad = media_pad_remote_pad_first(&decoder->pads[i]);
+		connector_pad = media_entity_remote_pad(&decoder->pads[i]);
 		if (!connector_pad)
 			continue;
 
@@ -1722,6 +1720,7 @@ static const struct v4l2_subdev_vbi_ops tvp5150_vbi_ops = {
 };
 
 static const struct v4l2_subdev_pad_ops tvp5150_pad_ops = {
+	.init_cfg = tvp5150_init_cfg,
 	.enum_mbus_code = tvp5150_enum_mbus_code,
 	.enum_frame_size = tvp5150_enum_frame_size,
 	.set_fmt = tvp5150_fill_fmt,
@@ -1740,7 +1739,6 @@ static const struct v4l2_subdev_ops tvp5150_ops = {
 };
 
 static const struct v4l2_subdev_internal_ops tvp5150_internal_ops = {
-	.init_state = tvp5150_init_state,
 	.registered = tvp5150_registered,
 	.open = tvp5150_open,
 	.close = tvp5150_close,
@@ -2234,7 +2232,7 @@ err:
 	return res;
 }
 
-static void tvp5150_remove(struct i2c_client *c)
+static int tvp5150_remove(struct i2c_client *c)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(c);
 	struct tvp5150 *decoder = to_tvp5150(sd);
@@ -2254,6 +2252,8 @@ static void tvp5150_remove(struct i2c_client *c)
 	v4l2_ctrl_handler_free(&decoder->hdl);
 	pm_runtime_disable(&c->dev);
 	pm_runtime_set_suspended(&c->dev);
+
+	return 0;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -2284,7 +2284,7 @@ static struct i2c_driver tvp5150_driver = {
 		.name	= "tvp5150",
 		.pm	= &tvp5150_pm_ops,
 	},
-	.probe		= tvp5150_probe,
+	.probe_new	= tvp5150_probe,
 	.remove		= tvp5150_remove,
 	.id_table	= tvp5150_id,
 };

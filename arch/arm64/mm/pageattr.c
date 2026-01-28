@@ -30,7 +30,7 @@ bool can_set_direct_map(void)
 	 * KFENCE pool requires page-granular mapping if initialized late.
 	 */
 	return rodata_full || debug_pagealloc_enabled() ||
-	       arm64_kfence_can_set_direct_map();
+		arm64_kfence_can_set_direct_map();
 }
 
 static int change_page_range(pte_t *ptep, unsigned long addr, void *data)
@@ -204,7 +204,8 @@ void __kernel_map_pages(struct page *page, int numpages, int enable)
 
 /*
  * This function is used to determine if a linear map page has been marked as
- * not-valid. Walk the page table and check the PTE_VALID bit.
+ * not-valid. Walk the page table and check the PTE_VALID bit. This is based
+ * on kern_addr_valid(), which almost does what we need.
  *
  * Because this is only called on the kernel linear map,  p?d_sect() implies
  * p?d_present(). When debug_pagealloc is enabled, sections mappings are

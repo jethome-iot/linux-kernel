@@ -1,0 +1,27 @@
+# aml-erofs.ko
+  register_sysctl
+
+ # some customers may need
+  i2c_smbus_write_byte
+  devm_fwnode_pwm_get
+  thermal_zone_get_temp
+
+# amlogic-gpio.ko
+  kstrndup
+
+# amlogic-usb.ko
+  devm_clk_bulk_get
+
+# pagetrace.ko
+  __traceiter_android_vh_oom_check_panic
+  __tracepoint_android_vh_oom_check_panic
+
+# amlogic-clk.ko
+  clk_save_context
+  clk_restore_context
+
+# aml_drm.ko
+  drm_property_create_blob
+
+# amlogic-debug-iotrace.ko
+  of_find_all_nodes

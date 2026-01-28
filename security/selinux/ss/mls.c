@@ -2,7 +2,7 @@
 /*
  * Implementation of the multi-level security (MLS) policy.
  *
- * Author : Stephen Smalley, <stephen.smalley.work@gmail.com>
+ * Author : Stephen Smalley, <sds@tycho.nsa.gov>
  */
 /*
  * Updated: Trusted Computer Solutions, Inc. <dgoeddel@trustedcs.com>
@@ -45,7 +45,7 @@ int mls_compute_context_len(struct policydb *p, struct context *context)
 
 	len = 1; /* for the beginning ":" */
 	for (l = 0; l < 2; l++) {
-		u32 index_sens = context->range.level[l].sens;
+		int index_sens = context->range.level[l].sens;
 		len += strlen(sym_name(p, SYM_LEVELS, index_sens - 1));
 
 		/* categories */
@@ -156,6 +156,7 @@ void mls_sid_to_context(struct policydb *p,
 	}
 
 	*scontext = scontextp;
+	return;
 }
 
 int mls_level_isvalid(struct policydb *p, struct mls_level *l)
@@ -240,8 +241,7 @@ int mls_context_to_sid(struct policydb *pol,
 	char *sensitivity, *cur_cat, *next_cat, *rngptr;
 	struct level_datum *levdatum;
 	struct cat_datum *catdatum, *rngdatum;
-	u32 i;
-	int l, rc;
+	int l, rc, i;
 	char *rangep[2];
 
 	if (!pol->mls_enabled) {
@@ -452,8 +452,7 @@ int mls_convert_context(struct policydb *oldp,
 	struct level_datum *levdatum;
 	struct cat_datum *catdatum;
 	struct ebitmap_node *node;
-	u32 i;
-	int l;
+	int l, i;
 
 	if (!oldp->mls_enabled || !newp->mls_enabled)
 		return 0;
@@ -497,7 +496,7 @@ int mls_compute_sid(struct policydb *p,
 	struct range_trans rtr;
 	struct mls_range *r;
 	struct class_datum *cladatum;
-	char default_range = 0;
+	int default_range = 0;
 
 	if (!p->mls_enabled)
 		return 0;
@@ -554,7 +553,6 @@ int mls_compute_sid(struct policydb *p,
 #ifdef CONFIG_NETLABEL
 /**
  * mls_export_netlbl_lvl - Export the MLS sensitivity levels to NetLabel
- * @p: the policy
  * @context: the security context
  * @secattr: the NetLabel security attributes
  *
@@ -576,7 +574,6 @@ void mls_export_netlbl_lvl(struct policydb *p,
 
 /**
  * mls_import_netlbl_lvl - Import the NetLabel MLS sensitivity levels
- * @p: the policy
  * @context: the security context
  * @secattr: the NetLabel security attributes
  *
@@ -598,7 +595,6 @@ void mls_import_netlbl_lvl(struct policydb *p,
 
 /**
  * mls_export_netlbl_cat - Export the MLS categories to NetLabel
- * @p: the policy
  * @context: the security context
  * @secattr: the NetLabel security attributes
  *
@@ -626,7 +622,6 @@ int mls_export_netlbl_cat(struct policydb *p,
 
 /**
  * mls_import_netlbl_cat - Import the MLS categories from NetLabel
- * @p: the policy
  * @context: the security context
  * @secattr: the NetLabel security attributes
  *

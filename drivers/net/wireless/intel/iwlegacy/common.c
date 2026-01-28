@@ -541,9 +541,6 @@ il_leds_init(struct il_priv *il)
 
 	il->led.name =
 	    kasprintf(GFP_KERNEL, "%s-led", wiphy_name(il->hw->wiphy));
-	if (!il->led.name)
-		return;
-
 	il->led.brightness_set = il_led_brightness_set;
 	il->led.blink_set = il_led_blink_set;
 	il->led.max_brightness = 1;
@@ -1873,15 +1870,15 @@ il_set_ht_add_station(struct il_priv *il, u8 idx, struct ieee80211_sta *sta)
 		goto done;
 
 	D_ASSOC("spatial multiplexing power save mode: %s\n",
-		(sta->deflink.smps_mode == IEEE80211_SMPS_STATIC) ? "static" :
-		(sta->deflink.smps_mode == IEEE80211_SMPS_DYNAMIC) ? "dynamic" :
+		(sta->smps_mode == IEEE80211_SMPS_STATIC) ? "static" :
+		(sta->smps_mode == IEEE80211_SMPS_DYNAMIC) ? "dynamic" :
 		"disabled");
 
 	sta_flags = il->stations[idx].sta.station_flags;
 
 	sta_flags &= ~(STA_FLG_RTS_MIMO_PROT_MSK | STA_FLG_MIMO_DIS_MSK);
 
-	switch (sta->deflink.smps_mode) {
+	switch (sta->smps_mode) {
 	case IEEE80211_SMPS_STATIC:
 		sta_flags |= STA_FLG_MIMO_DIS_MSK;
 		break;
@@ -1891,7 +1888,7 @@ il_set_ht_add_station(struct il_priv *il, u8 idx, struct ieee80211_sta *sta)
 	case IEEE80211_SMPS_OFF:
 		break;
 	default:
-		IL_WARN("Invalid MIMO PS mode %d\n", sta->deflink.smps_mode);
+		IL_WARN("Invalid MIMO PS mode %d\n", sta->smps_mode);
 		break;
 	}
 
@@ -4093,7 +4090,7 @@ il_chswitch_done(struct il_priv *il, bool is_success)
 		return;
 
 	if (test_and_clear_bit(S_CHANNEL_SWITCH_PENDING, &il->status))
-		ieee80211_chswitch_done(il->vif, is_success, 0);
+		ieee80211_chswitch_done(il->vif, is_success);
 }
 EXPORT_SYMBOL(il_chswitch_done);
 
@@ -4483,8 +4480,7 @@ il_clear_isr_stats(struct il_priv *il)
 }
 
 int
-il_mac_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-	       unsigned int link_id, u16 queue,
+il_mac_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif, u16 queue,
 	       const struct ieee80211_tx_queue_params *params)
 {
 	struct il_priv *il = hw->priv;
@@ -4820,7 +4816,7 @@ il_check_stuck_queue(struct il_priv *il, int cnt)
 #define IL_WD_TICK(timeout) ((timeout) / 4)
 
 /*
- * Watchdog timer callback, we check each tx queue for stuck, if hung
+ * Watchdog timer callback, we check each tx queue for stuck, if if hung
  * we reset the firmware. If everything is fine just rearm the timer.
  */
 void
@@ -5280,7 +5276,7 @@ il_beacon_update(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	struct il_priv *il = hw->priv;
 	unsigned long flags;
 	__le64 timestamp;
-	struct sk_buff *skb = ieee80211_beacon_get(hw, vif, 0);
+	struct sk_buff *skb = ieee80211_beacon_get(hw, vif);
 
 	if (!skb)
 		return;
@@ -5315,13 +5311,13 @@ il_beacon_update(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 
 void
 il_mac_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-			struct ieee80211_bss_conf *bss_conf, u64 changes)
+			struct ieee80211_bss_conf *bss_conf, u32 changes)
 {
 	struct il_priv *il = hw->priv;
 	int ret;
 
 	mutex_lock(&il->mutex);
-	D_MAC80211("enter: changes 0x%llx\n", changes);
+	D_MAC80211("enter: changes 0x%x\n", changes);
 
 	if (!il_is_alive(il)) {
 		D_MAC80211("leave - not alive\n");
@@ -5431,8 +5427,8 @@ il_mac_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	}
 
 	if (changes & BSS_CHANGED_ASSOC) {
-		D_MAC80211("ASSOC %d\n", vif->cfg.assoc);
-		if (vif->cfg.assoc) {
+		D_MAC80211("ASSOC %d\n", bss_conf->assoc);
+		if (bss_conf->assoc) {
 			il->timestamp = bss_conf->sync_tsf;
 
 			if (!il_is_rfkill(il))
@@ -5441,8 +5437,8 @@ il_mac_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			il_set_no_assoc(il, vif);
 	}
 
-	if (changes && il_is_associated(il) && vif->cfg.aid) {
-		D_MAC80211("Changes (%#llx) while associated\n", changes);
+	if (changes && il_is_associated(il) && bss_conf->aid) {
+		D_MAC80211("Changes (%#x) while associated\n", changes);
 		ret = il_send_rxon_assoc(il);
 		if (!ret) {
 			/* Sync active_rxon with latest change. */
@@ -5463,10 +5459,10 @@ il_mac_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 
 	if (changes & BSS_CHANGED_IBSS) {
 		ret = il->ops->manage_ibss_station(il, vif,
-						   vif->cfg.ibss_joined);
+						   bss_conf->ibss_joined);
 		if (ret)
 			IL_ERR("failed to %s IBSS station %pM\n",
-			       vif->cfg.ibss_joined ? "add" : "remove",
+			       bss_conf->ibss_joined ? "add" : "remove",
 			       bss_conf->bssid);
 	}
 

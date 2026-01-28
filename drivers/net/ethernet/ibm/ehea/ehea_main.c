@@ -29,9 +29,6 @@
 #include <asm/kexec.h>
 #include <linux/mutex.h>
 #include <linux/prefetch.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/platform_device.h>
 
 #include <net/ip.h>
 
@@ -90,7 +87,7 @@ static struct ehea_bcmc_reg_array ehea_bcmc_regs;
 
 static int ehea_probe_adapter(struct platform_device *dev);
 
-static void ehea_remove(struct platform_device *dev);
+static int ehea_remove(struct platform_device *dev);
 
 static const struct of_device_id ehea_module_device_table[] = {
 	{
@@ -121,7 +118,7 @@ static struct platform_driver ehea_driver = {
 		.of_match_table = ehea_device_table,
 	},
 	.probe = ehea_probe_adapter,
-	.remove_new = ehea_remove,
+	.remove = ehea_remove,
 };
 
 void ehea_dump(void *adr, int len, char *msg)
@@ -900,7 +897,7 @@ static int ehea_poll(struct napi_struct *napi, int budget)
 		if (!cqe && !cqe_skb)
 			return rx;
 
-		if (!napi_schedule(napi))
+		if (!napi_reschedule(napi))
 			return rx;
 
 		cqe_skb = ehea_proc_cqes(pr, EHEA_POLL_MAX_CQES);
@@ -1547,7 +1544,7 @@ static int ehea_init_port_res(struct ehea_port *port, struct ehea_port_res *pr,
 
 	kfree(init_attr);
 
-	netif_napi_add(pr->port->netdev, &pr->napi, ehea_poll);
+	netif_napi_add(pr->port->netdev, &pr->napi, ehea_poll, 64);
 
 	ret = 0;
 	goto out;
@@ -1618,7 +1615,7 @@ static void write_swqe2_immediate(struct sk_buff *skb, struct ehea_swqe *swqe,
 		 * For TSO packets we only copy the headers into the
 		 * immediate area.
 		 */
-		immediate_len = skb_tcp_all_headers(skb);
+		immediate_len = ETH_HLEN + ip_hdrlen(skb) + tcp_hdrlen(skb);
 	}
 
 	if (skb_is_gso(skb) || skb_data_size >= SWQE2_MAX_IMM) {
@@ -1744,7 +1741,7 @@ static int ehea_set_mac_addr(struct net_device *dev, void *sa)
 		goto out_free;
 	}
 
-	eth_hw_addr_set(dev, mac_addr->sa_data);
+	memcpy(dev->dev_addr, mac_addr->sa_data, dev->addr_len);
 
 	/* Deregister old MAC in pHYP */
 	if (port->state == EHEA_PORT_UP) {
@@ -2990,7 +2987,7 @@ static struct ehea_port *ehea_setup_single_port(struct ehea_adapter *adapter,
 	SET_NETDEV_DEV(dev, port_dev);
 
 	/* initialize net_device structure */
-	eth_hw_addr_set(dev, (u8 *)&port->mac_addr);
+	memcpy(dev->dev_addr, &port->mac_addr, ETH_ALEN);
 
 	dev->netdev_ops = &ehea_netdev_ops;
 	ehea_set_ethtool_ops(dev);
@@ -3471,7 +3468,7 @@ out:
 	return ret;
 }
 
-static void ehea_remove(struct platform_device *dev)
+static int ehea_remove(struct platform_device *dev)
 {
 	struct ehea_adapter *adapter = platform_get_drvdata(dev);
 	int i;
@@ -3492,6 +3489,8 @@ static void ehea_remove(struct platform_device *dev)
 	list_del(&adapter->list);
 
 	ehea_update_firmware_handles();
+
+	return 0;
 }
 
 static int check_module_parm(void)

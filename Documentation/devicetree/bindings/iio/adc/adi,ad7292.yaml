@@ -30,6 +30,8 @@ properties:
 
   spi-cpha: true
 
+  spi-max-frequency: true
+
   '#address-cells':
     const: 1
 
@@ -43,7 +45,7 @@ required:
 
 patternProperties:
   "^channel@[0-7]$":
-    $ref: adc.yaml
+    $ref: "adc.yaml"
     type: object
     description: |
       Represents the external channels which are connected to the ADC.
@@ -61,12 +63,9 @@ patternProperties:
     required:
       - reg
 
-    additionalProperties: false
+    additionalProperties: true
 
-allOf:
-  - $ref: /schemas/spi/spi-peripheral-props.yaml#
-
-unevaluatedProperties: false
+additionalProperties: false
 
 examples:
   - |

@@ -53,12 +53,14 @@ static int journal_read_bucket(struct cache *ca, struct list_head *list,
 reread:		left = ca->sb.bucket_size - offset;
 		len = min_t(unsigned int, left, PAGE_SECTORS << JSET_BITS);
 
-		bio_reset(bio, ca->bdev, REQ_OP_READ);
+		bio_reset(bio);
 		bio->bi_iter.bi_sector	= bucket + offset;
+		bio_set_dev(bio, ca->bdev);
 		bio->bi_iter.bi_size	= len << 9;
 
 		bio->bi_end_io	= journal_read_endio;
 		bio->bi_private = &cl;
+		bio_set_op_attrs(bio, REQ_OP_READ, 0);
 		bch_bio_map(bio, data);
 
 		closure_bio_submit(ca->set, bio, &cl);
@@ -149,8 +151,7 @@ add:
 				    bytes, GFP_KERNEL);
 			if (!i)
 				return -ENOMEM;
-			unsafe_memcpy(&i->j, j, bytes,
-				/* "bytes" was calculated by set_bytes() above */);
+			memcpy(&i->j, j, bytes);
 			/* Add to the location after 'where' points to */
 			list_add(&i->list, where);
 			ret = 1;
@@ -615,9 +616,11 @@ static void do_journal_discard(struct cache *ca)
 
 		atomic_set(&ja->discard_in_flight, DISCARD_IN_FLIGHT);
 
-		bio_init(bio, ca->bdev, bio->bi_inline_vecs, 1, REQ_OP_DISCARD);
+		bio_init(bio, bio->bi_inline_vecs, 1);
+		bio_set_op_attrs(bio, REQ_OP_DISCARD, 0);
 		bio->bi_iter.bi_sector	= bucket_to_sector(ca->set,
 						ca->sb.d[ja->discard_idx]);
+		bio_set_dev(bio, ca->bdev);
 		bio->bi_iter.bi_size	= bucket_bytes(ca);
 		bio->bi_end_io		= journal_discard_endio;
 
@@ -723,11 +726,11 @@ static void journal_write_endio(struct bio *bio)
 	closure_put(&w->c->journal.io);
 }
 
-static CLOSURE_CALLBACK(journal_write);
+static void journal_write(struct closure *cl);
 
-static CLOSURE_CALLBACK(journal_write_done)
+static void journal_write_done(struct closure *cl)
 {
-	closure_type(j, struct journal, io);
+	struct journal *j = container_of(cl, struct journal, io);
 	struct journal_write *w = (j->cur == j->w)
 		? &j->w[1]
 		: &j->w[0];
@@ -736,19 +739,19 @@ static CLOSURE_CALLBACK(journal_write_done)
 	continue_at_nobarrier(cl, journal_write, bch_journal_wq);
 }
 
-static CLOSURE_CALLBACK(journal_write_unlock)
+static void journal_write_unlock(struct closure *cl)
 	__releases(&c->journal.lock)
 {
-	closure_type(c, struct cache_set, journal.io);
+	struct cache_set *c = container_of(cl, struct cache_set, journal.io);
 
 	c->journal.io_in_flight = 0;
 	spin_unlock(&c->journal.lock);
 }
 
-static CLOSURE_CALLBACK(journal_write_unlocked)
+static void journal_write_unlocked(struct closure *cl)
 	__releases(c->journal.lock)
 {
-	closure_type(c, struct cache_set, journal.io);
+	struct cache_set *c = container_of(cl, struct cache_set, journal.io);
 	struct cache *ca = c->cache;
 	struct journal_write *w = c->journal.cur;
 	struct bkey *k = &c->journal.key;
@@ -791,13 +794,15 @@ static CLOSURE_CALLBACK(journal_write_unlocked)
 
 		atomic_long_add(sectors, &ca->meta_sectors_written);
 
-		bio_reset(bio, ca->bdev, REQ_OP_WRITE | 
-			  REQ_SYNC | REQ_META | REQ_PREFLUSH | REQ_FUA);
+		bio_reset(bio);
 		bio->bi_iter.bi_sector	= PTR_OFFSET(k, i);
+		bio_set_dev(bio, ca->bdev);
 		bio->bi_iter.bi_size = sectors << 9;
 
 		bio->bi_end_io	= journal_write_endio;
 		bio->bi_private = w;
+		bio_set_op_attrs(bio, REQ_OP_WRITE,
+				 REQ_SYNC|REQ_META|REQ_PREFLUSH|REQ_FUA);
 		bch_bio_map(bio, w->data);
 
 		trace_bcache_journal_write(bio, w->data->keys);
@@ -823,12 +828,12 @@ static CLOSURE_CALLBACK(journal_write_unlocked)
 	continue_at(cl, journal_write_done, NULL);
 }
 
-static CLOSURE_CALLBACK(journal_write)
+static void journal_write(struct closure *cl)
 {
-	closure_type(c, struct cache_set, journal.io);
+	struct cache_set *c = container_of(cl, struct cache_set, journal.io);
 
 	spin_lock(&c->journal.lock);
-	journal_write_unlocked(&cl->work);
+	journal_write_unlocked(cl);
 }
 
 static void journal_try_write(struct cache_set *c)

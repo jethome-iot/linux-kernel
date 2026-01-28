@@ -44,6 +44,14 @@ struct xfs_dquot_res {
 	 * in seconds since the Unix epoch.
 	 */
 	time64_t		timer;
+
+	/*
+	 * For root dquots, this is the maximum number of warnings that will
+	 * be issued for this quota type.  Otherwise, this is the number of
+	 * warnings issued against this quota.  Note that none of this is
+	 * implemented.
+	 */
+	xfs_qwarncnt_t		warnings;
 };
 
 static inline bool
@@ -234,10 +242,12 @@ static inline struct xfs_dquot *xfs_qm_dqhold(struct xfs_dquot *dqp)
 	return dqp;
 }
 
+typedef int (*xfs_qm_dqiterate_fn)(struct xfs_dquot *dq,
+		xfs_dqtype_t type, void *priv);
+int xfs_qm_dqiterate(struct xfs_mount *mp, xfs_dqtype_t type,
+		xfs_qm_dqiterate_fn iter_fn, void *priv);
+
 time64_t xfs_dquot_set_timeout(struct xfs_mount *mp, time64_t timeout);
 time64_t xfs_dquot_set_grace_period(time64_t grace);
-
-void xfs_qm_init_dquot_blk(struct xfs_trans *tp, xfs_dqid_t id, xfs_dqtype_t
-		type, struct xfs_buf *bp);
 
 #endif /* __XFS_DQUOT_H__ */

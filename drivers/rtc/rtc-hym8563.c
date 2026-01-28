@@ -220,6 +220,24 @@ static int hym8563_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	u8 buf[4];
 	int ret;
 
+	/*
+	 * The alarm has no seconds so deal with it
+	 */
+	if (alm_tm->tm_sec) {
+		alm_tm->tm_sec = 0;
+		alm_tm->tm_min++;
+		if (alm_tm->tm_min >= 60) {
+			alm_tm->tm_min = 0;
+			alm_tm->tm_hour++;
+			if (alm_tm->tm_hour >= 24) {
+				alm_tm->tm_hour = 0;
+				alm_tm->tm_mday++;
+				if (alm_tm->tm_mday > 31)
+					alm_tm->tm_mday = 0;
+			}
+		}
+	}
+
 	ret = i2c_smbus_read_byte_data(client, HYM8563_CTL2);
 	if (ret < 0)
 		return ret;
@@ -495,7 +513,8 @@ static int hym8563_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(hym8563_pm_ops, hym8563_suspend, hym8563_resume);
 
-static int hym8563_probe(struct i2c_client *client)
+static int hym8563_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
 	struct hym8563 *hym8563;
 	int ret;
@@ -503,10 +522,6 @@ static int hym8563_probe(struct i2c_client *client)
 	hym8563 = devm_kzalloc(&client->dev, sizeof(*hym8563), GFP_KERNEL);
 	if (!hym8563)
 		return -ENOMEM;
-
-	hym8563->rtc = devm_rtc_allocate_device(&client->dev);
-	if (IS_ERR(hym8563->rtc))
-		return PTR_ERR(hym8563->rtc);
 
 	hym8563->client = client;
 	i2c_set_clientdata(client, hym8563);
@@ -518,14 +533,9 @@ static int hym8563_probe(struct i2c_client *client)
 	}
 
 	if (client->irq > 0) {
-		unsigned long irqflags = IRQF_TRIGGER_LOW;
-
-		if (dev_fwnode(&client->dev))
-			irqflags = 0;
-
 		ret = devm_request_threaded_irq(&client->dev, client->irq,
 						NULL, hym8563_irq,
-						irqflags | IRQF_ONESHOT,
+						IRQF_TRIGGER_LOW | IRQF_ONESHOT,
 						client->name, hym8563);
 		if (ret < 0) {
 			dev_err(&client->dev, "irq %d request failed, %d\n",
@@ -547,15 +557,19 @@ static int hym8563_probe(struct i2c_client *client)
 	dev_dbg(&client->dev, "rtc information is %s\n",
 		(ret & HYM8563_SEC_VL) ? "invalid" : "valid");
 
-	hym8563->rtc->ops = &hym8563_rtc_ops;
-	set_bit(RTC_FEATURE_ALARM_RES_MINUTE, hym8563->rtc->features);
-	clear_bit(RTC_FEATURE_UPDATE_INTERRUPT, hym8563->rtc->features);
+	hym8563->rtc = devm_rtc_device_register(&client->dev, client->name,
+						&hym8563_rtc_ops, THIS_MODULE);
+	if (IS_ERR(hym8563->rtc))
+		return PTR_ERR(hym8563->rtc);
+
+	/* the hym8563 alarm only supports a minute accuracy */
+	hym8563->rtc->uie_unsupported = 1;
 
 #ifdef CONFIG_COMMON_CLK
 	hym8563_clkout_register_clk(hym8563);
 #endif
 
-	return devm_rtc_register_device(hym8563->rtc);
+	return 0;
 }
 
 static const struct i2c_device_id hym8563_id[] = {

@@ -208,8 +208,8 @@ void usb_serial_put(struct usb_serial *serial)
  *
  * This is the first place a new tty gets used.  Hence this is where we
  * acquire references to the usb_serial structure and the driver module,
- * where we store a pointer to the port.  All these actions are reversed
- * in serial_cleanup().
+ * where we store a pointer to the port, and where we do an autoresume.
+ * All these actions are reversed in serial_cleanup().
  */
 static int serial_install(struct tty_driver *driver, struct tty_struct *tty)
 {
@@ -225,13 +225,17 @@ static int serial_install(struct tty_driver *driver, struct tty_struct *tty)
 
 	serial = port->serial;
 	if (!try_module_get(serial->type->driver.owner))
-		goto err_put_serial;
+		goto error_module_get;
+
+	retval = usb_autopm_get_interface(serial->interface);
+	if (retval)
+		goto error_get_interface;
 
 	init_termios = (driver->termios[idx] == NULL);
 
 	retval = tty_standard_install(driver, tty);
 	if (retval)
-		goto err_put_module;
+		goto error_init_termios;
 
 	mutex_unlock(&serial->disc_mutex);
 
@@ -243,9 +247,11 @@ static int serial_install(struct tty_driver *driver, struct tty_struct *tty)
 
 	return retval;
 
-err_put_module:
+ error_init_termios:
+	usb_autopm_put_interface(serial->interface);
+ error_get_interface:
 	module_put(serial->type->driver.owner);
-err_put_serial:
+ error_module_get:
 	usb_serial_put(serial);
 	mutex_unlock(&serial->disc_mutex);
 	return retval;
@@ -259,19 +265,10 @@ static int serial_port_activate(struct tty_port *tport, struct tty_struct *tty)
 	int retval;
 
 	mutex_lock(&serial->disc_mutex);
-	if (serial->disconnected) {
+	if (serial->disconnected)
 		retval = -ENODEV;
-		goto out_unlock;
-	}
-
-	retval = usb_autopm_get_interface(serial->interface);
-	if (retval)
-		goto out_unlock;
-
-	retval = port->serial->type->open(tty, port);
-	if (retval)
-		usb_autopm_put_interface(serial->interface);
-out_unlock:
+	else
+		retval = port->serial->type->open(tty, port);
 	mutex_unlock(&serial->disc_mutex);
 
 	if (retval < 0)
@@ -307,8 +304,6 @@ static void serial_port_shutdown(struct tty_port *tport)
 
 	if (drv->close)
 		drv->close(port);
-
-	usb_autopm_put_interface(port->serial->interface);
 }
 
 static void serial_hangup(struct tty_struct *tty)
@@ -357,11 +352,14 @@ static void serial_cleanup(struct tty_struct *tty)
 	serial = port->serial;
 	owner = serial->type->driver.owner;
 
+	usb_autopm_put_interface(serial->interface);
+
 	usb_serial_put(serial);
 	module_put(owner);
 }
 
-static ssize_t serial_write(struct tty_struct *tty, const u8 *buf, size_t count)
+static int serial_write(struct tty_struct *tty, const unsigned char *buf,
+								int count)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	int retval = -ENODEV;
@@ -369,7 +367,7 @@ static ssize_t serial_write(struct tty_struct *tty, const u8 *buf, size_t count)
 	if (port->serial->dev->state == USB_STATE_NOTATTACHED)
 		goto exit;
 
-	dev_dbg(&port->dev, "%s - %zu byte(s)\n", __func__, count);
+	dev_dbg(&port->dev, "%s - %d byte(s)\n", __func__, count);
 
 	retval = port->serial->type->write(tty, port, buf, count);
 	if (retval < 0)
@@ -518,8 +516,7 @@ static int serial_ioctl(struct tty_struct *tty,
 	return retval;
 }
 
-static void serial_set_termios(struct tty_struct *tty,
-		               const struct ktermios *old)
+static void serial_set_termios(struct tty_struct *tty, struct ktermios *old)
 {
 	struct usb_serial_port *port = tty->driver_data;
 
@@ -538,9 +535,9 @@ static int serial_break(struct tty_struct *tty, int break_state)
 	dev_dbg(&port->dev, "%s\n", __func__);
 
 	if (port->serial->type->break_ctl)
-		return port->serial->type->break_ctl(tty, break_state);
+		port->serial->type->break_ctl(tty, break_state);
 
-	return -ENOTTY;
+	return 0;
 }
 
 static int serial_proc_show(struct seq_file *m, void *v)
@@ -753,7 +750,7 @@ static struct usb_serial_driver *search_serial_device(
 	return NULL;
 }
 
-static bool serial_port_carrier_raised(struct tty_port *port)
+static int serial_port_carrier_raised(struct tty_port *port)
 {
 	struct usb_serial_port *p = container_of(port, struct usb_serial_port, port);
 	struct usb_serial_driver *drv = p->serial->type;
@@ -761,10 +758,10 @@ static bool serial_port_carrier_raised(struct tty_port *port)
 	if (drv->carrier_raised)
 		return drv->carrier_raised(p);
 	/* No carrier control - don't block */
-	return true;
+	return 1;
 }
 
-static void serial_port_dtr_rts(struct tty_port *port, bool on)
+static void serial_port_dtr_rts(struct tty_port *port, int on)
 {
 	struct usb_serial_port *p = container_of(port, struct usb_serial_port, port);
 	struct usb_serial_driver *drv = p->serial->type;
@@ -1331,7 +1328,7 @@ static int __init usb_serial_init(void)
 	result = bus_register(&usb_serial_bus_type);
 	if (result) {
 		pr_err("%s - registering bus driver failed\n", __func__);
-		goto err_put_driver;
+		goto exit_bus;
 	}
 
 	usb_serial_tty_driver->driver_name = "usbserial";
@@ -1349,23 +1346,25 @@ static int __init usb_serial_init(void)
 	result = tty_register_driver(usb_serial_tty_driver);
 	if (result) {
 		pr_err("%s - tty_register_driver failed\n", __func__);
-		goto err_unregister_bus;
+		goto exit_reg_driver;
 	}
 
 	/* register the generic driver, if we should */
 	result = usb_serial_generic_register();
 	if (result < 0) {
 		pr_err("%s - registering generic driver failed\n", __func__);
-		goto err_unregister_driver;
+		goto exit_generic;
 	}
 
 	return result;
 
-err_unregister_driver:
+exit_generic:
 	tty_unregister_driver(usb_serial_tty_driver);
-err_unregister_bus:
+
+exit_reg_driver:
 	bus_unregister(&usb_serial_bus_type);
-err_put_driver:
+
+exit_bus:
 	pr_err("%s - returning with error %d\n", __func__, result);
 	tty_driver_kref_put(usb_serial_tty_driver);
 	return result;
@@ -1510,25 +1509,25 @@ int usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[]
 
 	rc = usb_register(udriver);
 	if (rc)
-		goto err_free_driver;
+		goto failed_usb_register;
 
 	for (sd = serial_drivers; *sd; ++sd) {
 		(*sd)->usb_driver = udriver;
 		rc = usb_serial_register(*sd);
 		if (rc)
-			goto err_deregister_drivers;
+			goto failed;
 	}
 
 	/* Now set udriver's id_table and look for matches */
 	udriver->id_table = id_table;
-	rc = driver_attach(&udriver->driver);
+	rc = driver_attach(&udriver->drvwrap.driver);
 	return 0;
 
-err_deregister_drivers:
+ failed:
 	while (sd-- > serial_drivers)
 		usb_serial_deregister(*sd);
 	usb_deregister(udriver);
-err_free_driver:
+failed_usb_register:
 	kfree(udriver);
 	return rc;
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
+// SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
 /* Copyright (c) 2015 - 2021 Intel Corporation */
 #include "main.h"
 #include "i40iw_hw.h"
@@ -139,7 +139,7 @@ static int i40iw_open(struct i40e_info *cdev_info, struct i40e_client *client)
 		if (last_qset == IRDMA_NO_QSET)
 			last_qset = qset;
 		else if ((qset != last_qset) && (qset != IRDMA_NO_QSET))
-			iwdev->dcb_vlan_mode = true;
+			iwdev->dcb = true;
 	}
 
 	if (irdma_rt_init_hw(iwdev, &l2params)) {
@@ -186,7 +186,7 @@ static int i40iw_probe(struct auxiliary_device *aux_dev, const struct auxiliary_
 							       aux_dev);
 	struct i40e_info *cdev_info = i40e_adev->ldev;
 
-	strscpy_pad(i40iw_client.name, "irdma", I40E_CLIENT_STR_LENGTH);
+	strncpy(i40iw_client.name, "irdma", I40E_CLIENT_STR_LENGTH);
 	i40e_client_device_register(cdev_info, &i40iw_client);
 
 	return 0;
@@ -199,7 +199,7 @@ static void i40iw_remove(struct auxiliary_device *aux_dev)
 							       aux_dev);
 	struct i40e_info *cdev_info = i40e_adev->ldev;
 
-	i40e_client_device_unregister(cdev_info);
+	return i40e_client_device_unregister(cdev_info);
 }
 
 static const struct auxiliary_device_id i40iw_auxiliary_id_table[] = {

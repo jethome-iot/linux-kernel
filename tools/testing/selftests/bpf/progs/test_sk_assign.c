@@ -15,7 +15,6 @@
 #include <sys/socket.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
-#include "bpf_misc.h"
 
 #if defined(IPROUTE2_HAVE_LIBBPF)
 /* Use a new-style map definition. */
@@ -48,6 +47,7 @@ struct {
 };
 #endif
 
+int _version SEC("version") = 1;
 char _license[] SEC("license") = "GPL";
 
 /* Fill 'tuple' with L3 info, and attempt to find L4. On fail, return NULL. */
@@ -58,6 +58,7 @@ get_tuple(struct __sk_buff *skb, bool *ipv4, bool *tcp)
 	void *data = (void *)(long)skb->data;
 	struct bpf_sock_tuple *result;
 	struct ethhdr *eth;
+	__u64 tuple_len;
 	__u8 proto = 0;
 	__u64 ihl_len;
 
@@ -94,13 +95,13 @@ get_tuple(struct __sk_buff *skb, bool *ipv4, bool *tcp)
 		return NULL;
 
 	*tcp = (proto == IPPROTO_TCP);
-	__sink(ihl_len);
 	return result;
 }
 
 static inline int
 handle_udp(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, bool ipv4)
 {
+	struct bpf_sock_tuple ln = {0};
 	struct bpf_sock *sk;
 	const int zero = 0;
 	size_t tuple_len;
@@ -132,6 +133,7 @@ assign:
 static inline int
 handle_tcp(struct __sk_buff *skb, struct bpf_sock_tuple *tuple, bool ipv4)
 {
+	struct bpf_sock_tuple ln = {0};
 	struct bpf_sock *sk;
 	const int zero = 0;
 	size_t tuple_len;
@@ -168,12 +170,13 @@ assign:
 	return ret;
 }
 
-SEC("tc")
+SEC("classifier/sk_assign_test")
 int bpf_sk_assign_test(struct __sk_buff *skb)
 {
-	struct bpf_sock_tuple *tuple;
+	struct bpf_sock_tuple *tuple, ln = {0};
 	bool ipv4 = false;
 	bool tcp = false;
+	int tuple_len;
 	int ret = 0;
 
 	tuple = get_tuple(skb, &ipv4, &tcp);

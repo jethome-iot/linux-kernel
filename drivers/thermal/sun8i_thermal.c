@@ -14,7 +14,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/nvmem-consumer.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
@@ -55,6 +55,8 @@
 #define SUN50I_THS_FILTER_TYPE(x)		(GENMASK(1, 0) & (x))
 #define SUN50I_H6_THS_PC_TEMP_PERIOD(x)		((GENMASK(19, 0) & (x)) << 12)
 #define SUN50I_H6_THS_DATA_IRQ_STS(x)		BIT(x)
+
+/* millidegree celsius */
 
 struct tsensor {
 	struct ths_device		*tmdev;
@@ -106,9 +108,9 @@ static int sun50i_h5_calc_temp(struct ths_device *tmdev,
 		return -1590 * reg / 10 + 276000;
 }
 
-static int sun8i_ths_get_temp(struct thermal_zone_device *tz, int *temp)
+static int sun8i_ths_get_temp(void *data, int *temp)
 {
-	struct tsensor *s = thermal_zone_device_priv(tz);
+	struct tsensor *s = data;
 	struct ths_device *tmdev = s->tmdev;
 	int val = 0;
 
@@ -133,7 +135,7 @@ static int sun8i_ths_get_temp(struct thermal_zone_device *tz, int *temp)
 	return 0;
 }
 
-static const struct thermal_zone_device_ops ths_ops = {
+static const struct thermal_zone_of_device_ops ths_ops = {
 	.get_temp = sun8i_ths_get_temp,
 };
 
@@ -208,7 +210,7 @@ static int sun8i_h3_ths_calibrate(struct ths_device *tmdev,
 
 		regmap_update_bits(tmdev->regmap,
 				   SUN8I_THS_TEMP_CALIB + (4 * (i >> 1)),
-				   TEMP_CALIB_MASK << offset,
+				   0xfff << offset,
 				   caldata[i] << offset);
 	}
 
@@ -235,7 +237,7 @@ static int sun50i_h6_ths_calibrate(struct ths_device *tmdev,
 	 * The calibration data on the H6 is the ambient temperature and
 	 * sensor values that are filled during the factory test stage.
 	 *
-	 * The unit of stored FT temperature is 0.1 degree celsius.
+	 * The unit of stored FT temperature is 0.1 degreee celusis.
 	 *
 	 * We need to calculate a delta between measured and caluclated
 	 * register values and this will become a calibration offset.
@@ -269,7 +271,7 @@ static int sun50i_h6_ths_calibrate(struct ths_device *tmdev,
 		offset = (i % 2) * 16;
 		regmap_update_bits(tmdev->regmap,
 				   SUN50I_H6_THS_TEMP_CALIB + (i / 2 * 4),
-				   TEMP_CALIB_MASK << offset,
+				   0xfff << offset,
 				   cdata << offset);
 	}
 
@@ -284,7 +286,7 @@ static int sun8i_ths_calibrate(struct ths_device *tmdev)
 	size_t callen;
 	int ret = 0;
 
-	calcell = nvmem_cell_get(dev, "calibration");
+	calcell = devm_nvmem_cell_get(dev, "calibration");
 	if (IS_ERR(calcell)) {
 		if (PTR_ERR(calcell) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
@@ -314,8 +316,6 @@ static int sun8i_ths_calibrate(struct ths_device *tmdev)
 
 	kfree(caldata);
 out:
-	if (!IS_ERR(calcell))
-		nvmem_cell_put(calcell);
 	return ret;
 }
 
@@ -461,14 +461,16 @@ static int sun8i_ths_register(struct ths_device *tmdev)
 		tmdev->sensor[i].tmdev = tmdev;
 		tmdev->sensor[i].id = i;
 		tmdev->sensor[i].tzd =
-			devm_thermal_of_zone_register(tmdev->dev,
-						      i,
-						      &tmdev->sensor[i],
-						      &ths_ops);
+			devm_thermal_zone_of_sensor_register(tmdev->dev,
+							     i,
+							     &tmdev->sensor[i],
+							     &ths_ops);
 		if (IS_ERR(tmdev->sensor[i].tzd))
 			return PTR_ERR(tmdev->sensor[i].tzd);
 
-		devm_thermal_add_hwmon_sysfs(tmdev->dev, tmdev->sensor[i].tzd);
+		if (devm_thermal_add_hwmon_sysfs(tmdev->sensor[i].tzd))
+			dev_warn(tmdev->dev,
+				 "Failed to add hwmon sysfs attributes\n");
 	}
 
 	return 0;
@@ -488,6 +490,8 @@ static int sun8i_ths_probe(struct platform_device *pdev)
 	tmdev->chip = of_device_get_match_data(&pdev->dev);
 	if (!tmdev->chip)
 		return -EINVAL;
+
+	platform_set_drvdata(pdev, tmdev);
 
 	ret = sun8i_ths_resource_init(tmdev);
 	if (ret)
@@ -606,18 +610,6 @@ static const struct ths_thermal_chip sun50i_h6_ths = {
 	.calc_temp = sun8i_ths_calc_temp,
 };
 
-static const struct ths_thermal_chip sun20i_d1_ths = {
-	.sensor_num = 1,
-	.has_bus_clk_reset = true,
-	.offset = 188552,
-	.scale = 673,
-	.temp_data_base = SUN50I_H6_THS_TEMP_DATA,
-	.calibrate = sun50i_h6_ths_calibrate,
-	.init = sun50i_h6_thermal_init,
-	.irq_ack = sun50i_h6_irq_ack,
-	.calc_temp = sun8i_ths_calc_temp,
-};
-
 static const struct of_device_id of_ths_match[] = {
 	{ .compatible = "allwinner,sun8i-a83t-ths", .data = &sun8i_a83t_ths },
 	{ .compatible = "allwinner,sun8i-h3-ths", .data = &sun8i_h3_ths },
@@ -626,7 +618,6 @@ static const struct of_device_id of_ths_match[] = {
 	{ .compatible = "allwinner,sun50i-a100-ths", .data = &sun50i_a100_ths },
 	{ .compatible = "allwinner,sun50i-h5-ths", .data = &sun50i_h5_ths },
 	{ .compatible = "allwinner,sun50i-h6-ths", .data = &sun50i_h6_ths },
-	{ .compatible = "allwinner,sun20i-d1-ths", .data = &sun20i_d1_ths },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, of_ths_match);

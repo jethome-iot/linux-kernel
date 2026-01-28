@@ -17,10 +17,11 @@
 #include <linux/kmemleak.h>
 #include <linux/export.h>
 #include <linux/mempool.h>
+#include <linux/blkdev.h>
 #include <linux/writeback.h>
 #include "slab.h"
 
-#ifdef CONFIG_SLUB_DEBUG_ON
+#if defined(CONFIG_DEBUG_SLAB) || defined(CONFIG_SLUB_DEBUG_ON)
 static void poison_error(mempool_t *pool, void *element, size_t size,
 			 size_t byte)
 {
@@ -56,22 +57,16 @@ static void __check_element(mempool_t *pool, void *element, size_t size)
 
 static void check_element(mempool_t *pool, void *element)
 {
-	/* Skip checking: KASAN might save its metadata in the element. */
-	if (kasan_enabled())
-		return;
-
 	/* Mempools backed by slab allocator */
-	if (pool->free == mempool_kfree) {
-		__check_element(pool, element, (size_t)pool->pool_data);
-	} else if (pool->free == mempool_free_slab) {
-		__check_element(pool, element, kmem_cache_size(pool->pool_data));
+	if (pool->free == mempool_free_slab || pool->free == mempool_kfree) {
+		__check_element(pool, element, ksize(element));
 	} else if (pool->free == mempool_free_pages) {
 		/* Mempools backed by page allocator */
 		int order = (int)(long)pool->pool_data;
-		void *addr = kmap_local_page((struct page *)element);
+		void *addr = kmap_atomic((struct page *)element);
 
 		__check_element(pool, addr, 1UL << (PAGE_SHIFT + order));
-		kunmap_local(addr);
+		kunmap_atomic(addr);
 	}
 }
 
@@ -85,61 +80,51 @@ static void __poison_element(void *element, size_t size)
 
 static void poison_element(mempool_t *pool, void *element)
 {
-	/* Skip poisoning: KASAN might save its metadata in the element. */
-	if (kasan_enabled())
-		return;
-
 	/* Mempools backed by slab allocator */
-	if (pool->alloc == mempool_kmalloc) {
-		__poison_element(element, (size_t)pool->pool_data);
-	} else if (pool->alloc == mempool_alloc_slab) {
-		__poison_element(element, kmem_cache_size(pool->pool_data));
+	if (pool->alloc == mempool_alloc_slab || pool->alloc == mempool_kmalloc) {
+		__poison_element(element, ksize(element));
 	} else if (pool->alloc == mempool_alloc_pages) {
 		/* Mempools backed by page allocator */
 		int order = (int)(long)pool->pool_data;
-		void *addr = kmap_local_page((struct page *)element);
+		void *addr = kmap_atomic((struct page *)element);
 
 		__poison_element(addr, 1UL << (PAGE_SHIFT + order));
-		kunmap_local(addr);
+		kunmap_atomic(addr);
 	}
 }
-#else /* CONFIG_SLUB_DEBUG_ON */
+#else /* CONFIG_DEBUG_SLAB || CONFIG_SLUB_DEBUG_ON */
 static inline void check_element(mempool_t *pool, void *element)
 {
 }
 static inline void poison_element(mempool_t *pool, void *element)
 {
 }
-#endif /* CONFIG_SLUB_DEBUG_ON */
+#endif /* CONFIG_DEBUG_SLAB || CONFIG_SLUB_DEBUG_ON */
 
-static __always_inline bool kasan_poison_element(mempool_t *pool, void *element)
+static __always_inline void kasan_poison_element(mempool_t *pool, void *element)
 {
 	if (pool->alloc == mempool_alloc_slab || pool->alloc == mempool_kmalloc)
-		return kasan_mempool_poison_object(element);
+		kasan_slab_free_mempool(element);
 	else if (pool->alloc == mempool_alloc_pages)
-		return kasan_mempool_poison_pages(element,
-						(unsigned long)pool->pool_data);
-	return true;
+		kasan_poison_pages(element, (unsigned long)pool->pool_data,
+				   false);
 }
 
 static void kasan_unpoison_element(mempool_t *pool, void *element)
 {
-	if (pool->alloc == mempool_kmalloc)
-		kasan_mempool_unpoison_object(element, (size_t)pool->pool_data);
-	else if (pool->alloc == mempool_alloc_slab)
-		kasan_mempool_unpoison_object(element,
-					      kmem_cache_size(pool->pool_data));
+	if (pool->alloc == mempool_alloc_slab || pool->alloc == mempool_kmalloc)
+		kasan_unpoison_range(element, __ksize(element));
 	else if (pool->alloc == mempool_alloc_pages)
-		kasan_mempool_unpoison_pages(element,
-					     (unsigned long)pool->pool_data);
+		kasan_unpoison_pages(element, (unsigned long)pool->pool_data,
+				     false);
 }
 
 static __always_inline void add_element(mempool_t *pool, void *element)
 {
 	BUG_ON(pool->curr_nr >= pool->min_nr);
 	poison_element(pool, element);
-	if (kasan_poison_element(pool, element))
-		pool->elements[pool->curr_nr++] = element;
+	kasan_poison_element(pool, element);
+	pool->elements[pool->curr_nr++] = element;
 }
 
 static void *remove_element(mempool_t *pool)
@@ -395,7 +380,7 @@ void *mempool_alloc(mempool_t *pool, gfp_t gfp_mask)
 	gfp_t gfp_temp;
 
 	VM_WARN_ON_ONCE(gfp_mask & __GFP_ZERO);
-	might_alloc(gfp_mask);
+	might_sleep_if(gfp_mask & __GFP_DIRECT_RECLAIM);
 
 	gfp_mask |= __GFP_NOMEMALLOC;	/* don't allocate emergency reserves */
 	gfp_mask |= __GFP_NORETRY;	/* don't loop in __alloc_pages */
@@ -455,43 +440,6 @@ repeat_alloc:
 	goto repeat_alloc;
 }
 EXPORT_SYMBOL(mempool_alloc);
-
-/**
- * mempool_alloc_preallocated - allocate an element from preallocated elements
- *                              belonging to a specific memory pool
- * @pool:      pointer to the memory pool which was allocated via
- *             mempool_create().
- *
- * This function is similar to mempool_alloc, but it only attempts allocating
- * an element from the preallocated elements. It does not sleep and immediately
- * returns if no preallocated elements are available.
- *
- * Return: pointer to the allocated element or %NULL if no elements are
- * available.
- */
-void *mempool_alloc_preallocated(mempool_t *pool)
-{
-	void *element;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pool->lock, flags);
-	if (likely(pool->curr_nr)) {
-		element = remove_element(pool);
-		spin_unlock_irqrestore(&pool->lock, flags);
-		/* paired with rmb in mempool_free(), read comment there */
-		smp_wmb();
-		/*
-		 * Update the allocation stack trace as this is more useful
-		 * for debugging.
-		 */
-		kmemleak_update_trace(element);
-		return element;
-	}
-	spin_unlock_irqrestore(&pool->lock, flags);
-
-	return NULL;
-}
-EXPORT_SYMBOL(mempool_alloc_preallocated);
 
 /**
  * mempool_free - return an element to the pool.

@@ -24,7 +24,6 @@
  *
  **************************************************************************/
 
-#include "vmwgfx_bo.h"
 #include "vmwgfx_drv.h"
 #include "vmwgfx_resource_priv.h"
 #include "vmwgfx_so.h"
@@ -71,7 +70,7 @@ struct vmw_view {
 	unsigned view_id;              /* Immutable */
 	u32 cmd_size;                  /* Immutable */
 	bool committed;                /* Protected by binding_mutex */
-	u32 cmd[];		       /* Immutable */
+	u32 cmd[1];                    /* Immutable */
 };
 
 static int vmw_view_create(struct vmw_resource *res);
@@ -82,11 +81,10 @@ static void vmw_view_commit_notify(struct vmw_resource *res,
 
 static const struct vmw_res_func vmw_view_func = {
 	.res_type = vmw_res_view,
-	.needs_guest_memory = false,
+	.needs_backup = false,
 	.may_evict = false,
 	.type_name = "DX view",
-	.domain = VMW_BO_DOMAIN_SYS,
-	.busy_domain = VMW_BO_DOMAIN_SYS,
+	.backup_placement = NULL,
 	.create = vmw_view_create,
 	.commit_notify = vmw_view_commit_notify,
 };
@@ -281,15 +279,18 @@ static bool vmw_view_id_ok(u32 user_key, enum vmw_view_type view_type)
  *
  * @res: Pointer to a struct vmw_resource
  *
- * Frees memory held by the struct vmw_view.
+ * Frees memory and memory accounting held by a struct vmw_view.
  */
 static void vmw_view_res_free(struct vmw_resource *res)
 {
 	struct vmw_view *view = vmw_view(res);
+	size_t size = offsetof(struct vmw_view, cmd) + view->cmd_size;
+	struct vmw_private *dev_priv = res->dev_priv;
 
 	vmw_resource_unreference(&view->cotable);
 	vmw_resource_unreference(&view->srf);
 	kfree_rcu(view, rcu);
+	ttm_mem_global_free(vmw_mem_glob(dev_priv), size);
 }
 
 /**
@@ -326,6 +327,10 @@ int vmw_view_add(struct vmw_cmdbuf_res_manager *man,
 	struct vmw_private *dev_priv = ctx->dev_priv;
 	struct vmw_resource *res;
 	struct vmw_view *view;
+	struct ttm_operation_ctx ttm_opt_ctx = {
+		.interruptible = true,
+		.no_wait_gpu = false
+	};
 	size_t size;
 	int ret;
 
@@ -342,8 +347,16 @@ int vmw_view_add(struct vmw_cmdbuf_res_manager *man,
 
 	size = offsetof(struct vmw_view, cmd) + cmd_size;
 
+	ret = ttm_mem_global_alloc(vmw_mem_glob(dev_priv), size, &ttm_opt_ctx);
+	if (ret) {
+		if (ret != -ERESTARTSYS)
+			DRM_ERROR("Out of graphics memory for view creation\n");
+		return ret;
+	}
+
 	view = kmalloc(size, GFP_KERNEL);
 	if (!view) {
+		ttm_mem_global_free(vmw_mem_glob(dev_priv), size);
 		return -ENOMEM;
 	}
 
@@ -569,8 +582,4 @@ static void vmw_so_build_asserts(void)
 		     offsetof(SVGA3dCmdDXDefineRenderTargetView, sid));
 	BUILD_BUG_ON(offsetof(struct vmw_view_define, sid) !=
 		     offsetof(SVGA3dCmdDXDefineDepthStencilView, sid));
-	BUILD_BUG_ON(offsetof(struct vmw_view_define, sid) !=
-		     offsetof(SVGA3dCmdDXDefineUAView, sid));
-	BUILD_BUG_ON(offsetof(struct vmw_view_define, sid) !=
-		     offsetof(SVGA3dCmdDXDefineDepthStencilView_v2, sid));
 }

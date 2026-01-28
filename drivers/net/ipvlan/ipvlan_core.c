@@ -19,10 +19,10 @@ void ipvlan_count_rx(const struct ipvl_dev *ipvlan,
 
 		pcptr = this_cpu_ptr(ipvlan->pcpu_stats);
 		u64_stats_update_begin(&pcptr->syncp);
-		u64_stats_inc(&pcptr->rx_pkts);
-		u64_stats_add(&pcptr->rx_bytes, len);
+		pcptr->rx_pkts++;
+		pcptr->rx_bytes += len;
 		if (mcast)
-			u64_stats_inc(&pcptr->rx_mcast);
+			pcptr->rx_mcast++;
 		u64_stats_update_end(&pcptr->syncp);
 	} else {
 		this_cpu_inc(ipvlan->pcpu_stats->rx_errs);
@@ -157,7 +157,7 @@ void *ipvlan_get_L3_hdr(struct ipvl_port *port, struct sk_buff *skb, int *type)
 			return NULL;
 
 		ip4h = ip_hdr(skb);
-		pktlen = skb_ip_totlen(skb);
+		pktlen = ntohs(ip4h->tot_len);
 		if (ip4h->ihl < 5 || ip4h->version != 4)
 			return NULL;
 		if (skb->len < pktlen || pktlen < (ip4h->ihl * 4))
@@ -291,7 +291,8 @@ void ipvlan_process_multicast(struct work_struct *work)
 			else
 				kfree_skb(skb);
 		}
-		dev_put(dev);
+		if (dev)
+			dev_put(dev);
 		cond_resched();
 	}
 }
@@ -564,13 +565,14 @@ static void ipvlan_multicast_enqueue(struct ipvl_port *port,
 
 	spin_lock(&port->backlog.lock);
 	if (skb_queue_len(&port->backlog) < IPVLAN_QBACKLOG_LIMIT) {
-		dev_hold(skb->dev);
+		if (skb->dev)
+			dev_hold(skb->dev);
 		__skb_queue_tail(&port->backlog, skb);
 		spin_unlock(&port->backlog.lock);
 		schedule_work(&port->wq);
 	} else {
 		spin_unlock(&port->backlog.lock);
-		dev_core_stats_rx_dropped_inc(skb->dev);
+		atomic_long_inc(&skb->dev->rx_dropped);
 		kfree_skb(skb);
 	}
 }

@@ -22,6 +22,30 @@
 #define arch_irq_stat() 0
 #endif
 
+#ifdef arch_idle_time
+
+u64 get_idle_time(struct kernel_cpustat *kcs, int cpu)
+{
+	u64 idle;
+
+	idle = kcs->cpustat[CPUTIME_IDLE];
+	if (cpu_online(cpu) && !nr_iowait_cpu(cpu))
+		idle += arch_idle_time(cpu);
+	return idle;
+}
+
+static u64 get_iowait_time(struct kernel_cpustat *kcs, int cpu)
+{
+	u64 iowait;
+
+	iowait = kcs->cpustat[CPUTIME_IOWAIT];
+	if (cpu_online(cpu) && nr_iowait_cpu(cpu))
+		iowait += arch_idle_time(cpu);
+	return iowait;
+}
+
+#else
+
 u64 get_idle_time(struct kernel_cpustat *kcs, int cpu)
 {
 	u64 idle, idle_usecs = -1ULL;
@@ -53,6 +77,8 @@ static u64 get_iowait_time(struct kernel_cpustat *kcs, int cpu)
 
 	return iowait;
 }
+
+#endif
 
 static void show_irq_gap(struct seq_file *p, unsigned int gap)
 {
@@ -100,6 +126,10 @@ static int show_stat(struct seq_file *p, void *v)
 		struct kernel_cpustat kcpustat;
 		u64 *cpustat = kcpustat.cpustat;
 
+#ifdef CONFIG_AMLOGIC_APU
+		if (apu_enable && i == apu_id)
+			continue;
+#endif
 		kcpustat_cpu_fetch(&kcpustat, i);
 
 		user		+= cpustat[CPUTIME_USER];
@@ -140,6 +170,10 @@ static int show_stat(struct seq_file *p, void *v)
 		struct kernel_cpustat kcpustat;
 		u64 *cpustat = kcpustat.cpustat;
 
+#ifdef CONFIG_AMLOGIC_APU
+		if (apu_enable && i == apu_id)
+			continue;
+#endif
 		kcpustat_cpu_fetch(&kcpustat, i);
 
 		/* Copy values here to work around gcc-2.95.3, gcc-2.96 */

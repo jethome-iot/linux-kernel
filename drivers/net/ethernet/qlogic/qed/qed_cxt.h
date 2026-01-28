@@ -346,10 +346,7 @@ struct qed_cxt_mngr {
 	/* Maximal number of L2 steering filters */
 	u32 arfs_count;
 
-	u16 iscsi_task_pages;
-	u16 fcoe_task_pages;
-	u16 roce_task_pages;
-	u16 eth_task_pages;
+	u8 task_type_id;
 	u16 task_ctx_size;
 	u16 conn_ctx_size;
 };

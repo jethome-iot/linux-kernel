@@ -31,6 +31,7 @@
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/thread_info.h>
+#include <linux/android_vendor.h>
 
 #include <vdso/processor.h>
 
@@ -92,8 +93,8 @@
 #endif /* CONFIG_COMPAT */
 
 #ifndef CONFIG_ARM64_FORCE_52BIT
-#define arch_get_mmap_end(addr, len, flags) \
-		(((addr) > DEFAULT_MAP_WINDOW) ? TASK_SIZE : DEFAULT_MAP_WINDOW)
+#define arch_get_mmap_end(addr) ((addr > DEFAULT_MAP_WINDOW) ? TASK_SIZE :\
+				DEFAULT_MAP_WINDOW)
 
 #define arch_get_mmap_base(addr, base) ((addr > DEFAULT_MAP_WINDOW) ? \
 					base + TASK_SIZE - DEFAULT_MAP_WINDOW :\
@@ -120,12 +121,6 @@ enum vec_type {
 	ARM64_VEC_SVE = 0,
 	ARM64_VEC_SME,
 	ARM64_VEC_MAX,
-};
-
-enum fp_type {
-	FP_STATE_CURRENT,	/* Save based on current task state. */
-	FP_STATE_FPSIMD,
-	FP_STATE_SVE,
 };
 
 struct cpu_context {
@@ -158,18 +153,16 @@ struct thread_struct {
 		struct user_fpsimd_state fpsimd_state;
 	} uw;
 
-	enum fp_type		fp_type;	/* registers FPSIMD or SVE? */
+	ANDROID_VENDOR_DATA(1);
+
 	unsigned int		fpsimd_cpu;
 	void			*sve_state;	/* SVE registers, if any */
-	void			*sme_state;	/* ZA and ZT state, if any */
+	void			*za_state;	/* ZA register, if any */
 	unsigned int		vl[ARM64_VEC_MAX];	/* vector length */
 	unsigned int		vl_onexec[ARM64_VEC_MAX]; /* vl after next exec */
 	unsigned long		fault_address;	/* fault info */
 	unsigned long		fault_code;	/* ESR_EL1 value */
 	struct debug_info	debug;		/* debugging */
-
-	struct user_fpsimd_state	kernel_fpsimd_state;
-	unsigned int			kernel_fpsimd_cpu;
 #ifdef CONFIG_ARM64_PTR_AUTH
 	struct ptrauth_keys_user	keys_user;
 #ifdef CONFIG_ARM64_PTR_AUTH_KERNEL
@@ -333,7 +326,10 @@ static __always_inline bool is_ttbr1_addr(unsigned long addr)
 /* Forward declaration, a strange C thing */
 struct task_struct;
 
-unsigned long __get_wchan(struct task_struct *p);
+/* Free all resources held by a thread. */
+extern void release_thread(struct task_struct *);
+
+unsigned long get_wchan(struct task_struct *p);
 
 void update_sctlr_el1(u64 sctlr);
 
@@ -360,6 +356,14 @@ static inline void prefetch(const void *ptr)
 static inline void prefetchw(const void *ptr)
 {
 	asm volatile("prfm pstl1keep, %a0\n" : : "p" (ptr));
+}
+
+#define ARCH_HAS_SPINLOCK_PREFETCH
+static inline void spin_lock_prefetch(const void *ptr)
+{
+	asm volatile(ARM64_LSE_ATOMIC_INSN(
+		     "prfm pstl1strm, %a0",
+		     "nop") : : "p" (ptr));
 }
 
 extern unsigned long __ro_after_init signal_minsigstksz; /* sigframe size */
@@ -397,6 +401,19 @@ long get_tagged_addr_ctrl(struct task_struct *task);
 #define SET_TAGGED_ADDR_CTRL(arg)	set_tagged_addr_ctrl(current, arg)
 #define GET_TAGGED_ADDR_CTRL()		get_tagged_addr_ctrl(current)
 #endif
+
+/*
+ * For CONFIG_GCC_PLUGIN_STACKLEAK
+ *
+ * These need to be macros because otherwise we get stuck in a nightmare
+ * of header definitions for the use of task_stack_page.
+ */
+
+/*
+ * The top of the current task's task stack
+ */
+#define current_top_of_stack()	((unsigned long)current->stack + THREAD_SIZE)
+#define on_thread_stack()	(on_task_stack(current, current_stack_pointer, 1, NULL))
 
 #endif /* __ASSEMBLY__ */
 #endif /* __ASM_PROCESSOR_H */

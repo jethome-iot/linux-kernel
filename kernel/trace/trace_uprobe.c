@@ -7,7 +7,6 @@
  */
 #define pr_fmt(fmt)	"trace_uprobe: " fmt
 
-#include <linux/bpf-cgroup.h>
 #include <linux/security.h>
 #include <linux/ctype.h>
 #include <linux/module.h>
@@ -16,7 +15,6 @@
 #include <linux/namei.h>
 #include <linux/string.h>
 #include <linux/rculist.h>
-#include <linux/filter.h>
 
 #include "trace_dynevent.h"
 #include "trace_probe.h"
@@ -88,6 +86,11 @@ static struct trace_uprobe *to_trace_uprobe(struct dyn_event *ev)
 static int register_uprobe_event(struct trace_uprobe *tu);
 static int unregister_uprobe_event(struct trace_uprobe *tu);
 
+struct uprobe_dispatch_data {
+	struct trace_uprobe	*tu;
+	unsigned long		bp_addr;
+};
+
 static int uprobe_dispatcher(struct uprobe_consumer *con, struct pt_regs *regs);
 static int uretprobe_dispatcher(struct uprobe_consumer *con,
 				unsigned long func, struct pt_regs *regs);
@@ -151,7 +154,7 @@ fetch_store_string(unsigned long addr, void *dest, void *base)
 		return -ENOMEM;
 
 	if (addr == FETCH_TOKEN_COMM)
-		ret = strscpy(dst, current->comm, maxlen);
+		ret = strlcpy(dst, current->comm, maxlen);
 	else
 		ret = strncpy_from_user(dst, src, maxlen);
 	if (ret >= 0) {
@@ -216,7 +219,6 @@ process_fetch_insn(struct fetch_insn *code, void *rec, void *dest,
 {
 	struct pt_regs *regs = rec;
 	unsigned long val;
-	int ret;
 
 	/* 1st stage: get value from context */
 	switch (code->op) {
@@ -232,16 +234,20 @@ process_fetch_insn(struct fetch_insn *code, void *rec, void *dest,
 	case FETCH_OP_RETVAL:
 		val = regs_return_value(regs);
 		break;
+	case FETCH_OP_IMM:
+		val = code->immediate;
+		break;
 	case FETCH_OP_COMM:
 		val = FETCH_TOKEN_COMM;
+		break;
+	case FETCH_OP_DATA:
+		val = (unsigned long)code->data;
 		break;
 	case FETCH_OP_FOFFS:
 		val = translate_user_vaddr(code->immediate);
 		break;
 	default:
-		ret = process_common_fetch_insn(code, &val);
-		if (ret < 0)
-			return ret;
+		return -EILSEQ;
 	}
 	code++;
 
@@ -306,8 +312,7 @@ static bool trace_uprobe_match(const char *system, const char *event,
 {
 	struct trace_uprobe *tu = to_trace_uprobe(ev);
 
-	return (event[0] == '\0' ||
-		strcmp(trace_probe_name(&tu->tp), event) == 0) &&
+	return strcmp(trace_probe_name(&tu->tp), event) == 0 &&
 	   (!system || strcmp(trace_probe_group_name(&tu->tp), system) == 0) &&
 	   trace_uprobe_match_command_head(tu, argc, argv);
 }
@@ -405,10 +410,12 @@ static bool trace_uprobe_has_same_uprobe(struct trace_uprobe *orig,
 					 struct trace_uprobe *comp)
 {
 	struct trace_probe_event *tpe = orig->tp.event;
+	struct trace_probe *pos;
 	struct inode *comp_inode = d_real_inode(comp->path.dentry);
 	int i;
 
-	list_for_each_entry(orig, &tpe->probes, tp.list) {
+	list_for_each_entry(pos, &tpe->probes, list) {
+		orig = container_of(pos, struct trace_uprobe, tp);
 		if (comp_inode != d_real_inode(orig->path.dentry) ||
 		    comp->offset != orig->offset)
 			continue;
@@ -527,7 +534,7 @@ end:
 
 /*
  * Argument syntax:
- *  - Add uprobe: p|r[:[GRP/][EVENT]] PATH:OFFSET[%return][(REF)] [FETCHARGS]
+ *  - Add uprobe: p|r[:[GRP/]EVENT] PATH:OFFSET[%return][(REF)] [FETCHARGS]
  */
 static int __trace_uprobe_create(int argc, const char **argv)
 {
@@ -535,13 +542,13 @@ static int __trace_uprobe_create(int argc, const char **argv)
 	const char *event = NULL, *group = UPROBE_EVENT_SYSTEM;
 	char *arg, *filename, *rctr, *rctr_end, *tmp;
 	char buf[MAX_EVENT_NAME_LEN];
-	char gbuf[MAX_EVENT_NAME_LEN];
 	enum probe_print_type ptype;
 	struct path path;
 	unsigned long offset, ref_ctr_offset;
 	bool is_return = false;
 	int i, ret;
 
+	ret = 0;
 	ref_ctr_offset = 0;
 
 	switch (argv[0][0]) {
@@ -640,13 +647,11 @@ static int __trace_uprobe_create(int argc, const char **argv)
 	/* setup a probe */
 	trace_probe_log_set_index(0);
 	if (event) {
-		ret = traceprobe_parse_event_name(&event, &group, gbuf,
+		ret = traceprobe_parse_event_name(&event, &group, buf,
 						  event - argv[0]);
 		if (ret)
 			goto fail_address_parse;
-	}
-
-	if (!event) {
+	} else {
 		char *tail;
 		char *ptr;
 
@@ -682,13 +687,9 @@ static int __trace_uprobe_create(int argc, const char **argv)
 
 	/* parse arguments */
 	for (i = 0; i < argc && i < MAX_TRACE_ARGS; i++) {
-		struct traceprobe_parse_context ctx = {
-			.flags = (is_return ? TPARG_FL_RETURN : 0) | TPARG_FL_USER,
-		};
-
 		trace_probe_log_set_index(i + 2);
-		ret = traceprobe_parse_probe_arg(&tu->tp, i, argv[i], &ctx);
-		traceprobe_finish_parse(&ctx);
+		ret = traceprobe_parse_probe_arg(&tu->tp, i, argv[i],
+					is_return ? TPARG_FL_RETURN : 0);
 		if (ret)
 			goto error;
 	}
@@ -949,7 +950,8 @@ static void __uprobe_trace_func(struct trace_uprobe *tu,
 				struct trace_event_file *trace_file)
 {
 	struct uprobe_trace_entry_head *entry;
-	struct trace_event_buffer fbuffer;
+	struct trace_buffer *buffer;
+	struct ring_buffer_event *event;
 	void *data;
 	int size, esize;
 	struct trace_event_call *call = trace_probe_event_call(&tu->tp);
@@ -964,10 +966,12 @@ static void __uprobe_trace_func(struct trace_uprobe *tu,
 
 	esize = SIZEOF_TRACE_ENTRY(is_ret_probe(tu));
 	size = esize + tu->tp.size + dsize;
-	entry = trace_event_buffer_reserve(&fbuffer, trace_file, size);
-	if (!entry)
+	event = trace_event_buffer_lock_reserve(&buffer, trace_file,
+						call->event.type, size, 0);
+	if (!event)
 		return;
 
+	entry = ring_buffer_event_data(event);
 	if (is_ret_probe(tu)) {
 		entry->vaddr[0] = func;
 		entry->vaddr[1] = instruction_pointer(regs);
@@ -979,7 +983,7 @@ static void __uprobe_trace_func(struct trace_uprobe *tu,
 
 	memcpy(data, ucb->buf, tu->tp.size + dsize);
 
-	trace_event_buffer_commit(&fbuffer);
+	event_trigger_unlock_commit(trace_file, buffer, event, entry, 0);
 }
 
 /* uprobe handler */
@@ -1038,7 +1042,7 @@ print_uprobe_event(struct trace_iterator *iter, int flags, struct trace_event *e
 		data = DATAOF_TRACE_ENTRY(entry, false);
 	}
 
-	if (trace_probe_print_args(s, tu->tp.args, tu->tp.nr_args, data, entry) < 0)
+	if (print_probe_args(s, tu->tp.args, tu->tp.nr_args, data, entry) < 0)
 		goto out;
 
 	trace_seq_putc(s, '\n');
@@ -1072,12 +1076,14 @@ static int trace_uprobe_enable(struct trace_uprobe *tu, filter_func_t filter)
 
 static void __probe_event_disable(struct trace_probe *tp)
 {
+	struct trace_probe *pos;
 	struct trace_uprobe *tu;
 
 	tu = container_of(tp, struct trace_uprobe, tp);
 	WARN_ON(!uprobe_filter_is_empty(tu->tp.event->filter));
 
-	list_for_each_entry(tu, trace_probe_probe_list(tp), tp.list) {
+	list_for_each_entry(pos, trace_probe_probe_list(tp), list) {
+		tu = container_of(pos, struct trace_uprobe, tp);
 		if (!tu->inode)
 			continue;
 
@@ -1089,7 +1095,7 @@ static void __probe_event_disable(struct trace_probe *tp)
 static int probe_event_enable(struct trace_event_call *call,
 			struct trace_event_file *file, filter_func_t filter)
 {
-	struct trace_probe *tp;
+	struct trace_probe *pos, *tp;
 	struct trace_uprobe *tu;
 	bool enabled;
 	int ret;
@@ -1124,7 +1130,8 @@ static int probe_event_enable(struct trace_event_call *call,
 	if (ret)
 		goto err_flags;
 
-	list_for_each_entry(tu, trace_probe_probe_list(tp), tp.list) {
+	list_for_each_entry(pos, trace_probe_probe_list(tp), list) {
+		tu = container_of(pos, struct trace_uprobe, tp);
 		ret = trace_uprobe_enable(tu, filter);
 		if (ret) {
 			__probe_event_disable(tp);
@@ -1269,7 +1276,7 @@ static bool trace_uprobe_filter_add(struct trace_uprobe_filter *filter,
 static int uprobe_perf_close(struct trace_event_call *call,
 			     struct perf_event *event)
 {
-	struct trace_probe *tp;
+	struct trace_probe *pos, *tp;
 	struct trace_uprobe *tu;
 	int ret = 0;
 
@@ -1281,7 +1288,8 @@ static int uprobe_perf_close(struct trace_event_call *call,
 	if (trace_uprobe_filter_remove(tu->tp.event->filter, event))
 		return 0;
 
-	list_for_each_entry(tu, trace_probe_probe_list(tp), tp.list) {
+	list_for_each_entry(pos, trace_probe_probe_list(tp), list) {
+		tu = container_of(pos, struct trace_uprobe, tp);
 		ret = uprobe_apply(tu->inode, tu->offset, &tu->consumer, false);
 		if (ret)
 			break;
@@ -1293,7 +1301,7 @@ static int uprobe_perf_close(struct trace_event_call *call,
 static int uprobe_perf_open(struct trace_event_call *call,
 			    struct perf_event *event)
 {
-	struct trace_probe *tp;
+	struct trace_probe *pos, *tp;
 	struct trace_uprobe *tu;
 	int err = 0;
 
@@ -1305,7 +1313,8 @@ static int uprobe_perf_open(struct trace_event_call *call,
 	if (trace_uprobe_filter_add(tu->tp.event->filter, event))
 		return 0;
 
-	list_for_each_entry(tu, trace_probe_probe_list(tp), tp.list) {
+	list_for_each_entry(pos, trace_probe_probe_list(tp), list) {
+		tu = container_of(pos, struct trace_uprobe, tp);
 		err = uprobe_apply(tu->inode, tu->offset, &tu->consumer, true);
 		if (err) {
 			uprobe_perf_close(call, event);
@@ -1344,15 +1353,15 @@ static void __uprobe_perf_func(struct trace_uprobe *tu,
 	int size, esize;
 	int rctx;
 
-#ifdef CONFIG_BPF_EVENTS
 	if (bpf_prog_array_valid(call)) {
 		u32 ret;
 
-		ret = bpf_prog_run_array_uprobe(call->prog_array, regs, bpf_prog_run);
+		preempt_disable();
+		ret = trace_call_bpf(call, regs);
+		preempt_enable();
 		if (!ret)
 			return;
 	}
-#endif /* CONFIG_BPF_EVENTS */
 
 	esize = SIZEOF_TRACE_ENTRY(is_ret_probe(tu));
 

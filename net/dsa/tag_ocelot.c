@@ -2,61 +2,16 @@
 /* Copyright 2019 NXP
  */
 #include <linux/dsa/ocelot.h>
-
-#include "tag.h"
-
-#define OCELOT_NAME	"ocelot"
-#define SEVILLE_NAME	"seville"
-
-/* If the port is under a VLAN-aware bridge, remove the VLAN header from the
- * payload and move it into the DSA tag, which will make the switch classify
- * the packet to the bridge VLAN. Otherwise, leave the classified VLAN at zero,
- * which is the pvid of standalone and VLAN-unaware bridge ports.
- */
-static void ocelot_xmit_get_vlan_info(struct sk_buff *skb, struct dsa_port *dp,
-				      u64 *vlan_tci, u64 *tag_type)
-{
-	struct net_device *br = dsa_port_bridge_dev_get(dp);
-	struct vlan_ethhdr *hdr;
-	u16 proto, tci;
-
-	if (!br || !br_vlan_enabled(br)) {
-		*vlan_tci = 0;
-		*tag_type = IFH_TAG_TYPE_C;
-		return;
-	}
-
-	hdr = skb_vlan_eth_hdr(skb);
-	br_vlan_get_proto(br, &proto);
-
-	if (ntohs(hdr->h_vlan_proto) == proto) {
-		vlan_remove_tag(skb, &tci);
-		*vlan_tci = tci;
-	} else {
-		rcu_read_lock();
-		br_vlan_get_pvid_rcu(br, &tci);
-		rcu_read_unlock();
-		*vlan_tci = tci;
-	}
-
-	*tag_type = (proto != ETH_P_8021Q) ? IFH_TAG_TYPE_S : IFH_TAG_TYPE_C;
-}
+#include "dsa_priv.h"
 
 static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
 			       __be32 ifh_prefix, void **ifh)
 {
-	struct dsa_port *dp = dsa_user_to_port(netdev);
+	struct dsa_port *dp = dsa_slave_to_port(netdev);
 	struct dsa_switch *ds = dp->ds;
-	u64 vlan_tci, tag_type;
 	void *injection;
 	__be32 *prefix;
 	u32 rew_op = 0;
-	u64 qos_class;
-
-	ocelot_xmit_get_vlan_info(skb, dp, &vlan_tci, &tag_type);
-
-	qos_class = netdev_get_num_tc(netdev) ?
-		    netdev_get_prio_tc_map(netdev, skb->priority) : skb->priority;
 
 	injection = skb_push(skb, OCELOT_TAG_LEN);
 	prefix = skb_push(skb, OCELOT_SHORT_PREFIX_LEN);
@@ -65,9 +20,7 @@ static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
 	memset(injection, 0, OCELOT_TAG_LEN);
 	ocelot_ifh_set_bypass(injection, 1);
 	ocelot_ifh_set_src(injection, ds->num_ports);
-	ocelot_ifh_set_qos_class(injection, qos_class);
-	ocelot_ifh_set_vlan_tci(injection, vlan_tci);
-	ocelot_ifh_set_tag_type(injection, tag_type);
+	ocelot_ifh_set_qos_class(injection, skb->priority);
 
 	rew_op = ocelot_ptp_rew_op(skb);
 	if (rew_op)
@@ -79,7 +32,7 @@ static void ocelot_xmit_common(struct sk_buff *skb, struct net_device *netdev,
 static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
 				   struct net_device *netdev)
 {
-	struct dsa_port *dp = dsa_user_to_port(netdev);
+	struct dsa_port *dp = dsa_slave_to_port(netdev);
 	void *injection;
 
 	ocelot_xmit_common(skb, netdev, cpu_to_be32(0x8880000a), &injection);
@@ -91,7 +44,7 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
 static struct sk_buff *seville_xmit(struct sk_buff *skb,
 				    struct net_device *netdev)
 {
-	struct dsa_port *dp = dsa_user_to_port(netdev);
+	struct dsa_port *dp = dsa_slave_to_port(netdev);
 	void *injection;
 
 	ocelot_xmit_common(skb, netdev, cpu_to_be32(0x88800005), &injection);
@@ -111,12 +64,12 @@ static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
 	u16 vlan_tpid;
 	u64 rew_val;
 
-	/* Revert skb->data by the amount consumed by the DSA conduit,
+	/* Revert skb->data by the amount consumed by the DSA master,
 	 * so it points to the beginning of the frame.
 	 */
 	skb_push(skb, ETH_HLEN);
 	/* We don't care about the short prefix, it is just for easy entrance
-	 * into the DSA conduit's RX filter. Discard it now by moving it into
+	 * into the DSA master's RX filter. Discard it now by moving it into
 	 * the headroom.
 	 */
 	skb_pull(skb, OCELOT_SHORT_PREFIX_LEN);
@@ -141,12 +94,12 @@ static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
 	ocelot_xfh_get_vlan_tci(extraction, &vlan_tci);
 	ocelot_xfh_get_rew_val(extraction, &rew_val);
 
-	skb->dev = dsa_conduit_find_user(netdev, 0, src_port);
+	skb->dev = dsa_master_find_slave(netdev, 0, src_port);
 	if (!skb->dev)
 		/* The switch will reflect back some frames sent through
-		 * sockets opened on the bare DSA conduit. These will come back
+		 * sockets opened on the bare DSA master. These will come back
 		 * with src_port equal to the index of the CPU port, for which
-		 * there is no user registered. So don't print any error
+		 * there is no slave registered. So don't print any error
 		 * message here (ignore and drop those frames).
 		 */
 		return NULL;
@@ -170,7 +123,7 @@ static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
 	 * equal to the pvid of the ingress port and should not be used for
 	 * processing.
 	 */
-	dp = dsa_user_to_port(skb->dev);
+	dp = dsa_slave_to_port(skb->dev);
 	vlan_tpid = tag_type ? ETH_P_8021AD : ETH_P_8021Q;
 
 	if (dsa_port_is_vlan_filtering(dp) &&
@@ -187,28 +140,28 @@ static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
 }
 
 static const struct dsa_device_ops ocelot_netdev_ops = {
-	.name			= OCELOT_NAME,
+	.name			= "ocelot",
 	.proto			= DSA_TAG_PROTO_OCELOT,
 	.xmit			= ocelot_xmit,
 	.rcv			= ocelot_rcv,
 	.needed_headroom	= OCELOT_TOTAL_TAG_LEN,
-	.promisc_on_conduit	= true,
+	.promisc_on_master	= true,
 };
 
 DSA_TAG_DRIVER(ocelot_netdev_ops);
-MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_OCELOT, OCELOT_NAME);
+MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_OCELOT);
 
 static const struct dsa_device_ops seville_netdev_ops = {
-	.name			= SEVILLE_NAME,
+	.name			= "seville",
 	.proto			= DSA_TAG_PROTO_SEVILLE,
 	.xmit			= seville_xmit,
 	.rcv			= ocelot_rcv,
 	.needed_headroom	= OCELOT_TOTAL_TAG_LEN,
-	.promisc_on_conduit	= true,
+	.promisc_on_master	= true,
 };
 
 DSA_TAG_DRIVER(seville_netdev_ops);
-MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_SEVILLE, SEVILLE_NAME);
+MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_SEVILLE);
 
 static struct dsa_tag_driver *ocelot_tag_driver_array[] = {
 	&DSA_TAG_DRIVER_NAME(ocelot_netdev_ops),
@@ -217,5 +170,4 @@ static struct dsa_tag_driver *ocelot_tag_driver_array[] = {
 
 module_dsa_tag_drivers(ocelot_tag_driver_array);
 
-MODULE_DESCRIPTION("DSA tag driver for Ocelot family of switches, using NPI port");
 MODULE_LICENSE("GPL v2");

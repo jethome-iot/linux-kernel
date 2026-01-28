@@ -16,15 +16,13 @@
 #include <linux/mutex.h>
 
 struct nullb_cmd {
-	union {
-		struct request *rq;
-		struct bio *bio;
-	};
+	struct request *rq;
+	struct bio *bio;
 	unsigned int tag;
 	blk_status_t error;
-	bool fake_timeout;
 	struct nullb_queue *nq;
 	struct hrtimer timer;
+	bool fake_timeout;
 };
 
 struct nullb_queue {
@@ -33,9 +31,6 @@ struct nullb_queue {
 	unsigned int queue_depth;
 	struct nullb_device *dev;
 	unsigned int requeue_selection;
-
-	struct list_head poll_list;
-	spinlock_t poll_lock;
 
 	struct nullb_cmd *cmds;
 };
@@ -60,21 +55,9 @@ struct nullb_zone {
 	unsigned int capacity;
 };
 
-/* Queue modes */
-enum {
-	NULL_Q_BIO	= 0,
-	NULL_Q_RQ	= 1,
-	NULL_Q_MQ	= 2,
-};
-
 struct nullb_device {
 	struct nullb *nullb;
-	struct config_group group;
-#ifdef CONFIG_BLK_DEV_NULL_BLK_FAULT_INJECTION
-	struct fault_config timeout_config;
-	struct fault_config requeue_config;
-	struct fault_config init_hctx_fault_config;
-#endif
+	struct config_item item;
 	struct radix_tree_root data; /* data stored in the disk */
 	struct radix_tree_root cache; /* disk cache data */
 	unsigned long flags; /* device flags */
@@ -88,6 +71,7 @@ struct nullb_device {
 	unsigned int imp_close_zone_no;
 	struct nullb_zone *zones;
 	sector_t zone_size_sects;
+	unsigned int zone_size_sects_shift;
 	bool need_zone_res_mgmt;
 	spinlock_t zone_res_lock;
 
@@ -100,13 +84,11 @@ struct nullb_device {
 	unsigned int zone_max_open; /* max number of open zones */
 	unsigned int zone_max_active; /* max number of active zones */
 	unsigned int submit_queues; /* number of submission queues */
-	unsigned int prev_submit_queues; /* number of submission queues before change */
-	unsigned int poll_queues; /* number of IOPOLL submission queues */
-	unsigned int prev_poll_queues; /* number of IOPOLL submission queues before change */
 	unsigned int home_node; /* home node for the device */
 	unsigned int queue_mode; /* block interface */
 	unsigned int blocksize; /* block size */
 	unsigned int max_sectors; /* Max sectors per command */
+	unsigned int max_segment_size; /* Max size of a single DMA segment. */
 	unsigned int irqmode; /* IRQ completion handler */
 	unsigned int hw_queue_depth; /* queue depth */
 	unsigned int index; /* index of the disk, only valid with a disk */
@@ -118,8 +100,6 @@ struct nullb_device {
 	bool discard; /* if support discard */
 	bool zoned; /* if device is zoned */
 	bool virt_boundary; /* virtual boundary on/off for the device */
-	bool no_sched; /* no IO scheduler for the device */
-	bool shared_tag_bitmap; /* use hostwide shared tags */
 };
 
 struct nullb {
@@ -143,8 +123,9 @@ struct nullb {
 
 blk_status_t null_handle_discard(struct nullb_device *dev, sector_t sector,
 				 sector_t nr_sectors);
-blk_status_t null_process_cmd(struct nullb_cmd *cmd, enum req_op op,
-			      sector_t sector, unsigned int nr_sectors);
+blk_status_t null_process_cmd(struct nullb_cmd *cmd,
+			      enum req_opf op, sector_t sector,
+			      unsigned int nr_sectors);
 
 #ifdef CONFIG_BLK_DEV_ZONED
 int null_init_zoned_dev(struct nullb_device *dev, struct request_queue *q);
@@ -152,12 +133,11 @@ int null_register_zoned_dev(struct nullb *nullb);
 void null_free_zoned_dev(struct nullb_device *dev);
 int null_report_zones(struct gendisk *disk, sector_t sector,
 		      unsigned int nr_zones, report_zones_cb cb, void *data);
-blk_status_t null_process_zoned_cmd(struct nullb_cmd *cmd, enum req_op op,
-				    sector_t sector, sector_t nr_sectors);
+blk_status_t null_process_zoned_cmd(struct nullb_cmd *cmd,
+				    enum req_opf op, sector_t sector,
+				    sector_t nr_sectors);
 size_t null_zone_valid_read_len(struct nullb *nullb,
 				sector_t sector, unsigned int len);
-ssize_t zone_cond_store(struct nullb_device *dev, const char *page,
-			size_t count, enum blk_zone_cond cond);
 #else
 static inline int null_init_zoned_dev(struct nullb_device *dev,
 				      struct request_queue *q)
@@ -171,7 +151,7 @@ static inline int null_register_zoned_dev(struct nullb *nullb)
 }
 static inline void null_free_zoned_dev(struct nullb_device *dev) {}
 static inline blk_status_t null_process_zoned_cmd(struct nullb_cmd *cmd,
-			enum req_op op, sector_t sector, sector_t nr_sectors)
+			enum req_opf op, sector_t sector, sector_t nr_sectors)
 {
 	return BLK_STS_NOTSUPP;
 }
@@ -180,12 +160,6 @@ static inline size_t null_zone_valid_read_len(struct nullb *nullb,
 					      unsigned int len)
 {
 	return len;
-}
-static inline ssize_t zone_cond_store(struct nullb_device *dev,
-				      const char *page, size_t count,
-				      enum blk_zone_cond cond)
-{
-	return -EOPNOTSUPP;
 }
 #define null_report_zones	NULL
 #endif /* CONFIG_BLK_DEV_ZONED */

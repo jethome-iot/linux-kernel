@@ -5,41 +5,29 @@
  * Author: Andrey Ryabinin <a.ryabinin@samsung.com>
  */
 
-#define pr_fmt(fmt) "kasan: test: " fmt
-
-#include <kunit/test.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
-#include <linux/io.h>
 #include <linux/kasan.h>
 #include <linux/kernel.h>
-#include <linux/mempool.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/random.h>
-#include <linux/set_memory.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/tracepoint.h>
 #include <linux/uaccess.h>
+#include <linux/io.h>
 #include <linux/vmalloc.h>
-#include <trace/events/printk.h>
+#include <linux/set_memory.h>
 
 #include <asm/page.h>
+
+#include <kunit/test.h>
 
 #include "kasan.h"
 
 #define OOB_TAG_OFF (IS_ENABLED(CONFIG_KASAN_GENERIC) ? 0 : KASAN_GRANULE_SIZE)
-
-static bool multishot;
-
-/* Fields set based on lines observed in the console. */
-static struct {
-	bool report_found;
-	bool async_fault;
-} test_status;
 
 /*
  * Some tests use these global variables to store return values from function
@@ -48,55 +36,42 @@ static struct {
 void *kasan_ptr_result;
 int kasan_int_result;
 
-/* Probe for console output: obtains test_status lines of interest. */
-static void probe_console(void *ignore, const char *buf, size_t len)
-{
-	if (strnstr(buf, "BUG: KASAN: ", len))
-		WRITE_ONCE(test_status.report_found, true);
-	else if (strnstr(buf, "Asynchronous fault: ", len))
-		WRITE_ONCE(test_status.async_fault, true);
-}
+static struct kunit_resource resource;
+static struct kunit_kasan_status test_status;
+static bool multishot;
 
-static int kasan_suite_init(struct kunit_suite *suite)
+/*
+ * Temporarily enable multi-shot mode. Otherwise, KASAN would only report the
+ * first detected bug and panic the kernel if panic_on_warn is enabled. For
+ * hardware tag-based KASAN also allow tag checking to be reenabled for each
+ * test, see the comment for KUNIT_EXPECT_KASAN_FAIL().
+ */
+static int kasan_test_init(struct kunit *test)
 {
 	if (!kasan_enabled()) {
-		pr_err("Can't run KASAN tests with KASAN disabled");
+		kunit_err(test, "can't run KASAN tests with KASAN disabled");
 		return -1;
 	}
 
-	/* Stop failing KUnit tests on KASAN reports. */
-	kasan_kunit_test_suite_start();
-
-	/*
-	 * Temporarily enable multi-shot mode. Otherwise, KASAN would only
-	 * report the first detected bug and panic the kernel if panic_on_warn
-	 * is enabled.
-	 */
 	multishot = kasan_save_enable_multi_shot();
-
-	register_trace_console(probe_console, NULL);
+	test_status.report_found = false;
+	test_status.sync_fault = false;
+	kunit_add_named_resource(test, NULL, NULL, &resource,
+					"kasan_status", &test_status);
 	return 0;
-}
-
-static void kasan_suite_exit(struct kunit_suite *suite)
-{
-	kasan_kunit_test_suite_end();
-	kasan_restore_multi_shot(multishot);
-	unregister_trace_console(probe_console, NULL);
-	tracepoint_synchronize_unregister();
 }
 
 static void kasan_test_exit(struct kunit *test)
 {
-	KUNIT_EXPECT_FALSE(test, READ_ONCE(test_status.report_found));
+	kasan_restore_multi_shot(multishot);
+	KUNIT_EXPECT_FALSE(test, test_status.report_found);
 }
 
 /**
- * KUNIT_EXPECT_KASAN_FAIL - check that the executed expression produces a
- * KASAN report; causes a KUnit test failure otherwise.
- *
- * @test: Currently executing KUnit test.
- * @expression: Expression that must produce a KASAN report.
+ * KUNIT_EXPECT_KASAN_FAIL() - check that the executed expression produces a
+ * KASAN report; causes a test failure otherwise. This relies on a KUnit
+ * resource named "kasan_status". Do not use this name for KUnit resources
+ * outside of KASAN tests.
  *
  * For hardware tag-based KASAN, when a synchronous tag fault happens, tag
  * checking is auto-disabled. When this happens, this test handler reenables
@@ -131,12 +106,11 @@ static void kasan_test_exit(struct kunit *test)
 	if (IS_ENABLED(CONFIG_KASAN_HW_TAGS) &&				\
 	    kasan_sync_fault_possible()) {				\
 		if (READ_ONCE(test_status.report_found) &&		\
-		    !READ_ONCE(test_status.async_fault))		\
+		    READ_ONCE(test_status.sync_fault))			\
 			kasan_enable_hw_tags();				\
 		migrate_enable();					\
 	}								\
 	WRITE_ONCE(test_status.report_found, false);			\
-	WRITE_ONCE(test_status.async_fault, false);			\
 } while (0)
 
 #define KASAN_TEST_NEEDS_CONFIG_ON(test, config) do {			\
@@ -147,15 +121,6 @@ static void kasan_test_exit(struct kunit *test)
 #define KASAN_TEST_NEEDS_CONFIG_OFF(test, config) do {			\
 	if (IS_ENABLED(config))						\
 		kunit_skip((test), "Test requires " #config "=n");	\
-} while (0)
-
-#define KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test) do {		\
-	if (IS_ENABLED(CONFIG_KASAN_HW_TAGS))				\
-		break;  /* No compiler instrumentation. */		\
-	if (IS_ENABLED(CONFIG_CC_HAS_KASAN_MEMINTRINSIC_PREFIX))	\
-		break;  /* Should always be instrumented! */		\
-	if (IS_ENABLED(CONFIG_GENERIC_ENTRY))				\
-		kunit_skip((test), "Test requires checked mem*()");	\
 } while (0)
 
 static void kmalloc_oob_right(struct kunit *test)
@@ -214,32 +179,17 @@ static void kmalloc_node_oob_right(struct kunit *test)
 }
 
 /*
- * Check that KASAN detects an out-of-bounds access for a big object allocated
- * via kmalloc(). But not as big as to trigger the page_alloc fallback.
+ * These kmalloc_pagealloc_* tests try allocating a memory chunk that doesn't
+ * fit into a slab cache and therefore is allocated via the page allocator
+ * fallback. Since this kind of fallback is only implemented for SLUB, these
+ * tests are limited to that allocator.
  */
-static void kmalloc_big_oob_right(struct kunit *test)
-{
-	char *ptr;
-	size_t size = KMALLOC_MAX_CACHE_SIZE - 256;
-
-	ptr = kmalloc(size, GFP_KERNEL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
-
-	OPTIMIZER_HIDE_VAR(ptr);
-	KUNIT_EXPECT_KASAN_FAIL(test, ptr[size] = 0);
-	kfree(ptr);
-}
-
-/*
- * The kmalloc_large_* tests below use kmalloc() to allocate a memory chunk
- * that does not fit into the largest slab cache and therefore is allocated via
- * the page_alloc fallback.
- */
-
-static void kmalloc_large_oob_right(struct kunit *test)
+static void kmalloc_pagealloc_oob_right(struct kunit *test)
 {
 	char *ptr;
 	size_t size = KMALLOC_MAX_CACHE_SIZE + 10;
+
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_SLUB);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -250,10 +200,12 @@ static void kmalloc_large_oob_right(struct kunit *test)
 	kfree(ptr);
 }
 
-static void kmalloc_large_uaf(struct kunit *test)
+static void kmalloc_pagealloc_uaf(struct kunit *test)
 {
 	char *ptr;
 	size_t size = KMALLOC_MAX_CACHE_SIZE + 10;
+
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_SLUB);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -262,10 +214,12 @@ static void kmalloc_large_uaf(struct kunit *test)
 	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[0]);
 }
 
-static void kmalloc_large_invalid_free(struct kunit *test)
+static void kmalloc_pagealloc_invalid_free(struct kunit *test)
 {
 	char *ptr;
 	size_t size = KMALLOC_MAX_CACHE_SIZE + 10;
+
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_SLUB);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -273,7 +227,7 @@ static void kmalloc_large_invalid_free(struct kunit *test)
 	KUNIT_EXPECT_KASAN_FAIL(test, kfree(ptr + 1));
 }
 
-static void page_alloc_oob_right(struct kunit *test)
+static void pagealloc_oob_right(struct kunit *test)
 {
 	char *ptr;
 	struct page *pages;
@@ -295,7 +249,7 @@ static void page_alloc_oob_right(struct kunit *test)
 	free_pages((unsigned long)ptr, order);
 }
 
-static void page_alloc_uaf(struct kunit *test)
+static void pagealloc_uaf(struct kunit *test)
 {
 	char *ptr;
 	struct page *pages;
@@ -307,6 +261,23 @@ static void page_alloc_uaf(struct kunit *test)
 	free_pages((unsigned long)ptr, order);
 
 	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[0]);
+}
+
+static void kmalloc_large_oob_right(struct kunit *test)
+{
+	char *ptr;
+	size_t size = KMALLOC_MAX_CACHE_SIZE - 256;
+
+	/*
+	 * Allocate a chunk that is large enough, but still fits into a slab
+	 * and does not trigger the page allocator fallback in SLUB.
+	 */
+	ptr = kmalloc(size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
+
+	OPTIMIZER_HIDE_VAR(ptr);
+	KUNIT_EXPECT_KASAN_FAIL(test, ptr[size] = 0);
+	kfree(ptr);
 }
 
 static void krealloc_more_oob_helper(struct kunit *test,
@@ -398,14 +369,20 @@ static void krealloc_less_oob(struct kunit *test)
 	krealloc_less_oob_helper(test, 235, 201);
 }
 
-static void krealloc_large_more_oob(struct kunit *test)
+static void krealloc_pagealloc_more_oob(struct kunit *test)
 {
+	/* page_alloc fallback in only implemented for SLUB. */
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_SLUB);
+
 	krealloc_more_oob_helper(test, KMALLOC_MAX_CACHE_SIZE + 201,
 					KMALLOC_MAX_CACHE_SIZE + 235);
 }
 
-static void krealloc_large_less_oob(struct kunit *test)
+static void krealloc_pagealloc_less_oob(struct kunit *test)
 {
+	/* page_alloc fallback in only implemented for SLUB. */
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_SLUB);
+
 	krealloc_less_oob_helper(test, KMALLOC_MAX_CACHE_SIZE + 235,
 					KMALLOC_MAX_CACHE_SIZE + 201);
 }
@@ -425,7 +402,7 @@ static void krealloc_uaf(struct kunit *test)
 	kfree(ptr1);
 
 	KUNIT_EXPECT_KASAN_FAIL(test, ptr2 = krealloc(ptr1, size2, GFP_KERNEL));
-	KUNIT_ASSERT_NULL(test, ptr2);
+	KUNIT_ASSERT_PTR_EQ(test, (void *)ptr2, NULL);
 	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)ptr1);
 }
 
@@ -434,8 +411,6 @@ static void kmalloc_oob_16(struct kunit *test)
 	struct {
 		u64 words[2];
 	} *ptr1, *ptr2;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	/* This test is specifically crafted for the generic mode. */
 	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
@@ -459,8 +434,6 @@ static void kmalloc_uaf_16(struct kunit *test)
 		u64 words[2];
 	} *ptr1, *ptr2;
 
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
-
 	ptr1 = kmalloc(sizeof(*ptr1), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr1);
 
@@ -482,17 +455,12 @@ static void kmalloc_oob_memset_2(struct kunit *test)
 {
 	char *ptr;
 	size_t size = 128 - KASAN_GRANULE_SIZE;
-	size_t memset_size = 2;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
 
-	OPTIMIZER_HIDE_VAR(ptr);
 	OPTIMIZER_HIDE_VAR(size);
-	OPTIMIZER_HIDE_VAR(memset_size);
-	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 1, 0, memset_size));
+	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 1, 0, 2));
 	kfree(ptr);
 }
 
@@ -500,17 +468,12 @@ static void kmalloc_oob_memset_4(struct kunit *test)
 {
 	char *ptr;
 	size_t size = 128 - KASAN_GRANULE_SIZE;
-	size_t memset_size = 4;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
 
-	OPTIMIZER_HIDE_VAR(ptr);
 	OPTIMIZER_HIDE_VAR(size);
-	OPTIMIZER_HIDE_VAR(memset_size);
-	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 3, 0, memset_size));
+	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 3, 0, 4));
 	kfree(ptr);
 }
 
@@ -518,17 +481,12 @@ static void kmalloc_oob_memset_8(struct kunit *test)
 {
 	char *ptr;
 	size_t size = 128 - KASAN_GRANULE_SIZE;
-	size_t memset_size = 8;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
 
-	OPTIMIZER_HIDE_VAR(ptr);
 	OPTIMIZER_HIDE_VAR(size);
-	OPTIMIZER_HIDE_VAR(memset_size);
-	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 7, 0, memset_size));
+	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 7, 0, 8));
 	kfree(ptr);
 }
 
@@ -536,17 +494,12 @@ static void kmalloc_oob_memset_16(struct kunit *test)
 {
 	char *ptr;
 	size_t size = 128 - KASAN_GRANULE_SIZE;
-	size_t memset_size = 16;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
 
-	OPTIMIZER_HIDE_VAR(ptr);
 	OPTIMIZER_HIDE_VAR(size);
-	OPTIMIZER_HIDE_VAR(memset_size);
-	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 15, 0, memset_size));
+	KUNIT_EXPECT_KASAN_FAIL(test, memset(ptr + size - 15, 0, 16));
 	kfree(ptr);
 }
 
@@ -554,8 +507,6 @@ static void kmalloc_oob_in_memset(struct kunit *test)
 {
 	char *ptr;
 	size_t size = 128 - KASAN_GRANULE_SIZE;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -572,8 +523,6 @@ static void kmalloc_memmove_negative_size(struct kunit *test)
 	char *ptr;
 	size_t size = 64;
 	size_t invalid_size = -2;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	/*
 	 * Hardware tag-based mode doesn't check memmove for negative size.
@@ -598,8 +547,6 @@ static void kmalloc_memmove_invalid_size(struct kunit *test)
 	char *ptr;
 	size_t size = 64;
 	size_t invalid_size = size;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -628,8 +575,6 @@ static void kmalloc_uaf_memset(struct kunit *test)
 {
 	char *ptr;
 	size_t size = 33;
-
-	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
 	/*
 	 * Only generic KASAN uses quarantine, which is required to avoid a
@@ -697,126 +642,6 @@ static void kmalloc_uaf3(struct kunit *test)
 	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr1)[8]);
 }
 
-static void kmalloc_double_kzfree(struct kunit *test)
-{
-	char *ptr;
-	size_t size = 16;
-
-	ptr = kmalloc(size, GFP_KERNEL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
-
-	kfree_sensitive(ptr);
-	KUNIT_EXPECT_KASAN_FAIL(test, kfree_sensitive(ptr));
-}
-
-/* Check that ksize() does NOT unpoison whole object. */
-static void ksize_unpoisons_memory(struct kunit *test)
-{
-	char *ptr;
-	size_t size = 128 - KASAN_GRANULE_SIZE - 5;
-	size_t real_size;
-
-	ptr = kmalloc(size, GFP_KERNEL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
-
-	real_size = ksize(ptr);
-	KUNIT_EXPECT_GT(test, real_size, size);
-
-	OPTIMIZER_HIDE_VAR(ptr);
-
-	/* These accesses shouldn't trigger a KASAN report. */
-	ptr[0] = 'x';
-	ptr[size - 1] = 'x';
-
-	/* These must trigger a KASAN report. */
-	if (IS_ENABLED(CONFIG_KASAN_GENERIC))
-		KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[size]);
-	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[size + 5]);
-	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[real_size - 1]);
-
-	kfree(ptr);
-}
-
-/*
- * Check that a use-after-free is detected by ksize() and via normal accesses
- * after it.
- */
-static void ksize_uaf(struct kunit *test)
-{
-	char *ptr;
-	int size = 128 - KASAN_GRANULE_SIZE;
-
-	ptr = kmalloc(size, GFP_KERNEL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
-	kfree(ptr);
-
-	OPTIMIZER_HIDE_VAR(ptr);
-	KUNIT_EXPECT_KASAN_FAIL(test, ksize(ptr));
-	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[0]);
-	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[size]);
-}
-
-/*
- * The two tests below check that Generic KASAN prints auxiliary stack traces
- * for RCU callbacks and workqueues. The reports need to be inspected manually.
- *
- * These tests are still enabled for other KASAN modes to make sure that all
- * modes report bad accesses in tested scenarios.
- */
-
-static struct kasan_rcu_info {
-	int i;
-	struct rcu_head rcu;
-} *global_rcu_ptr;
-
-static void rcu_uaf_reclaim(struct rcu_head *rp)
-{
-	struct kasan_rcu_info *fp =
-		container_of(rp, struct kasan_rcu_info, rcu);
-
-	kfree(fp);
-	((volatile struct kasan_rcu_info *)fp)->i;
-}
-
-static void rcu_uaf(struct kunit *test)
-{
-	struct kasan_rcu_info *ptr;
-
-	ptr = kmalloc(sizeof(struct kasan_rcu_info), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
-
-	global_rcu_ptr = rcu_dereference_protected(
-				(struct kasan_rcu_info __rcu *)ptr, NULL);
-
-	KUNIT_EXPECT_KASAN_FAIL(test,
-		call_rcu(&global_rcu_ptr->rcu, rcu_uaf_reclaim);
-		rcu_barrier());
-}
-
-static void workqueue_uaf_work(struct work_struct *work)
-{
-	kfree(work);
-}
-
-static void workqueue_uaf(struct kunit *test)
-{
-	struct workqueue_struct *workqueue;
-	struct work_struct *work;
-
-	workqueue = create_workqueue("kasan_workqueue_test");
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, workqueue);
-
-	work = kmalloc(sizeof(struct work_struct), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, work);
-
-	INIT_WORK(work, workqueue_uaf_work);
-	queue_work(workqueue, work);
-	destroy_workqueue(workqueue);
-
-	KUNIT_EXPECT_KASAN_FAIL(test,
-		((volatile struct work_struct *)work)->data);
-}
-
 static void kfree_via_page(struct kunit *test)
 {
 	char *ptr;
@@ -865,6 +690,179 @@ static void kmem_cache_oob(struct kunit *test)
 
 	kmem_cache_free(cache, p);
 	kmem_cache_destroy(cache);
+}
+
+static void kmem_cache_accounted(struct kunit *test)
+{
+	int i;
+	char *p;
+	size_t size = 200;
+	struct kmem_cache *cache;
+
+	cache = kmem_cache_create("test_cache", size, 0, SLAB_ACCOUNT, NULL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cache);
+
+	/*
+	 * Several allocations with a delay to allow for lazy per memcg kmem
+	 * cache creation.
+	 */
+	for (i = 0; i < 5; i++) {
+		p = kmem_cache_alloc(cache, GFP_KERNEL);
+		if (!p)
+			goto free_cache;
+
+		kmem_cache_free(cache, p);
+		msleep(100);
+	}
+
+free_cache:
+	kmem_cache_destroy(cache);
+}
+
+static void kmem_cache_bulk(struct kunit *test)
+{
+	struct kmem_cache *cache;
+	size_t size = 200;
+	char *p[10];
+	bool ret;
+	int i;
+
+	cache = kmem_cache_create("test_cache", size, 0, 0, NULL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cache);
+
+	ret = kmem_cache_alloc_bulk(cache, GFP_KERNEL, ARRAY_SIZE(p), (void **)&p);
+	if (!ret) {
+		kunit_err(test, "Allocation failed: %s\n", __func__);
+		kmem_cache_destroy(cache);
+		return;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(p); i++)
+		p[i][0] = p[i][size - 1] = 42;
+
+	kmem_cache_free_bulk(cache, ARRAY_SIZE(p), (void **)&p);
+	kmem_cache_destroy(cache);
+}
+
+static char global_array[10];
+
+static void kasan_global_oob_right(struct kunit *test)
+{
+	/*
+	 * Deliberate out-of-bounds access. To prevent CONFIG_UBSAN_LOCAL_BOUNDS
+	 * from failing here and panicking the kernel, access the array via a
+	 * volatile pointer, which will prevent the compiler from being able to
+	 * determine the array bounds.
+	 *
+	 * This access uses a volatile pointer to char (char *volatile) rather
+	 * than the more conventional pointer to volatile char (volatile char *)
+	 * because we want to prevent the compiler from making inferences about
+	 * the pointer itself (i.e. its array bounds), not the data that it
+	 * refers to.
+	 */
+	char *volatile array = global_array;
+	char *p = &array[ARRAY_SIZE(global_array) + 3];
+
+	/* Only generic mode instruments globals. */
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
+
+	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
+}
+
+static void kasan_global_oob_left(struct kunit *test)
+{
+	char *volatile array = global_array;
+	char *p = array - 3;
+
+	/*
+	 * GCC is known to fail this test, skip it.
+	 * See https://bugzilla.kernel.org/show_bug.cgi?id=215051.
+	 */
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_CC_IS_CLANG);
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
+	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
+}
+
+/* Check that ksize() makes the whole object accessible. */
+static void ksize_unpoisons_memory(struct kunit *test)
+{
+	char *ptr;
+	size_t size = 123, real_size;
+
+	ptr = kmalloc(size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
+	real_size = ksize(ptr);
+
+	OPTIMIZER_HIDE_VAR(ptr);
+
+	/* This access shouldn't trigger a KASAN report. */
+	ptr[size] = 'x';
+
+	/* This one must. */
+	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[real_size]);
+
+	kfree(ptr);
+}
+
+/*
+ * Check that a use-after-free is detected by ksize() and via normal accesses
+ * after it.
+ */
+static void ksize_uaf(struct kunit *test)
+{
+	char *ptr;
+	int size = 128 - KASAN_GRANULE_SIZE;
+
+	ptr = kmalloc(size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
+	kfree(ptr);
+
+	OPTIMIZER_HIDE_VAR(ptr);
+	KUNIT_EXPECT_KASAN_FAIL(test, ksize(ptr));
+	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[0]);
+	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[size]);
+}
+
+static void kasan_stack_oob(struct kunit *test)
+{
+	char stack_array[10];
+	/* See comment in kasan_global_oob_right. */
+	char *volatile array = stack_array;
+	char *p = &array[ARRAY_SIZE(stack_array) + OOB_TAG_OFF];
+
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_STACK);
+
+	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
+}
+
+static void kasan_alloca_oob_left(struct kunit *test)
+{
+	volatile int i = 10;
+	char alloca_array[i];
+	/* See comment in kasan_global_oob_right. */
+	char *volatile array = alloca_array;
+	char *p = array - 1;
+
+	/* Only generic mode instruments dynamic allocas. */
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_STACK);
+
+	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
+}
+
+static void kasan_alloca_oob_right(struct kunit *test)
+{
+	volatile int i = 10;
+	char alloca_array[i];
+	/* See comment in kasan_global_oob_right. */
+	char *volatile array = alloca_array;
+	char *p = array + i;
+
+	/* Only generic mode instruments dynamic allocas. */
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_STACK);
+
+	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
 }
 
 static void kmem_cache_double_free(struct kunit *test)
@@ -928,436 +926,6 @@ static void kmem_cache_double_destroy(struct kunit *test)
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cache);
 	kmem_cache_destroy(cache);
 	KUNIT_EXPECT_KASAN_FAIL(test, kmem_cache_destroy(cache));
-}
-
-static void kmem_cache_accounted(struct kunit *test)
-{
-	int i;
-	char *p;
-	size_t size = 200;
-	struct kmem_cache *cache;
-
-	cache = kmem_cache_create("test_cache", size, 0, SLAB_ACCOUNT, NULL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cache);
-
-	/*
-	 * Several allocations with a delay to allow for lazy per memcg kmem
-	 * cache creation.
-	 */
-	for (i = 0; i < 5; i++) {
-		p = kmem_cache_alloc(cache, GFP_KERNEL);
-		if (!p)
-			goto free_cache;
-
-		kmem_cache_free(cache, p);
-		msleep(100);
-	}
-
-free_cache:
-	kmem_cache_destroy(cache);
-}
-
-static void kmem_cache_bulk(struct kunit *test)
-{
-	struct kmem_cache *cache;
-	size_t size = 200;
-	char *p[10];
-	bool ret;
-	int i;
-
-	cache = kmem_cache_create("test_cache", size, 0, 0, NULL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cache);
-
-	ret = kmem_cache_alloc_bulk(cache, GFP_KERNEL, ARRAY_SIZE(p), (void **)&p);
-	if (!ret) {
-		kunit_err(test, "Allocation failed: %s\n", __func__);
-		kmem_cache_destroy(cache);
-		return;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(p); i++)
-		p[i][0] = p[i][size - 1] = 42;
-
-	kmem_cache_free_bulk(cache, ARRAY_SIZE(p), (void **)&p);
-	kmem_cache_destroy(cache);
-}
-
-static void *mempool_prepare_kmalloc(struct kunit *test, mempool_t *pool, size_t size)
-{
-	int pool_size = 4;
-	int ret;
-	void *elem;
-
-	memset(pool, 0, sizeof(*pool));
-	ret = mempool_init_kmalloc_pool(pool, pool_size, size);
-	KUNIT_ASSERT_EQ(test, ret, 0);
-
-	/*
-	 * Allocate one element to prevent mempool from freeing elements to the
-	 * underlying allocator and instead make it add them to the element
-	 * list when the tests trigger double-free and invalid-free bugs.
-	 * This allows testing KASAN annotations in add_element().
-	 */
-	elem = mempool_alloc_preallocated(pool);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, elem);
-
-	return elem;
-}
-
-static struct kmem_cache *mempool_prepare_slab(struct kunit *test, mempool_t *pool, size_t size)
-{
-	struct kmem_cache *cache;
-	int pool_size = 4;
-	int ret;
-
-	cache = kmem_cache_create("test_cache", size, 0, 0, NULL);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cache);
-
-	memset(pool, 0, sizeof(*pool));
-	ret = mempool_init_slab_pool(pool, pool_size, cache);
-	KUNIT_ASSERT_EQ(test, ret, 0);
-
-	/*
-	 * Do not allocate one preallocated element, as we skip the double-free
-	 * and invalid-free tests for slab mempool for simplicity.
-	 */
-
-	return cache;
-}
-
-static void *mempool_prepare_page(struct kunit *test, mempool_t *pool, int order)
-{
-	int pool_size = 4;
-	int ret;
-	void *elem;
-
-	memset(pool, 0, sizeof(*pool));
-	ret = mempool_init_page_pool(pool, pool_size, order);
-	KUNIT_ASSERT_EQ(test, ret, 0);
-
-	elem = mempool_alloc_preallocated(pool);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, elem);
-
-	return elem;
-}
-
-static void mempool_oob_right_helper(struct kunit *test, mempool_t *pool, size_t size)
-{
-	char *elem;
-
-	elem = mempool_alloc_preallocated(pool);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, elem);
-
-	OPTIMIZER_HIDE_VAR(elem);
-
-	if (IS_ENABLED(CONFIG_KASAN_GENERIC))
-		KUNIT_EXPECT_KASAN_FAIL(test,
-			((volatile char *)&elem[size])[0]);
-	else
-		KUNIT_EXPECT_KASAN_FAIL(test,
-			((volatile char *)&elem[round_up(size, KASAN_GRANULE_SIZE)])[0]);
-
-	mempool_free(elem, pool);
-}
-
-static void mempool_kmalloc_oob_right(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = 128 - KASAN_GRANULE_SIZE - 5;
-	void *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_oob_right_helper(test, &pool, size);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_kmalloc_large_oob_right(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = KMALLOC_MAX_CACHE_SIZE + 1;
-	void *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_oob_right_helper(test, &pool, size);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_slab_oob_right(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = 123;
-	struct kmem_cache *cache;
-
-	cache = mempool_prepare_slab(test, &pool, size);
-
-	mempool_oob_right_helper(test, &pool, size);
-
-	mempool_exit(&pool);
-	kmem_cache_destroy(cache);
-}
-
-/*
- * Skip the out-of-bounds test for page mempool. With Generic KASAN, page
- * allocations have no redzones, and thus the out-of-bounds detection is not
- * guaranteed; see https://bugzilla.kernel.org/show_bug.cgi?id=210503. With
- * the tag-based KASAN modes, the neighboring allocation might have the same
- * tag; see https://bugzilla.kernel.org/show_bug.cgi?id=203505.
- */
-
-static void mempool_uaf_helper(struct kunit *test, mempool_t *pool, bool page)
-{
-	char *elem, *ptr;
-
-	elem = mempool_alloc_preallocated(pool);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, elem);
-
-	mempool_free(elem, pool);
-
-	ptr = page ? page_address((struct page *)elem) : elem;
-	KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)ptr)[0]);
-}
-
-static void mempool_kmalloc_uaf(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = 128;
-	void *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_uaf_helper(test, &pool, false);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_kmalloc_large_uaf(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = KMALLOC_MAX_CACHE_SIZE + 1;
-	void *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_uaf_helper(test, &pool, false);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_slab_uaf(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = 123;
-	struct kmem_cache *cache;
-
-	cache = mempool_prepare_slab(test, &pool, size);
-
-	mempool_uaf_helper(test, &pool, false);
-
-	mempool_exit(&pool);
-	kmem_cache_destroy(cache);
-}
-
-static void mempool_page_alloc_uaf(struct kunit *test)
-{
-	mempool_t pool;
-	int order = 2;
-	void *extra_elem;
-
-	extra_elem = mempool_prepare_page(test, &pool, order);
-
-	mempool_uaf_helper(test, &pool, true);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_double_free_helper(struct kunit *test, mempool_t *pool)
-{
-	char *elem;
-
-	elem = mempool_alloc_preallocated(pool);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, elem);
-
-	mempool_free(elem, pool);
-
-	KUNIT_EXPECT_KASAN_FAIL(test, mempool_free(elem, pool));
-}
-
-static void mempool_kmalloc_double_free(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = 128;
-	char *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_double_free_helper(test, &pool);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_kmalloc_large_double_free(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = KMALLOC_MAX_CACHE_SIZE + 1;
-	char *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_double_free_helper(test, &pool);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_page_alloc_double_free(struct kunit *test)
-{
-	mempool_t pool;
-	int order = 2;
-	char *extra_elem;
-
-	extra_elem = mempool_prepare_page(test, &pool, order);
-
-	mempool_double_free_helper(test, &pool);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_kmalloc_invalid_free_helper(struct kunit *test, mempool_t *pool)
-{
-	char *elem;
-
-	elem = mempool_alloc_preallocated(pool);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, elem);
-
-	KUNIT_EXPECT_KASAN_FAIL(test, mempool_free(elem + 1, pool));
-
-	mempool_free(elem, pool);
-}
-
-static void mempool_kmalloc_invalid_free(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = 128;
-	char *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_kmalloc_invalid_free_helper(test, &pool);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-static void mempool_kmalloc_large_invalid_free(struct kunit *test)
-{
-	mempool_t pool;
-	size_t size = KMALLOC_MAX_CACHE_SIZE + 1;
-	char *extra_elem;
-
-	extra_elem = mempool_prepare_kmalloc(test, &pool, size);
-
-	mempool_kmalloc_invalid_free_helper(test, &pool);
-
-	mempool_free(extra_elem, &pool);
-	mempool_exit(&pool);
-}
-
-/*
- * Skip the invalid-free test for page mempool. The invalid-free detection only
- * works for compound pages and mempool preallocates all page elements without
- * the __GFP_COMP flag.
- */
-
-static char global_array[10];
-
-static void kasan_global_oob_right(struct kunit *test)
-{
-	/*
-	 * Deliberate out-of-bounds access. To prevent CONFIG_UBSAN_LOCAL_BOUNDS
-	 * from failing here and panicking the kernel, access the array via a
-	 * volatile pointer, which will prevent the compiler from being able to
-	 * determine the array bounds.
-	 *
-	 * This access uses a volatile pointer to char (char *volatile) rather
-	 * than the more conventional pointer to volatile char (volatile char *)
-	 * because we want to prevent the compiler from making inferences about
-	 * the pointer itself (i.e. its array bounds), not the data that it
-	 * refers to.
-	 */
-	char *volatile array = global_array;
-	char *p = &array[ARRAY_SIZE(global_array) + 3];
-
-	/* Only generic mode instruments globals. */
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
-
-	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
-}
-
-static void kasan_global_oob_left(struct kunit *test)
-{
-	char *volatile array = global_array;
-	char *p = array - 3;
-
-	/*
-	 * GCC is known to fail this test, skip it.
-	 * See https://bugzilla.kernel.org/show_bug.cgi?id=215051.
-	 */
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_CC_IS_CLANG);
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
-	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
-}
-
-static void kasan_stack_oob(struct kunit *test)
-{
-	char stack_array[10];
-	/* See comment in kasan_global_oob_right. */
-	char *volatile array = stack_array;
-	char *p = &array[ARRAY_SIZE(stack_array) + OOB_TAG_OFF];
-
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_STACK);
-
-	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
-}
-
-static void kasan_alloca_oob_left(struct kunit *test)
-{
-	volatile int i = 10;
-	char alloca_array[i];
-	/* See comment in kasan_global_oob_right. */
-	char *volatile array = alloca_array;
-	char *p = array - 1;
-
-	/* Only generic mode instruments dynamic allocas. */
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_STACK);
-
-	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
-}
-
-static void kasan_alloca_oob_right(struct kunit *test)
-{
-	volatile int i = 10;
-	char alloca_array[i];
-	/* See comment in kasan_global_oob_right. */
-	char *volatile array = alloca_array;
-	char *p = array + i;
-
-	/* Only generic mode instruments dynamic allocas. */
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_STACK);
-
-	KUNIT_EXPECT_KASAN_FAIL(test, *(volatile char *)p);
 }
 
 static void kasan_memchr(struct kunit *test)
@@ -1469,9 +1037,11 @@ static void kasan_bitops_test_and_modify(struct kunit *test, int nr, void *addr)
 	KUNIT_EXPECT_KASAN_FAIL(test, test_and_change_bit(nr, addr));
 	KUNIT_EXPECT_KASAN_FAIL(test, __test_and_change_bit(nr, addr));
 	KUNIT_EXPECT_KASAN_FAIL(test, kasan_int_result = test_bit(nr, addr));
-	if (nr < 7)
-		KUNIT_EXPECT_KASAN_FAIL(test, kasan_int_result =
-				xor_unlock_is_negative_byte(1 << nr, addr));
+
+#if defined(clear_bit_unlock_is_negative_byte)
+	KUNIT_EXPECT_KASAN_FAIL(test, kasan_int_result =
+				clear_bit_unlock_is_negative_byte(nr, addr));
+#endif
 }
 
 static void kasan_bitops_generic(struct kunit *test)
@@ -1521,6 +1091,18 @@ static void kasan_bitops_tags(struct kunit *test)
 	kfree(bits);
 }
 
+static void kmalloc_double_kzfree(struct kunit *test)
+{
+	char *ptr;
+	size_t size = 16;
+
+	ptr = kmalloc(size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
+
+	kfree_sensitive(ptr);
+	KUNIT_EXPECT_KASAN_FAIL(test, kfree_sensitive(ptr));
+}
+
 static void vmalloc_helpers_tags(struct kunit *test)
 {
 	void *ptr;
@@ -1529,9 +1111,6 @@ static void vmalloc_helpers_tags(struct kunit *test)
 	KASAN_TEST_NEEDS_CONFIG_OFF(test, CONFIG_KASAN_GENERIC);
 
 	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_VMALLOC);
-
-	if (!kasan_vmalloc_enabled())
-		kunit_skip(test, "Test requires kasan.vmalloc=on");
 
 	ptr = vmalloc(PAGE_SIZE);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -1566,9 +1145,6 @@ static void vmalloc_oob(struct kunit *test)
 	size_t size = PAGE_SIZE / 2 - KASAN_GRANULE_SIZE - 5;
 
 	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_VMALLOC);
-
-	if (!kasan_vmalloc_enabled())
-		kunit_skip(test, "Test requires kasan.vmalloc=on");
 
 	v_ptr = vmalloc(size);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, v_ptr);
@@ -1622,9 +1198,6 @@ static void vmap_tags(struct kunit *test)
 	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_SW_TAGS);
 
 	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_VMALLOC);
-
-	if (!kasan_vmalloc_enabled())
-		kunit_skip(test, "Test requires kasan.vmalloc=on");
 
 	p_page = alloc_pages(GFP_KERNEL, 1);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, p_page);
@@ -1726,7 +1299,7 @@ static void match_all_not_assigned(struct kunit *test)
 	KASAN_TEST_NEEDS_CONFIG_OFF(test, CONFIG_KASAN_GENERIC);
 
 	for (i = 0; i < 256; i++) {
-		size = get_random_u32_inclusive(1, 1024);
+		size = (get_random_int() % 1024) + 1;
 		ptr = kmalloc(size, GFP_KERNEL);
 		KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
 		KUNIT_EXPECT_GE(test, (u8)get_tag(ptr), (u8)KASAN_TAG_MIN);
@@ -1735,7 +1308,7 @@ static void match_all_not_assigned(struct kunit *test)
 	}
 
 	for (i = 0; i < 256; i++) {
-		order = get_random_u32_inclusive(1, 4);
+		order = (get_random_int() % 4) + 1;
 		pages = alloc_pages(GFP_KERNEL, order);
 		ptr = page_address(pages);
 		KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -1744,11 +1317,11 @@ static void match_all_not_assigned(struct kunit *test)
 		free_pages((unsigned long)ptr, order);
 	}
 
-	if (!kasan_vmalloc_enabled())
+	if (!IS_ENABLED(CONFIG_KASAN_VMALLOC))
 		return;
 
 	for (i = 0; i < 256; i++) {
-		size = get_random_u32_inclusive(1, 1024);
+		size = (get_random_int() % 1024) + 1;
 		ptr = vmalloc(size);
 		KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
 		KUNIT_EXPECT_GE(test, (u8)get_tag(ptr), (u8)KASAN_TAG_MIN);
@@ -1797,14 +1370,6 @@ static void match_all_mem_tag(struct kunit *test)
 
 	/* For each possible tag value not matching the pointer tag. */
 	for (tag = KASAN_TAG_MIN; tag <= KASAN_TAG_KERNEL; tag++) {
-		/*
-		 * For Software Tag-Based KASAN, skip the majority of tag
-		 * values to avoid the test printing too many reports.
-		 */
-		if (IS_ENABLED(CONFIG_KASAN_SW_TAGS) &&
-		    tag >= KASAN_TAG_MIN + 8 && tag <= KASAN_TAG_KERNEL - 8)
-			continue;
-
 		if (tag == get_tag(ptr))
 			continue;
 
@@ -1824,16 +1389,16 @@ static struct kunit_case kasan_kunit_test_cases[] = {
 	KUNIT_CASE(kmalloc_oob_right),
 	KUNIT_CASE(kmalloc_oob_left),
 	KUNIT_CASE(kmalloc_node_oob_right),
-	KUNIT_CASE(kmalloc_big_oob_right),
+	KUNIT_CASE(kmalloc_pagealloc_oob_right),
+	KUNIT_CASE(kmalloc_pagealloc_uaf),
+	KUNIT_CASE(kmalloc_pagealloc_invalid_free),
+	KUNIT_CASE(pagealloc_oob_right),
+	KUNIT_CASE(pagealloc_uaf),
 	KUNIT_CASE(kmalloc_large_oob_right),
-	KUNIT_CASE(kmalloc_large_uaf),
-	KUNIT_CASE(kmalloc_large_invalid_free),
-	KUNIT_CASE(page_alloc_oob_right),
-	KUNIT_CASE(page_alloc_uaf),
 	KUNIT_CASE(krealloc_more_oob),
 	KUNIT_CASE(krealloc_less_oob),
-	KUNIT_CASE(krealloc_large_more_oob),
-	KUNIT_CASE(krealloc_large_less_oob),
+	KUNIT_CASE(krealloc_pagealloc_more_oob),
+	KUNIT_CASE(krealloc_pagealloc_less_oob),
 	KUNIT_CASE(krealloc_uaf),
 	KUNIT_CASE(kmalloc_oob_16),
 	KUNIT_CASE(kmalloc_uaf_16),
@@ -1848,41 +1413,27 @@ static struct kunit_case kasan_kunit_test_cases[] = {
 	KUNIT_CASE(kmalloc_uaf_memset),
 	KUNIT_CASE(kmalloc_uaf2),
 	KUNIT_CASE(kmalloc_uaf3),
-	KUNIT_CASE(kmalloc_double_kzfree),
-	KUNIT_CASE(ksize_unpoisons_memory),
-	KUNIT_CASE(ksize_uaf),
-	KUNIT_CASE(rcu_uaf),
-	KUNIT_CASE(workqueue_uaf),
 	KUNIT_CASE(kfree_via_page),
 	KUNIT_CASE(kfree_via_phys),
 	KUNIT_CASE(kmem_cache_oob),
-	KUNIT_CASE(kmem_cache_double_free),
-	KUNIT_CASE(kmem_cache_invalid_free),
-	KUNIT_CASE(kmem_cache_double_destroy),
 	KUNIT_CASE(kmem_cache_accounted),
 	KUNIT_CASE(kmem_cache_bulk),
-	KUNIT_CASE(mempool_kmalloc_oob_right),
-	KUNIT_CASE(mempool_kmalloc_large_oob_right),
-	KUNIT_CASE(mempool_slab_oob_right),
-	KUNIT_CASE(mempool_kmalloc_uaf),
-	KUNIT_CASE(mempool_kmalloc_large_uaf),
-	KUNIT_CASE(mempool_slab_uaf),
-	KUNIT_CASE(mempool_page_alloc_uaf),
-	KUNIT_CASE(mempool_kmalloc_double_free),
-	KUNIT_CASE(mempool_kmalloc_large_double_free),
-	KUNIT_CASE(mempool_page_alloc_double_free),
-	KUNIT_CASE(mempool_kmalloc_invalid_free),
-	KUNIT_CASE(mempool_kmalloc_large_invalid_free),
 	KUNIT_CASE(kasan_global_oob_right),
 	KUNIT_CASE(kasan_global_oob_left),
 	KUNIT_CASE(kasan_stack_oob),
 	KUNIT_CASE(kasan_alloca_oob_left),
 	KUNIT_CASE(kasan_alloca_oob_right),
+	KUNIT_CASE(ksize_unpoisons_memory),
+	KUNIT_CASE(ksize_uaf),
+	KUNIT_CASE(kmem_cache_double_free),
+	KUNIT_CASE(kmem_cache_invalid_free),
+	KUNIT_CASE(kmem_cache_double_destroy),
 	KUNIT_CASE(kasan_memchr),
 	KUNIT_CASE(kasan_memcmp),
 	KUNIT_CASE(kasan_strings),
 	KUNIT_CASE(kasan_bitops_generic),
 	KUNIT_CASE(kasan_bitops_tags),
+	KUNIT_CASE(kmalloc_double_kzfree),
 	KUNIT_CASE(vmalloc_helpers_tags),
 	KUNIT_CASE(vmalloc_oob),
 	KUNIT_CASE(vmap_tags),
@@ -1896,10 +1447,9 @@ static struct kunit_case kasan_kunit_test_cases[] = {
 
 static struct kunit_suite kasan_kunit_test_suite = {
 	.name = "kasan",
+	.init = kasan_test_init,
 	.test_cases = kasan_kunit_test_cases,
 	.exit = kasan_test_exit,
-	.suite_init = kasan_suite_init,
-	.suite_exit = kasan_suite_exit,
 };
 
 kunit_test_suite(kasan_kunit_test_suite);

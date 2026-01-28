@@ -662,9 +662,16 @@ static int rtl_op_config(struct ieee80211_hw *hw, u32 changed)
 		if (mac->act_scanning)
 			mac->n_channels++;
 
+		if (rtlpriv->dm.supp_phymode_switch &&
+			mac->link_state < MAC80211_LINKED &&
+			!mac->act_scanning) {
+			if (rtlpriv->cfg->ops->chk_switch_dmdp)
+				rtlpriv->cfg->ops->chk_switch_dmdp(hw);
+		}
+
 		/*
 		 *because we should back channel to
-		 *current_network.chan in scanning,
+		 *current_network.chan in in scanning,
 		 *So if set_chan == current_network.chan
 		 *we should set it.
 		 *because mac80211 tell us wrong bw40
@@ -975,8 +982,7 @@ static int _rtl_get_hal_qnum(u16 queue)
  *for rtl819x  BE = 0, BK = 1, VI = 2, VO = 3
  */
 static int rtl_op_conf_tx(struct ieee80211_hw *hw,
-			  struct ieee80211_vif *vif,
-			  unsigned int link_id, u16 queue,
+			  struct ieee80211_vif *vif, u16 queue,
 			  const struct ieee80211_tx_queue_params *param)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
@@ -1003,7 +1009,7 @@ static void send_beacon_frame(struct ieee80211_hw *hw,
 			      struct ieee80211_vif *vif)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	struct sk_buff *skb = ieee80211_beacon_get(hw, vif, 0);
+	struct sk_buff *skb = ieee80211_beacon_get(hw, vif);
 	struct rtl_tcb_desc tcb_desc;
 
 	if (skb) {
@@ -1034,7 +1040,7 @@ EXPORT_SYMBOL_GPL(rtl_update_beacon_work_callback);
 static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
 				    struct ieee80211_bss_conf *bss_conf,
-				    u64 changed)
+				    u32 changed)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_hal *rtlhal = rtl_hal(rtlpriv);
@@ -1088,7 +1094,7 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 	if (changed & BSS_CHANGED_ASSOC) {
 		u8 mstatus;
 
-		if (vif->cfg.assoc) {
+		if (bss_conf->assoc) {
 			struct ieee80211_sta *sta = NULL;
 			u8 keep_alive = 10;
 
@@ -1105,7 +1111,7 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 
 			mac->link_state = MAC80211_LINKED;
 			mac->cnt_after_linked = 0;
-			mac->assoc_id = vif->cfg.aid;
+			mac->assoc_id = bss_conf->aid;
 			memcpy(mac->bssid, bss_conf->bssid, ETH_ALEN);
 
 			if (rtlpriv->cfg->ops->linked_set_reg)
@@ -1190,6 +1196,10 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 			mac->vendor = PEER_UNKNOWN;
 			mac->mode = 0;
 
+			if (rtlpriv->dm.supp_phymode_switch) {
+				if (rtlpriv->cfg->ops->chk_switch_dmdp)
+					rtlpriv->cfg->ops->chk_switch_dmdp(hw);
+			}
 			rtl_dbg(rtlpriv, COMP_MAC80211, DBG_DMESG,
 				"BSS_CHANGED_UN_ASSOC\n");
 		}
@@ -1453,6 +1463,11 @@ static void rtl_op_sw_scan_start(struct ieee80211_hw *hw,
 		rtlpriv->btcoexist.btc_ops->btc_scan_notify_wifi_only(rtlpriv,
 								      1);
 
+	if (rtlpriv->dm.supp_phymode_switch) {
+		if (rtlpriv->cfg->ops->chk_switch_dmdp)
+			rtlpriv->cfg->ops->chk_switch_dmdp(hw);
+	}
+
 	if (mac->link_state == MAC80211_LINKED) {
 		rtl_lps_leave(hw, true);
 		mac->link_state = MAC80211_LINKED_SCANNING;
@@ -1640,7 +1655,7 @@ static int rtl_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 			memcpy(rtlpriv->sec.key_buf[key_idx],
 			       key->key, key->keylen);
 			rtlpriv->sec.key_len[key_idx] = key->keylen;
-			eth_broadcast_addr(mac_addr);
+			memcpy(mac_addr, bcast_addr, ETH_ALEN);
 		} else {	/* pairwise key */
 			rtl_dbg(rtlpriv, COMP_SEC, DBG_DMESG,
 				"set pairwise key\n");
@@ -1687,7 +1702,7 @@ static int rtl_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 		rtlpriv->sec.key_len[key_idx] = 0;
 		eth_zero_addr(mac_addr);
 		/*
-		 *mac80211 will delete entries one by one,
+		 *mac80211 will delete entrys one by one,
 		 *so don't use rtl_cam_reset_all_entry
 		 *or clear all entry here.
 		 */
@@ -1881,7 +1896,7 @@ bool rtl_cmd_send_packet(struct ieee80211_hw *hw, struct sk_buff *skb)
 	/*this is wrong, fill_tx_cmddesc needs update*/
 	pdesc = &ring->desc[0];
 
-	rtlpriv->cfg->ops->fill_tx_cmddesc(hw, (u8 *)pdesc, skb);
+	rtlpriv->cfg->ops->fill_tx_cmddesc(hw, (u8 *)pdesc, 1, 1, skb);
 
 	__skb_queue_tail(&ring->queue, skb);
 
@@ -1892,21 +1907,10 @@ bool rtl_cmd_send_packet(struct ieee80211_hw *hw, struct sk_buff *skb)
 	return true;
 }
 EXPORT_SYMBOL(rtl_cmd_send_packet);
-
-void rtl_init_sw_leds(struct ieee80211_hw *hw)
-{
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-
-	rtlpriv->ledctl.sw_led0 = LED_PIN_LED0;
-	rtlpriv->ledctl.sw_led1 = LED_PIN_LED1;
-}
-EXPORT_SYMBOL(rtl_init_sw_leds);
-
 const struct ieee80211_ops rtl_ops = {
 	.start = rtl_op_start,
 	.stop = rtl_op_stop,
 	.tx = rtl_op_tx,
-	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.add_interface = rtl_op_add_interface,
 	.remove_interface = rtl_op_remove_interface,
 	.change_interface = rtl_op_change_interface,

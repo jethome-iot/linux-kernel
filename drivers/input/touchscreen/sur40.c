@@ -847,10 +847,9 @@ static int sur40_queue_setup(struct vb2_queue *q,
 		       unsigned int sizes[], struct device *alloc_devs[])
 {
 	struct sur40_state *sur40 = vb2_get_drv_priv(q);
-	unsigned int q_num_bufs = vb2_get_num_buffers(q);
 
-	if (q_num_bufs + *nbuffers < 3)
-		*nbuffers = 3 - q_num_bufs;
+	if (q->num_buffers + *nbuffers < 3)
+		*nbuffers = 3 - q->num_buffers;
 
 	if (*nplanes)
 		return sizes[0] < sur40->pix_fmt.sizeimage ? -EINVAL : 0;
@@ -940,8 +939,8 @@ static int sur40_vidioc_querycap(struct file *file, void *priv,
 {
 	struct sur40_state *sur40 = video_drvdata(file);
 
-	strscpy(cap->driver, DRIVER_SHORT, sizeof(cap->driver));
-	strscpy(cap->card, DRIVER_LONG, sizeof(cap->card));
+	strlcpy(cap->driver, DRIVER_SHORT, sizeof(cap->driver));
+	strlcpy(cap->card, DRIVER_LONG, sizeof(cap->card));
 	usb_make_path(sur40->usbdev, cap->bus_info, sizeof(cap->bus_info));
 	return 0;
 }
@@ -953,7 +952,7 @@ static int sur40_vidioc_enum_input(struct file *file, void *priv,
 		return -EINVAL;
 	i->type = V4L2_INPUT_TYPE_TOUCH;
 	i->std = V4L2_STD_UNKNOWN;
-	strscpy(i->name, "In-Cell Sensor", sizeof(i->name));
+	strlcpy(i->name, "In-Cell Sensor", sizeof(i->name));
 	i->capabilities = 0;
 	return 0;
 }
@@ -1124,7 +1123,7 @@ static const struct vb2_queue sur40_queue = {
 	.ops = &sur40_queue_ops,
 	.mem_ops = &vb2_dma_sg_memops,
 	.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC,
-	.min_queued_buffers = 3,
+	.min_buffers_needed = 3,
 };
 
 static const struct v4l2_file_operations sur40_video_fops = {

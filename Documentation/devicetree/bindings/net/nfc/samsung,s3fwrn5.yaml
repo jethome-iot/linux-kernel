@@ -8,6 +8,7 @@ title: Samsung S3FWRN5 NCI NFC Controller
 
 maintainers:
   - Krzysztof Kozlowski <krzk@kernel.org>
+  - Krzysztof Opasiak <k.opasiak@samsung.com>
 
 properties:
   compatible:
@@ -69,7 +70,7 @@ examples:
     #include <dt-bindings/gpio/gpio.h>
     #include <dt-bindings/interrupt-controller/irq.h>
 
-    i2c {
+    i2c4 {
         #address-cells = <1>;
         #size-cells = <0>;
 

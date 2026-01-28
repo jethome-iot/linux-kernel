@@ -22,7 +22,6 @@
 #include <linux/sched/hotplug.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
-#include <linux/irqdomain.h>
 #include <linux/kernel_stat.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -40,6 +39,7 @@
 #include <asm/page.h>
 #include <asm/sections.h>
 #include <asm/io.h>
+#include <asm/prom.h>
 #include <asm/smp.h>
 #include <asm/machdep.h>
 #include <asm/pmac_feature.h>
@@ -186,7 +186,7 @@ static const struct irq_domain_ops psurge_host_ops = {
 	.map	= psurge_host_map,
 };
 
-static int __init psurge_secondary_ipi_init(void)
+static int psurge_secondary_ipi_init(void)
 {
 	int rc = -ENOMEM;
 
@@ -413,7 +413,7 @@ static void __init smp_psurge_setup_cpu(int cpu_nr)
 		printk(KERN_ERR "Couldn't get primary IPI interrupt");
 }
 
-static void __init smp_psurge_take_timebase(void)
+void __init smp_psurge_take_timebase(void)
 {
 	if (psurge_type != PSURGE_DUAL)
 		return;
@@ -429,7 +429,7 @@ static void __init smp_psurge_take_timebase(void)
 	set_dec(tb_ticks_per_jiffy/2);
 }
 
-static void __init smp_psurge_give_timebase(void)
+void __init smp_psurge_give_timebase(void)
 {
 	/* Nothing to do here */
 }
@@ -598,10 +598,8 @@ static void __init smp_core99_setup_i2c_hwsync(int ncpus)
 			name = "Pulsar";
 			break;
 		}
-		if (pmac_tb_freeze != NULL) {
-			of_node_put(cc);
+		if (pmac_tb_freeze != NULL)
 			break;
-		}
 	}
 	if (pmac_tb_freeze != NULL) {
 		/* Open i2c bus for synchronous access */
@@ -708,12 +706,11 @@ static void __init smp_core99_setup(int ncpus)
 		struct device_node *cpus =
 			of_find_node_by_path("/cpus");
 		if (cpus &&
-		    of_property_read_bool(cpus, "platform-cpu-timebase")) {
+		    of_get_property(cpus, "platform-cpu-timebase", NULL)) {
 			pmac_tb_freeze = smp_core99_pfunc_tb_freeze;
 			printk(KERN_INFO "Processor timebase sync using"
 			       " platform function\n");
 		}
-		of_node_put(cpus);
 	}
 
 #else /* CONFIG_PPC64 */
@@ -878,6 +875,8 @@ static int smp_core99_cpu_online(unsigned int cpu)
 
 static void __init smp_core99_bringup_done(void)
 {
+	extern void g5_phy_disable_cpu1(void);
+
 	/* Close i2c bus if it was used for tb sync */
 	if (pmac_tb_clock_chip_host)
 		pmac_i2c_close(pmac_tb_clock_chip_host);

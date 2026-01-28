@@ -13,6 +13,7 @@
 #include <linux/i2c.h>
 #include <linux/bcd.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
 #include <linux/log2.h>
@@ -247,7 +248,8 @@ static const struct rx85x1_config rx8571_config = {
 	.num_nvram = 2
 };
 
-static int rx8581_probe(struct i2c_client *client)
+static int rx8581_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	struct rx8581 *rx8581;
 	const struct rx85x1_config *config = &rx8581_config;

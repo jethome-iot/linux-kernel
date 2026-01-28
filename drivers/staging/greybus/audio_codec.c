@@ -497,7 +497,7 @@ static int gbcodec_prepare(struct snd_pcm_substream *substream,
 			   struct snd_soc_dai *dai)
 {
 	int ret;
-	struct gbaudio_module_info *module = NULL, *iter;
+	struct gbaudio_module_info *module;
 	struct gbaudio_data_connection *data;
 	struct gb_bundle *bundle;
 	struct gbaudio_codec_info *codec = dev_get_drvdata(dai->dev);
@@ -511,13 +511,11 @@ static int gbcodec_prepare(struct snd_pcm_substream *substream,
 		return -ENODEV;
 	}
 
-	list_for_each_entry(iter, &codec->module_list, list) {
+	list_for_each_entry(module, &codec->module_list, list) {
 		/* find the dai */
-		data = find_data(iter, dai->id);
-		if (data) {
-			module = iter;
+		data = find_data(module, dai->id);
+		if (data)
 			break;
-		}
 	}
 	if (!data) {
 		dev_err(dai->dev, "DATA connection missing\n");
@@ -565,7 +563,7 @@ static int gbcodec_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 {
 	int ret;
 	struct gbaudio_data_connection *data;
-	struct gbaudio_module_info *module = NULL, *iter;
+	struct gbaudio_module_info *module;
 	struct gb_bundle *bundle;
 	struct gbaudio_codec_info *codec = dev_get_drvdata(dai->dev);
 	struct gbaudio_stream_params *params;
@@ -594,13 +592,11 @@ static int gbcodec_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 		return ret;
 	}
 
-	list_for_each_entry(iter, &codec->module_list, list) {
+	list_for_each_entry(module, &codec->module_list, list) {
 		/* find the dai */
-		data = find_data(iter, dai->id);
-		if (data) {
-			module = iter;
+		data = find_data(module, dai->id);
+		if (data)
 			break;
-		}
 	}
 	if (!data) {
 		dev_err(dai->dev, "%s DATA connection missing\n",
@@ -706,9 +702,8 @@ static int gbaudio_init_jack(struct gbaudio_module_info *module,
 
 	headset->pin = module->jack_name;
 	headset->mask = module->jack_mask;
-	ret = snd_soc_card_jack_new_pins(card, module->jack_name,
-					 module->jack_mask,
-					 &module->headset.jack, headset, 1);
+	ret = snd_soc_card_jack_new(card, module->jack_name, module->jack_mask,
+				    &module->headset.jack, headset, 1);
 	if (ret) {
 		dev_err(module->dev, "Failed to create new jack\n");
 		return ret;
@@ -730,10 +725,9 @@ static int gbaudio_init_jack(struct gbaudio_module_info *module,
 
 	button->pin = module->button_name;
 	button->mask = module->button_mask;
-	ret = snd_soc_card_jack_new_pins(card, module->button_name,
-					 module->button_mask,
-					 &module->button.jack,
-					 button, 1);
+	ret = snd_soc_card_jack_new(card, module->button_name,
+				    module->button_mask, &module->button.jack,
+				    button, 1);
 	if (ret) {
 		dev_err(module->dev, "Failed to create button jack\n");
 		goto free_jacks;
@@ -807,6 +801,7 @@ int gbaudio_register_module(struct gbaudio_module_info *module)
 {
 	int ret;
 	struct snd_soc_component *comp;
+	struct snd_card *card;
 	struct gbaudio_jack *jack = NULL;
 
 	if (!gbcodec) {
@@ -815,20 +810,21 @@ int gbaudio_register_module(struct gbaudio_module_info *module)
 	}
 
 	comp = gbcodec->component;
+	card = comp->card->snd_card;
 
-	mutex_lock(&gbcodec->register_mutex);
+	down_write(&card->controls_rwsem);
 
 	if (module->num_dais) {
 		dev_err(gbcodec->dev,
 			"%d:DAIs not supported via gbcodec driver\n",
 			module->num_dais);
-		mutex_unlock(&gbcodec->register_mutex);
+		up_write(&card->controls_rwsem);
 		return -EINVAL;
 	}
 
 	ret = gbaudio_init_jack(module, comp->card);
 	if (ret) {
-		mutex_unlock(&gbcodec->register_mutex);
+		up_write(&card->controls_rwsem);
 		return ret;
 	}
 
@@ -865,7 +861,7 @@ int gbaudio_register_module(struct gbaudio_module_info *module)
 		ret = snd_soc_dapm_new_widgets(comp->card);
 	dev_dbg(comp->dev, "Registered %s module\n", module->name);
 
-	mutex_unlock(&gbcodec->register_mutex);
+	up_write(&card->controls_rwsem);
 	return ret;
 }
 EXPORT_SYMBOL(gbaudio_register_module);
@@ -933,12 +929,13 @@ static void gbaudio_codec_cleanup(struct gbaudio_module_info *module)
 void gbaudio_unregister_module(struct gbaudio_module_info *module)
 {
 	struct snd_soc_component *comp = gbcodec->component;
+	struct snd_card *card = comp->card->snd_card;
 	struct gbaudio_jack *jack, *n;
 	int mask;
 
 	dev_dbg(comp->dev, "Unregister %s module\n", module->name);
 
-	mutex_lock(&gbcodec->register_mutex);
+	down_write(&card->controls_rwsem);
 	mutex_lock(&gbcodec->lock);
 	gbaudio_codec_cleanup(module);
 	list_del(&module->list);
@@ -975,8 +972,10 @@ void gbaudio_unregister_module(struct gbaudio_module_info *module)
 		dev_dbg(comp->dev, "Removing %d controls\n",
 			module->num_controls);
 		/* release control semaphore */
+		up_write(&card->controls_rwsem);
 		gbaudio_remove_component_controls(comp, module->controls,
 						  module->num_controls);
+		down_write(&card->controls_rwsem);
 	}
 	if (module->dapm_widgets) {
 		dev_dbg(comp->dev, "Removing %d widgets\n",
@@ -987,7 +986,7 @@ void gbaudio_unregister_module(struct gbaudio_module_info *module)
 
 	dev_dbg(comp->dev, "Unregistered %s module\n", module->name);
 
-	mutex_unlock(&gbcodec->register_mutex);
+	up_write(&card->controls_rwsem);
 }
 EXPORT_SYMBOL(gbaudio_unregister_module);
 
@@ -1007,7 +1006,6 @@ static int gbcodec_probe(struct snd_soc_component *comp)
 	info->dev = comp->dev;
 	INIT_LIST_HEAD(&info->module_list);
 	mutex_init(&info->lock);
-	mutex_init(&info->register_mutex);
 	INIT_LIST_HEAD(&info->dai_list);
 
 	/* init dai_list used to maintain runtime stream info */
@@ -1027,6 +1025,12 @@ static int gbcodec_probe(struct snd_soc_component *comp)
 	return 0;
 }
 
+static void gbcodec_remove(struct snd_soc_component *comp)
+{
+	/* Empty function for now */
+	return;
+}
+
 static int gbcodec_write(struct snd_soc_component *comp, unsigned int reg,
 			 unsigned int value)
 {
@@ -1041,6 +1045,8 @@ static unsigned int gbcodec_read(struct snd_soc_component *comp,
 
 static const struct snd_soc_component_driver soc_codec_dev_gbaudio = {
 	.probe	= gbcodec_probe,
+	.remove	= gbcodec_remove,
+
 	.read = gbcodec_read,
 	.write = gbcodec_write,
 };
@@ -1071,6 +1077,11 @@ static int gbaudio_codec_probe(struct platform_device *pdev)
 			gbaudio_dai, ARRAY_SIZE(gbaudio_dai));
 }
 
+static int gbaudio_codec_remove(struct platform_device *pdev)
+{
+	return 0;
+}
+
 static const struct of_device_id greybus_asoc_machine_of_match[]  = {
 	{ .compatible = "toshiba,apb-dummy-codec", },
 	{},
@@ -1085,6 +1096,7 @@ static struct platform_driver gbaudio_codec_driver = {
 		.of_match_table = greybus_asoc_machine_of_match,
 	},
 	.probe = gbaudio_codec_probe,
+	.remove = gbaudio_codec_remove,
 };
 module_platform_driver(gbaudio_codec_driver);
 

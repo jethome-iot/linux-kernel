@@ -791,7 +791,7 @@ static const struct v4l2_ctrl_ops tvp7002_ctrl_ops = {
 /*
  * tvp7002_enum_mbus_code() - Enum supported digital video format on pad
  * @sd: pointer to standard V4L2 sub-device structure
- * @sd_state: V4L2 subdev state
+ * @cfg: pad configuration
  * @code: pointer to subdev enum mbus code struct
  *
  * Enumerate supported digital video formats for pad.
@@ -813,7 +813,7 @@ tvp7002_enum_mbus_code(struct v4l2_subdev *sd,
 /*
  * tvp7002_get_pad_format() - get video format on pad
  * @sd: pointer to standard V4L2 sub-device structure
- * @sd_state: V4L2 subdev state
+ * @cfg: pad configuration
  * @fmt: pointer to subdev format struct
  *
  * get video format for pad.
@@ -837,7 +837,7 @@ tvp7002_get_pad_format(struct v4l2_subdev *sd,
 /*
  * tvp7002_set_pad_format() - set video format on pad
  * @sd: pointer to standard V4L2 sub-device structure
- * @sd_state: V4L2 subdev state
+ * @cfg: pad configuration
  * @fmt: pointer to subdev format struct
  *
  * set video format for pad.
@@ -1044,7 +1044,7 @@ error:
  * Reset the TVP7002 device
  * Returns zero.
  */
-static void tvp7002_remove(struct i2c_client *c)
+static int tvp7002_remove(struct i2c_client *c)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(c);
 	struct tvp7002 *device = to_tvp7002(sd);
@@ -1056,6 +1056,7 @@ static void tvp7002_remove(struct i2c_client *c)
 	media_entity_cleanup(&device->sd.entity);
 #endif
 	v4l2_ctrl_handler_free(&device->hdl);
+	return 0;
 }
 
 /* I2C Device ID table */
@@ -1079,7 +1080,7 @@ static struct i2c_driver tvp7002_driver = {
 		.of_match_table = of_match_ptr(tvp7002_of_match),
 		.name = TVP7002_MODULE_NAME,
 	},
-	.probe = tvp7002_probe,
+	.probe_new = tvp7002_probe,
 	.remove = tvp7002_remove,
 	.id_table = tvp7002_id,
 };

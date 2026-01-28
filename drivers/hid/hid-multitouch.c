@@ -1638,6 +1638,9 @@ static int mt_input_configured(struct hid_device *hdev, struct hid_input *hi)
 	case HID_DG_STYLUS:
 		/* force BTN_STYLUS to allow tablet matching in udev */
 		__set_bit(BTN_STYLUS, hi->input->keybit);
+		fallthrough;
+	case HID_DG_PEN:
+		suffix = "Stylus";
 		break;
 	default:
 		suffix = "UNKNOWN";
@@ -1802,6 +1805,7 @@ static int mt_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	return 0;
 }
 
+#ifdef CONFIG_PM
 static int mt_suspend(struct hid_device *hdev, pm_message_t state)
 {
 	struct mt_device *td = hid_get_drvdata(hdev);
@@ -1835,6 +1839,7 @@ static int mt_resume(struct hid_device *hdev)
 
 	return 0;
 }
+#endif
 
 static void mt_remove(struct hid_device *hdev)
 {
@@ -1917,11 +1922,6 @@ static const struct hid_device_id mt_devices[] = {
 	{ .driver_data = MT_CLS_NSMU,
 		MT_USB_DEVICE(USB_VENDOR_ID_CVTOUCH,
 			USB_DEVICE_ID_CVTOUCH_SCREEN) },
-
-	/* eGalax devices (SAW) */
-	{ .driver_data = MT_CLS_EXPORT_ALL_INPUTS,
-		MT_USB_DEVICE(USB_VENDOR_ID_DWAV,
-			USB_DEVICE_ID_EGALAX_TOUCHCONTROLLER) },
 
 	/* eGalax devices (resistive) */
 	{ .driver_data = MT_CLS_EGALAX,
@@ -2153,6 +2153,10 @@ static const struct hid_device_id mt_devices[] = {
 
 	{ .driver_data = MT_CLS_WIN_8_FORCE_MULTI_INPUT,
 		HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
+			USB_VENDOR_ID_SYNAPTICS, 0xcddc) },
+
+	{ .driver_data = MT_CLS_WIN_8_FORCE_MULTI_INPUT,
+		HID_DEVICE(BUS_I2C, HID_GROUP_MULTITOUCH_WIN_8,
 			USB_VENDOR_ID_SYNAPTICS, 0xce08) },
 
 	{ .driver_data = MT_CLS_WIN_8_FORCE_MULTI_INPUT,
@@ -2262,8 +2266,10 @@ static struct hid_driver mt_driver = {
 	.usage_table = mt_grabbed_usages,
 	.event = mt_event,
 	.report = mt_report,
-	.suspend = pm_ptr(mt_suspend),
-	.reset_resume = pm_ptr(mt_reset_resume),
-	.resume = pm_ptr(mt_resume),
+#ifdef CONFIG_PM
+	.suspend = mt_suspend,
+	.reset_resume = mt_reset_resume,
+	.resume = mt_resume,
+#endif
 };
 module_hid_driver(mt_driver);

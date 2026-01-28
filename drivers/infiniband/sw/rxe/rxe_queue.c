@@ -61,11 +61,11 @@ struct rxe_queue *rxe_queue_init(struct rxe_dev *rxe, int *num_elem,
 
 	/* num_elem == 0 is allowed, but uninteresting */
 	if (*num_elem < 0)
-		return NULL;
+		goto err1;
 
 	q = kzalloc(sizeof(*q), GFP_KERNEL);
 	if (!q)
-		return NULL;
+		goto err1;
 
 	q->rxe = rxe;
 	q->type = type;
@@ -100,6 +100,7 @@ struct rxe_queue *rxe_queue_init(struct rxe_dev *rxe, int *num_elem,
 
 err2:
 	kfree(q);
+err1:
 	return NULL;
 }
 
@@ -152,8 +153,7 @@ int rxe_queue_resize(struct rxe_queue *q, unsigned int *num_elem_p,
 	struct rxe_queue *new_q;
 	unsigned int num_elem = *num_elem_p;
 	int err;
-	unsigned long producer_flags;
-	unsigned long consumer_flags;
+	unsigned long flags = 0, flags1;
 
 	new_q = rxe_queue_init(q->rxe, &num_elem, elem_size, q->type);
 	if (!new_q)
@@ -167,17 +167,17 @@ int rxe_queue_resize(struct rxe_queue *q, unsigned int *num_elem_p,
 		goto err1;
 	}
 
-	spin_lock_irqsave(consumer_lock, consumer_flags);
+	spin_lock_irqsave(consumer_lock, flags1);
 
 	if (producer_lock) {
-		spin_lock_irqsave(producer_lock, producer_flags);
+		spin_lock_irqsave(producer_lock, flags);
 		err = resize_finish(q, new_q, num_elem);
-		spin_unlock_irqrestore(producer_lock, producer_flags);
+		spin_unlock_irqrestore(producer_lock, flags);
 	} else {
 		err = resize_finish(q, new_q, num_elem);
 	}
 
-	spin_unlock_irqrestore(consumer_lock, consumer_flags);
+	spin_unlock_irqrestore(consumer_lock, flags1);
 
 	rxe_queue_cleanup(new_q);	/* new/old dep on err */
 	if (err)

@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2019 Amlogic, Inc. All rights reserved.
+ */
+
+/* TV project */
+#include "mesontxhd2_panel_TV.dtsi"
+
+/* BDS project */
+/* #include "mesontxhd2_panel_tablet.dtsi" */
+
+/* Projection project */
+/* #include "mesontxhd2_panel_projection.dtsi" */

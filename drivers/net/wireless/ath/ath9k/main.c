@@ -1571,6 +1571,7 @@ static void ath9k_configure_filter(struct ieee80211_hw *hw,
 	struct ath_chanctx *ctx;
 	u32 rfilt;
 
+	changed_flags &= SUPPORTED_FILTERS;
 	*total_flags &= SUPPORTED_FILTERS;
 
 	spin_lock_bh(&sc->chan_lock);
@@ -1712,8 +1713,7 @@ static void ath9k_sta_notify(struct ieee80211_hw *hw,
 }
 
 static int ath9k_conf_tx(struct ieee80211_hw *hw,
-			 struct ieee80211_vif *vif,
-			 unsigned int link_id, u16 queue,
+			 struct ieee80211_vif *vif, u16 queue,
 			 const struct ieee80211_tx_queue_params *params)
 {
 	struct ath_softc *sc = hw->priv;
@@ -1864,7 +1864,7 @@ static int ath9k_set_key(struct ieee80211_hw *hw,
 static void ath9k_bss_info_changed(struct ieee80211_hw *hw,
 				   struct ieee80211_vif *vif,
 				   struct ieee80211_bss_conf *bss_conf,
-				   u64 changed)
+				   u32 changed)
 {
 #define CHECK_ANI				\
 	(BSS_CHANGED_ASSOC |			\
@@ -1882,11 +1882,11 @@ static void ath9k_bss_info_changed(struct ieee80211_hw *hw,
 
 	if (changed & BSS_CHANGED_ASSOC) {
 		ath_dbg(common, CONFIG, "BSSID %pM Changed ASSOC %d\n",
-			bss_conf->bssid, vif->cfg.assoc);
+			bss_conf->bssid, bss_conf->assoc);
 
 		memcpy(avp->bssid, bss_conf->bssid, ETH_ALEN);
-		avp->aid = vif->cfg.aid;
-		avp->assoc = vif->cfg.assoc;
+		avp->aid = bss_conf->aid;
+		avp->assoc = bss_conf->assoc;
 
 		ath9k_calculate_summary_state(sc, avp->chanctx);
 	}
@@ -1894,7 +1894,7 @@ static void ath9k_bss_info_changed(struct ieee80211_hw *hw,
 	if ((changed & BSS_CHANGED_IBSS) ||
 	      (changed & BSS_CHANGED_OCB)) {
 		memcpy(common->curbssid, bss_conf->bssid, ETH_ALEN);
-		common->curaid = vif->cfg.aid;
+		common->curaid = bss_conf->aid;
 		ath9k_hw_write_associd(sc->sc_ah);
 	}
 
@@ -2383,22 +2383,7 @@ static void ath9k_sw_scan_start(struct ieee80211_hw *hw,
 {
 	struct ath_softc *sc = hw->priv;
 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
-	struct cfg80211_chan_def *chandef = &sc->cur_chan->chandef;
-	struct ieee80211_channel *chan = chandef->chan;
-	int pos = chan->hw_value;
 	set_bit(ATH_OP_SCANNING, &common->op_flags);
-
-	/* Reset current survey */
-	if (!sc->cur_chan->offchannel) {
-		if (sc->cur_survey != &sc->survey[pos]) {
-			if (sc->cur_survey)
-				sc->cur_survey->filled &= ~SURVEY_INFO_IN_USE;
-			sc->cur_survey = &sc->survey[pos];
-		}
-
-		memset(sc->cur_survey, 0, sizeof(struct survey_info));
-		sc->cur_survey->filled |= SURVEY_INFO_IN_USE;
-	}
 }
 
 static void ath9k_sw_scan_complete(struct ieee80211_hw *hw,
@@ -2612,7 +2597,6 @@ static void ath9k_change_chanctx(struct ieee80211_hw *hw,
 
 static int ath9k_assign_vif_chanctx(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
-				    struct ieee80211_bss_conf *link_conf,
 				    struct ieee80211_chanctx_conf *conf)
 {
 	struct ath_softc *sc = hw->priv;
@@ -2644,7 +2628,6 @@ static int ath9k_assign_vif_chanctx(struct ieee80211_hw *hw,
 
 static void ath9k_unassign_vif_chanctx(struct ieee80211_hw *hw,
 				       struct ieee80211_vif *vif,
-				       struct ieee80211_bss_conf *link_conf,
 				       struct ieee80211_chanctx_conf *conf)
 {
 	struct ath_softc *sc = hw->priv;

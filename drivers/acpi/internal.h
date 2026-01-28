@@ -11,12 +11,10 @@
 
 #include <linux/idr.h>
 
-extern struct acpi_device *acpi_root;
-
 int early_acpi_osi_init(void);
 int acpi_osi_init(void);
 acpi_status acpi_os_initialize1(void);
-void acpi_scan_init(void);
+int acpi_scan_init(void);
 #ifdef CONFIG_PCI
 void acpi_pci_root_init(void);
 void acpi_pci_link_init(void);
@@ -28,6 +26,11 @@ void acpi_processor_init(void);
 void acpi_platform_init(void);
 void acpi_pnp_init(void);
 void acpi_int340x_thermal_init(void);
+#ifdef CONFIG_ARM_AMBA
+void acpi_amba_init(void);
+#else
+static inline void acpi_amba_init(void) {}
+#endif
 int acpi_sysfs_init(void);
 void acpi_gpe_apply_masked_gpes(void);
 void acpi_container_init(void);
@@ -85,20 +88,6 @@ bool acpi_scan_is_offline(struct acpi_device *adev, bool uevent);
 acpi_status acpi_sysfs_table_handler(u32 event, void *table, void *context);
 void acpi_scan_table_notify(void);
 
-int acpi_active_trip_temp(struct acpi_device *adev, int id, int *ret_temp);
-int acpi_passive_trip_temp(struct acpi_device *adev, int *ret_temp);
-int acpi_hot_trip_temp(struct acpi_device *adev, int *ret_temp);
-int acpi_critical_trip_temp(struct acpi_device *adev, int *ret_temp);
-
-#ifdef CONFIG_ARM64
-int acpi_arch_thermal_cpufreq_pctg(void);
-#else
-static inline int acpi_arch_thermal_cpufreq_pctg(void)
-{
-	return 0;
-}
-#endif
-
 /* --------------------------------------------------------------------------
                      Device Node Initialization / Removal
    -------------------------------------------------------------------------- */
@@ -107,16 +96,18 @@ static inline int acpi_arch_thermal_cpufreq_pctg(void)
 
 extern struct list_head acpi_bus_id_list;
 
+#define ACPI_MAX_DEVICE_INSTANCES	4096
+
 struct acpi_device_bus_id {
 	const char *bus_id;
 	struct ida instance_ida;
 	struct list_head node;
 };
 
+int acpi_device_add(struct acpi_device *device,
+		    void (*release)(struct device *));
 void acpi_init_device_object(struct acpi_device *device, acpi_handle handle,
-			     int type, void (*release)(struct device *));
-int acpi_tie_acpi_dev(struct acpi_device *adev);
-int acpi_device_add(struct acpi_device *device);
+			     int type);
 int acpi_device_setup_files(struct acpi_device *dev);
 void acpi_device_remove_files(struct acpi_device *dev);
 void acpi_device_add_finalize(struct acpi_device *device);
@@ -130,13 +121,14 @@ int acpi_bus_register_early_device(int type);
 /* --------------------------------------------------------------------------
                      Device Matching and Notification
    -------------------------------------------------------------------------- */
-const struct acpi_device *acpi_companion_match(const struct device *dev);
-int __acpi_device_uevent_modalias(const struct acpi_device *adev,
+struct acpi_device *acpi_companion_match(const struct device *dev);
+int __acpi_device_uevent_modalias(struct acpi_device *adev,
 				  struct kobj_uevent_env *env);
 
 /* --------------------------------------------------------------------------
                                   Power Resource
    -------------------------------------------------------------------------- */
+int acpi_power_init(void);
 void acpi_power_resources_list_free(struct list_head *list);
 int acpi_extract_power_resources(union acpi_object *package, unsigned int start,
 				 struct list_head *list);
@@ -160,31 +152,22 @@ int acpi_wakeup_device_init(void);
                                   Processor
    -------------------------------------------------------------------------- */
 #ifdef CONFIG_ARCH_MIGHT_HAVE_ACPI_PDC
-void acpi_early_processor_control_setup(void);
 void acpi_early_processor_set_pdc(void);
-#ifdef CONFIG_X86
-void acpi_proc_quirk_mwait_check(void);
 #else
-static inline void acpi_proc_quirk_mwait_check(void) {}
+static inline void acpi_early_processor_set_pdc(void) {}
 #endif
-bool processor_physically_present(acpi_handle handle);
+
+#ifdef CONFIG_X86
+void acpi_early_processor_osc(void);
 #else
-static inline void acpi_early_processor_control_setup(void) {}
+static inline void acpi_early_processor_osc(void) {}
 #endif
 
 /* --------------------------------------------------------------------------
                                   Embedded Controller
    -------------------------------------------------------------------------- */
-
-enum acpi_ec_event_state {
-	EC_EVENT_READY = 0,	/* Event work can be submitted */
-	EC_EVENT_IN_PROGRESS,	/* Event work is pending or being processed */
-	EC_EVENT_COMPLETE,	/* Event work processing has completed */
-};
-
 struct acpi_ec {
 	acpi_handle handle;
-	acpi_handle address_space_handler_holder;
 	int gpe;
 	int irq;
 	unsigned long command_addr;
@@ -199,8 +182,7 @@ struct acpi_ec {
 	spinlock_t lock;
 	struct work_struct work;
 	unsigned long timestamp;
-	enum acpi_ec_event_state event_state;
-	unsigned int events_to_process;
+	unsigned long nr_pending_queries;
 	unsigned int events_in_progress;
 	unsigned int queries_in_progress;
 	bool busy_polling;
@@ -292,14 +274,5 @@ void acpi_init_lpit(void);
 #else
 static inline void acpi_init_lpit(void) { }
 #endif
-
-/*--------------------------------------------------------------------------
-		ACPI _CRS CSI-2 and MIPI DisCo for Imaging
-  -------------------------------------------------------------------------- */
-
-void acpi_mipi_check_crs_csi2(acpi_handle handle);
-void acpi_mipi_scan_crs_csi2(void);
-void acpi_mipi_init_crs_csi2_swnodes(void);
-void acpi_mipi_crs_csi2_cleanup(void);
 
 #endif /* _ACPI_INTERNAL_H_ */

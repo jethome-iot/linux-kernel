@@ -1,0 +1,1302 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2019 Amlogic, Inc. All rights reserved.
+ */
+
+#include <linux/init.h>
+#include <linux/version.h>
+#include <linux/types.h>
+#include <linux/slab.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/delay.h>
+#include <linux/io.h>
+#include <linux/of.h>
+#include <linux/mm.h>
+#include <linux/amlogic/media/vout/lcd/aml_lcd.h>
+#include <linux/amlogic/media/vout/lcd/lcd_vout.h>
+#include <linux/amlogic/media/vout/lcd/lcd_unifykey.h>
+#include <linux/amlogic/media/vout/lcd/lcd_model.h>
+#include "lcd_common.h"
+#include "lcd_tcon_swpdf.h"
+
+#define UFR_TMG_PARSE        "cus_ctrl ufr_tmg"
+#define DFR_TMG_PARSE        "cus_ctrl dfr_tmg"
+#define EXT_TMG_PARSE        "cus_ctrl ext_tmg"
+#define TUNING_ATTR_PARSE    "cus_ctrl tuning_attr"
+#define CLK_ADV_PARSE        "cus_ctrl clk_adv"
+
+static int lcd_cus_ctrl_parse_clk_adv_dts(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, struct device_node *child)
+{
+	unsigned int para[2];
+
+	if (of_property_read_u32_array(child, "clk_advanced", &para[0], 2)) {
+		LCDERR("[%d]: failed to get clk_advanced\n", pdrv->index);
+		return -1;
+	}
+	pdrv->config.timing.ss_freq = para[0];
+	pdrv->config.timing.ss_mode = para[1];
+
+	if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+		LCDPR("[%d]: %s: freq=%hu, mode=%hu\n",
+			pdrv->index, CLK_ADV_PARSE, para[0], para[1]);
+	}
+
+	return 0;
+}
+
+#define LCD_EXT_TIMING_MAX 8
+static int lcd_cus_ctrl_parse_extend_tmg_dts(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, struct device_node *child)
+{
+	struct lcd_detail_timing_s *ptiming;
+	struct lcd_timing_s *tims = &pdrv->config.timing;
+	char snode[32];
+	int ret;
+	unsigned char etmg_idx, c_bit;
+	unsigned int para[14];
+
+	if (!tims->timings[0])
+		return -1;
+
+	for (etmg_idx = 0; etmg_idx < LCD_EXT_TIMING_MAX; etmg_idx++) {
+		memset(snode, 0, 32 * sizeof(char));
+		sprintf(snode, "extend_tmg_%hu", etmg_idx);
+
+		ret = of_property_read_u32_array(child, snode, &para[0], 14);
+		if (ret) {
+			LCDERR("[%d]: failed to get %s\n", pdrv->index, snode);
+			break;
+		}
+
+		ptiming = lcd_timing_alloc(pdrv);
+		if (!ptiming)
+			break;
+		memcpy(ptiming, tims->timings[0], sizeof(*ptiming));
+		ptiming->ss_force = 0;
+
+		ptiming->h_period    = para[0];
+		ptiming->h_active    = para[1];
+		ptiming->hsync_width = para[2];
+		ptiming->hsync_bp    = para[3];
+		ptiming->hsync_pol   = para[4];
+		ptiming->hsync_fp    = ptiming->h_period - ptiming->h_active -
+					ptiming->hsync_width - ptiming->hsync_bp;
+		ptiming->v_period    = para[5];
+		ptiming->v_active    = para[6];
+		ptiming->vsync_width = para[7];
+		ptiming->vsync_bp    = para[8];
+		ptiming->vsync_pol   = para[9];
+		ptiming->vsync_fp    = ptiming->v_period - ptiming->v_active -
+					ptiming->vsync_width - ptiming->vsync_bp;
+
+		c_bit = para[10];
+		ptiming->pixel_clk = para[13];
+
+		memset(snode, 0, 32 * sizeof(char));
+		sprintf(snode, "extend_tmg_%hu_frame_rate", etmg_idx);
+		ret = of_property_read_u32_array(child, snode, &para[0], 2);
+		ptiming->frame_rate_min = ret ? 0 : para[0];
+		ptiming->frame_rate_max = ret ? 0 : para[1];
+
+		memset(snode, 0, 32 * sizeof(char));
+		sprintf(snode, "extend_tmg_%hu_range_setting", etmg_idx);
+		ret = of_property_read_u32_array(child, snode, &para[0], 6);
+		ptiming->h_period_min = ret ? ptiming->h_period  : para[0];
+		ptiming->h_period_max = ret ? ptiming->h_period  : para[1];
+		ptiming->v_period_min = ret ? ptiming->v_period  : para[2];
+		ptiming->v_period_max = ret ? ptiming->v_period  : para[3];
+		ptiming->pclk_min     = ret ? ptiming->pixel_clk : para[4];
+		ptiming->pclk_max     = ret ? ptiming->pixel_clk : para[5];
+		ptiming->fr_adjust_type = ret ? 0xff : 3;
+		ptiming->switch_type = attr_conf->attr_flag;
+
+		lcd_clk_frame_rate_init(ptiming);
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("[%d]: %s: timing[%d]: %dx%dp%dhz\n", pdrv->index, EXT_TMG_PARSE,
+			      etmg_idx, ptiming->h_active, ptiming->v_active, ptiming->frame_rate);
+		}
+
+		lcd_config_timing_check(pdrv, ptiming);
+	}
+
+	return 0;
+}
+
+int lcd_cus_ctrl_load_from_dts(struct aml_lcd_drv_s *pdrv, struct device_node *child)
+{
+	char cusnode[25];
+	unsigned int cut_attr_para[4];
+
+	unsigned char cus_idx, cus_type;
+	struct lcd_cus_ctrl_attr_config_s cus_cfg;
+	int ret = 0;
+
+	for (cus_idx = 0; cus_idx < LCD_CUS_CTRL_ATTR_CNT_MAX; cus_idx++) {
+		sprintf(cusnode, "cus_ctrl_%hu_attr", cus_idx);
+		ret = of_property_read_variable_u32_array(child, cusnode, &cut_attr_para[0], 1, 4);
+		if (ret <= 0)
+			break;
+
+		cus_cfg.attr_index = cus_idx;
+		cus_cfg.param_flag = 0;
+		cus_cfg.param_size = 1;
+		cus_cfg.priv_sel = 0;
+
+		cus_type = cut_attr_para[0];
+		cus_cfg.attr_type = cus_type;
+		switch (cus_type) {
+		case LCD_CUS_CTRL_TYPE_EXTEND_TMG:
+			cus_cfg.attr_flag = cut_attr_para[1];
+			ret = lcd_cus_ctrl_parse_extend_tmg_dts(pdrv, &cus_cfg, child);
+			break;
+		case LCD_CUS_CTRL_TYPE_CLK_ADV:
+			ret = lcd_cus_ctrl_parse_clk_adv_dts(pdrv, &cus_cfg, child);
+			break;
+		default:
+			LCDERR("[%d]: %s: invalid cus_type: %d\n", pdrv->index, __func__, cus_type);
+			break;
+		}
+	}
+
+	return ret;
+}
+
+static int lcd_cus_ctrl_attr_parse_ufr_ukey(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, unsigned char *p)
+{
+	struct lcd_detail_timing_s *ptiming;
+	struct lcd_timing_s *tims = &pdrv->config.timing;
+	unsigned int hfp, vfp, offset = 0;
+
+	if (!tims->timings[0])
+		return -1;
+
+	ptiming = lcd_timing_alloc(pdrv);
+	if (!ptiming)
+		return -1;
+	memcpy(ptiming, tims->timings[0], sizeof(*ptiming));
+	ptiming->ss_force = 0;
+
+	ptiming->v_period_min = *(unsigned short *)(p + offset);
+	offset += 2;
+	ptiming->v_period_max = *(unsigned short *)(p + offset);
+	offset += 2;
+	if (attr_conf->param_size < offset)
+		goto lcd_cus_ctrl_attr_parse_ufr_ukey_err;
+	if (attr_conf->param_size == offset) {
+		//frame_rate range is update for compatibility in lcd_fr_range_update
+		ptiming->frame_rate_min = 0;
+		ptiming->frame_rate_max = 0;
+		goto lcd_cus_ctrl_attr_parse_ufr_ukey_next;
+	}
+
+	ptiming->frame_rate_min = *(unsigned short *)(p + offset);
+	offset += 2;
+	ptiming->frame_rate_max = *(unsigned short *)(p + offset);
+	offset += 2;
+	if (attr_conf->param_size < offset)
+		goto lcd_cus_ctrl_attr_parse_ufr_ukey_err;
+	if (attr_conf->param_size == offset)
+		goto lcd_cus_ctrl_attr_parse_ufr_ukey_next;
+
+	ptiming->vsync_width = *(unsigned short *)(p + offset);
+	offset += 2;
+	ptiming->vsync_bp = *(unsigned short *)(p + offset);
+	offset += 2;
+	if (attr_conf->param_size < offset)
+		goto lcd_cus_ctrl_attr_parse_ufr_ukey_err;
+
+lcd_cus_ctrl_attr_parse_ufr_ukey_next:
+	ptiming->v_active /= 2;
+	ptiming->v_period /= 2;
+	hfp = ptiming->h_period - ptiming->h_active - ptiming->hsync_width - ptiming->hsync_bp;
+	vfp = ptiming->v_period - ptiming->v_active - ptiming->vsync_width - ptiming->vsync_bp;
+	ptiming->hsync_fp = hfp;
+	ptiming->vsync_fp = vfp;
+	ptiming->switch_type = attr_conf->attr_flag;
+	lcd_clk_frame_rate_init(ptiming);
+	if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+		LCDPR("[%d]: %s: %dx%dp%dhz\n",
+			pdrv->index, UFR_TMG_PARSE,
+			ptiming->h_active, ptiming->v_active, ptiming->frame_rate);
+	}
+
+	lcd_config_timing_check(pdrv, ptiming);
+
+	return 0;
+
+lcd_cus_ctrl_attr_parse_ufr_ukey_err:
+	lcd_timing_free_last(pdrv);
+	LCDERR("[%d]: %s: param_size(%d) and offset(%d) are mismatch!\n",
+		pdrv->index, UFR_TMG_PARSE, attr_conf->param_size, offset);
+	return -1;
+}
+
+static int lcd_cus_ctrl_attr_parse_dfr_ukey(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, unsigned char *p)
+{
+	struct lcd_detail_timing_s *ptiming;
+	struct lcd_timing_s *tims = &pdrv->config.timing;
+	unsigned int offset = 0, fr_size, tmg_size = 0;
+	unsigned int temp;
+	int i, n, ret = 0, fr_cnt = 0, tmg_group_cnt = 0;
+	struct lcd_dfr_fr_s *fr = NULL;
+	struct lcd_dfr_timing_s *dfr_timing = NULL;
+
+	if (!tims->timings[0])
+		return -1;
+
+	fr_cnt = *(p + offset);
+	offset += 1;
+	tmg_group_cnt = *(p + offset);
+	offset += 1;
+	if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+		LCDPR("[%d]: %s: fr_cnt: %d, tmg_group_cnt: %d\n",
+			pdrv->index, DFR_TMG_PARSE, fr_cnt, tmg_group_cnt);
+	}
+	if (!fr_cnt) {
+		LCDERR("[%d]: %s: fr_cnt(%d) error!\n", pdrv->index, DFR_TMG_PARSE, fr_cnt);
+		return 0;
+	}
+
+	fr_size = fr_cnt * sizeof(struct lcd_dfr_fr_s);
+
+	fr = kzalloc(fr_size, GFP_KERNEL);
+	if (!fr)
+		return -1;
+
+	if (tmg_group_cnt) {
+		tmg_size = tmg_group_cnt * sizeof(struct lcd_dfr_timing_s);
+		dfr_timing = kzalloc(tmg_size, GFP_KERNEL);
+		if (!dfr_timing) {
+			kfree(fr);
+			return -1;
+		}
+	}
+
+	for (i = 0; i < fr_cnt; i++) {
+		temp = *(unsigned short *)(p + offset);
+		fr[i].frame_rate = temp & 0xfff;
+		fr[i].timing_index = (temp >> 12) & 0xf;
+		offset += 2;
+		fr[i].frame_rate_min = *(unsigned short *)(p + offset);
+		offset += 2;
+		fr[i].frame_rate_max = *(unsigned short *)(p + offset);
+		offset += 2;
+	}
+
+	for (i = 0;  i < tmg_group_cnt; i++) {
+		dfr_timing[i].vtotal = *(unsigned short *)(p + offset);
+		offset += 2;
+		dfr_timing[i].vtotal_min = *(unsigned short *)(p + offset);
+		offset += 2;
+		dfr_timing[i].vtotal_max = *(unsigned short *)(p + offset);
+		offset += 2;
+		dfr_timing[i].vpw = *(unsigned short *)(p + offset);
+		offset += 2;
+		dfr_timing[i].vbp = *(unsigned short *)(p + offset);
+		offset += 2;
+	}
+
+	if (attr_conf->param_size < offset) {
+		LCDERR("[%d]: %s: param_size(%d) and offset(%d) are mismatch!\n",
+			pdrv->index, DFR_TMG_PARSE, attr_conf->param_size, offset);
+		goto parse_dfr_timing_err;
+	}
+
+	for (i = 0; i < fr_cnt; i++) {
+		ptiming = lcd_timing_alloc(pdrv);
+		if (!ptiming)
+			goto parse_dfr_timing_err;
+		memcpy(ptiming, tims->timings[0], sizeof(*ptiming));
+		ptiming->ss_force = 0;
+
+		ptiming->frame_rate = fr[i].frame_rate;
+		ptiming->frame_rate_min = fr[i].frame_rate_min;
+		ptiming->frame_rate_max = fr[i].frame_rate_max;
+		if (fr[i].timing_index == 0) {
+			ptiming->pixel_clk = ptiming->frame_rate *
+				ptiming->h_period * ptiming->v_period;
+		} else {
+			n = fr[i].timing_index - 1;
+			if (n >= tmg_group_cnt || !dfr_timing) {
+				LCDERR("[%d]: %s: timing_index %d err, tmg_group_cnt %d\n",
+					pdrv->index, DFR_TMG_PARSE, fr[i].timing_index,
+					tmg_group_cnt);
+				ret = -1;
+				lcd_timing_free_last(pdrv);
+				goto parse_dfr_timing_err;
+			}
+			ptiming->v_period = dfr_timing[n].vtotal;
+			ptiming->v_period_min = dfr_timing[n].vtotal_min;
+			ptiming->v_period_max = dfr_timing[n].vtotal_max;
+			ptiming->vsync_width = dfr_timing[n].vpw;
+			ptiming->vsync_bp = dfr_timing[n].vbp;
+			ptiming->vsync_fp = ptiming->v_period - ptiming->v_active -
+				ptiming->vsync_width - ptiming->vsync_bp;
+			ptiming->pixel_clk = ptiming->frame_rate *
+				ptiming->h_period * ptiming->v_period;
+		}
+		ptiming->switch_type = attr_conf->attr_flag;
+		lcd_clk_frame_rate_init(ptiming);
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("[%d]: %s: dfr[%d]: %dx%dp%dhz\n",
+				pdrv->index, DFR_TMG_PARSE, i,
+				ptiming->h_active, ptiming->v_active, ptiming->frame_rate);
+		}
+
+		lcd_config_timing_check(pdrv, ptiming);
+	}
+
+	kfree(fr);
+	if (tmg_group_cnt)
+		kfree(dfr_timing);
+	return 0;
+
+parse_dfr_timing_err:
+	kfree(fr);
+	if (tmg_group_cnt)
+		kfree(dfr_timing);
+	return -1;
+}
+
+static int lcd_cus_ctrl_attr_parse_extend_tmg_ukey(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, unsigned char *p)
+{
+	struct lcd_detail_timing_s *ptiming;
+	struct lcd_timing_s *tims = &pdrv->config.timing;
+	unsigned int offset = 0;
+	unsigned int hfp, vfp, temp;
+	int i, group_cnt;
+
+	if (!tims->timings[0])
+		return -1;
+
+	group_cnt = attr_conf->param_flag;
+	if (!group_cnt)
+		return 0;
+
+	for (i = 0;  i < group_cnt; i++) {
+		ptiming = lcd_timing_alloc(pdrv);
+		if (!ptiming)
+			return -1;
+		memcpy(ptiming, tims->timings[0], sizeof(*ptiming));
+		ptiming->ss_force = 0;
+
+		ptiming->h_active = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->v_active = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->h_period = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->v_period = *(unsigned short *)(p + offset);
+		offset += 2;
+		temp = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->hsync_width = temp & 0xfff;
+		ptiming->hsync_pol = (temp >> 12) & 0xf;
+		ptiming->hsync_bp = *(unsigned short *)(p + offset);
+		offset += 2;
+		temp = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->vsync_width = temp & 0xfff;
+		ptiming->vsync_pol = (temp >> 12) & 0xf;
+		ptiming->vsync_bp = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->fr_adjust_type = *(p + offset);
+		offset += 1;
+		ptiming->pixel_clk = *(unsigned int *)(p + offset);
+		offset += 4;
+
+		ptiming->h_period_min = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->h_period_max = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->v_period_min = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->v_period_max = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->frame_rate_min = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->frame_rate_max = *(unsigned short *)(p + offset);
+		offset += 2;
+		ptiming->pclk_min = *(unsigned int *)(p + offset);
+		offset += 4;
+		ptiming->pclk_max = *(unsigned int *)(p + offset);
+		offset += 4;
+
+		hfp = ptiming->h_period - ptiming->h_active -
+			ptiming->hsync_width - ptiming->hsync_bp;
+		vfp = ptiming->v_period - ptiming->v_active -
+			ptiming->vsync_width - ptiming->vsync_bp;
+		ptiming->hsync_fp = hfp;
+		ptiming->vsync_fp = vfp;
+		ptiming->switch_type = attr_conf->attr_flag;
+		lcd_clk_frame_rate_init(ptiming);
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("[%d]: %s: extend_tmg[%d]: %dx%dp%dhz\n",
+				pdrv->index, EXT_TMG_PARSE, i,
+				ptiming->h_active, ptiming->v_active, ptiming->frame_rate);
+		}
+
+		lcd_config_timing_check(pdrv, ptiming);
+	}
+
+	if (attr_conf->param_size < offset) {
+		for (i = 0;  i < group_cnt; i++)
+			lcd_timing_free_last(pdrv);
+		LCDERR("[%d]: %s: param_size(%d) and offset(%d) are mismatch!\n",
+			pdrv->index, EXT_TMG_PARSE, attr_conf->param_size, offset);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_clk_adv_ukey(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, unsigned char *p)
+{
+	unsigned int offset = 0;
+
+	if (attr_conf->attr_flag & (1 << 0)) {
+		pdrv->config.timing.ss_freq = *(unsigned char *)(p + offset);
+		offset += 1;
+		pdrv->config.timing.ss_mode = *(unsigned char *)(p + offset);
+		offset += 1;
+	}
+
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_tuning_attr_ukey(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, unsigned char *p)
+{
+	unsigned int offset = 0;
+	unsigned short lane_cnt, group_cnt = 0;
+	int i, j;
+	struct phy_config_s *phy_cfg = &pdrv->config.phy_cfg;
+	struct phy_attr_s *phy;
+	unsigned char pn_phase;
+
+	if (!phy_cfg->phys[0])
+		return -1;
+
+	if (attr_conf->param_size == 0)
+		return 0;
+
+	group_cnt = attr_conf->param_flag;
+	if (!group_cnt)
+		return -1;
+
+	lane_cnt = *(unsigned short *)(p + offset);
+	offset += 2;
+
+	phy_cfg->lane_num = lane_cnt;
+	for (j = 0; j < lane_cnt; j++) {
+		pn_phase = *(p + offset);
+		phy_cfg->ch_ctrl[j].pn_swap = pn_phase & 0x1;
+		phy_cfg->ch_ctrl[j].phase_sel = (pn_phase >> 1) & 0xf;
+		if (phy_cfg->ch_ctrl[j].phase_sel == 0xf)
+			phy_cfg->ch_ctrl[j].phase_sel = 0xff;
+		offset += 1;
+		phy_cfg->ch_ctrl[j].sel = *(p + offset);
+		offset += 1;
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("%s: lane[%d]: sel=0x%x, pn_swap=%d, phase_sel=0x%x\n",
+				TUNING_ATTR_PARSE, j, phy_cfg->ch_ctrl[j].sel,
+				phy_cfg->ch_ctrl[j].pn_swap, phy_cfg->ch_ctrl[j].phase_sel);
+		}
+	}
+
+	for (i = 0;  i < group_cnt; i++) {
+		phy = lcd_phy_alloc(pdrv);
+		if (!phy)
+			goto lcd_cus_parse_phy_exit;
+		memcpy(phy, phy_cfg->phys[0], sizeof(*phy));
+
+		phy->phy_clk = *(unsigned short *)(p + offset);
+		offset += 2;
+		offset += 4; //phy_clk_min_max reserved
+		phy->ss.level = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->ss.freq = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->ss.mode = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->clk_phase = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->vswing = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->vcm = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->ref_bias = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->odt = *(unsigned short *)(p + offset);
+		offset += 2;
+		phy->cv_mode = *(unsigned short *)(p + offset);
+		offset += 2;
+		offset += 14; //phy_attr_5~11
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("%s: vswing=0x%x, vcm=0x%x, bias=0x%x, odt=0x%x, cvmode=%d\n",
+				TUNING_ATTR_PARSE, phy->vswing, phy->vcm,
+				phy->ref_bias, phy->odt, phy->cv_mode);
+		}
+
+		for (j = 0; j < lane_cnt; j++) {
+			phy->lane[j].preem = *(unsigned short *)(p + offset);
+			offset += 2;
+			phy->lane[j].amp = *(unsigned short *)(p + offset);
+			offset += 2;
+			if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+				LCDPR("%s: lane[%d]: preem=0x%x, amp=0x%x\n",
+					TUNING_ATTR_PARSE, i, phy->lane[j].preem, phy->lane[j].amp);
+			}
+		}
+	}
+
+	if (attr_conf->param_size < offset) {
+		for (i = 0;  i < group_cnt; i++)
+			lcd_phy_free_last(pdrv);
+
+		LCDERR("[%d]: %s: param_size(%d) and offset(%d) are mismatch!\n",
+			pdrv->index, TUNING_ATTR_PARSE, attr_conf->param_size, offset);
+		return -1;
+	}
+
+	if (phy_cfg->phys[0] && phy_cfg->phys[1] &&
+	    phy_cfg->phys[0]->phy_clk == phy_cfg->phys[1]->phy_clk) {
+		kfree(phy_cfg->phys[0]);
+		for (i = 0; i < phy_cfg->group_num - 1; i++)
+			phy_cfg->phys[i] = phy_cfg->phys[i + 1];
+		phy_cfg->phys[phy_cfg->group_num - 1] = NULL;
+		phy_cfg->group_num--;
+		phy_cfg->act_phy = phy_cfg->phys[0];
+	}
+
+lcd_cus_parse_phy_exit:
+
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_tcon_sw_pol_ukey(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, unsigned char *p)
+{
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_tcon_sw_pdf_ukey(struct aml_lcd_drv_s *pdrv,
+		struct lcd_cus_ctrl_attr_config_s *attr_conf, unsigned char *p)
+{
+	u32 th[2];
+	s32 blk_cnt = 0, act_cnt = 0, i = 0, k = 0;
+	struct swpdf_s *pdf = get_swpdf();
+	struct swpdf_pat_s *pat = NULL;
+	u32 x, y, w, h, reg, mask, val, bus, pattern_cnt, mat[4];
+	s32 offset = 0;
+
+	pattern_cnt = attr_conf->param_flag << 4 | attr_conf->attr_flag;
+
+	if (pattern_cnt > SWPDF_PATTERN_MAX || pattern_cnt <= 0)
+		return -1;
+
+	pdrv->config.customer_sw_pdf = 0;
+	for (i = 0; i < pattern_cnt; i++)
+		pdrv->config.customer_sw_pdf |= 1 << i;
+
+	lcd_swpdf_init(pdrv);
+
+	if (lcd_debug_print_flag & LCD_DBG_PR_ADV)
+		lcd_dbg_mem_dump(p, attr_conf->param_size);
+
+	for (i = 0; i < pattern_cnt; i++) {
+		blk_cnt = __p_to_u8(p + offset);
+		offset += 1;
+		act_cnt = __p_to_u8(p + offset);
+		offset += 1;
+
+		th[0] =  __p_to_u16(p + offset);
+		offset += 2;
+		th[1] =  __p_to_u16(p + offset);
+		offset += 2;
+
+		pat = swpdf_pat_create_add(pdf, th[0], th[1]);
+		if (!pat) {
+			LCDERR("swpdf pattern_%d create fail: blk_cnt:%d, act_cnt:%d thres: %d-%d",
+				i, blk_cnt, act_cnt, th[0], th[1]);
+			continue;
+		}
+
+		for (k = 0; k < blk_cnt; k++) {
+			x = __p_to_u16(p + offset);
+			offset += 2;
+			y = __p_to_u16(p + offset);
+			offset += 2;
+			w = __p_to_u8(p + offset);
+			offset += 1;
+			h = __p_to_u8(p + offset);
+			offset += 1;
+			mat[0] = __p_to_u32(p + offset);
+			offset += 4;
+			mat[1] = __p_to_u32(p + offset);
+			offset += 4;
+			mat[2] = __p_to_u32(p + offset);
+			offset += 4;
+			mat[3] = __p_to_u32(p + offset);
+			offset += 4;
+			if (!swpdf_block_create_add(pat, x, y, w, h, mat))
+				LCDERR("add blk:[%d, %d, %d, %d] mat:[%08x, %08x, %08x, %08x]\n",
+					x, y, w, h, mat[0], mat[1], mat[2], mat[3]);
+		}
+
+		for (k = 0; k < act_cnt; k++) {
+			reg = __p_to_u32(p + offset);
+			offset += 4;
+			mask = __p_to_u32(p + offset);
+			offset += 4;
+			val = __p_to_u32(p + offset);
+			offset += 4;
+			bus = __p_to_u8(p + offset);
+			offset += 1;
+			if (!swpdf_act_create_add(pat, reg, mask, val, bus))
+				LCDERR("add act: reg=0x%x, mask=0x%x, val=0x%x\n", reg, mask, val);
+		}
+		if (pdrv->status & LCD_STATUS_IF_ON)
+			swpdf_act_pat(pat, SWPDF_ACT_RD_DFT);
+	}
+
+	return offset;
+}
+
+int lcd_cus_ctrl_load_from_unifykey(struct aml_lcd_drv_s *pdrv, unsigned char *buf,
+		unsigned int max_size, unsigned char version)
+{
+	unsigned char *p;
+	struct lcd_cus_ctrl_attr_config_s attr_conf;
+	unsigned int ctrl_en, ctrl_attr, ctrl_cnt = 0;
+	unsigned int offset = 0, param_size, i, n;
+	char str[128];
+	int len, ret;
+
+	ctrl_en = *(unsigned int *)buf;
+	for (i = 0; i < LCD_CUS_CTRL_ATTR_CNT_MAX; i++) {
+		if (ctrl_en & (1 << i))
+			ctrl_cnt = i + 1;
+	}
+	if (ctrl_cnt == 0)
+		return 0;
+
+	if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+		LCDPR("[%d]: %s: ctrl_en=0x%x, ctrl_cnt=%d\n",
+			pdrv->index, __func__, ctrl_en, ctrl_cnt);
+	}
+
+	offset = 4; //ctrl_en size
+	n = 0;
+	for (i = 0; i < LCD_CUS_CTRL_ATTR_CNT_MAX; i++) {
+		if (n >= ctrl_cnt)
+			break;
+		if (offset >= max_size) {
+			if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+				LCDPR("[%d]: %s: offset %d reach max_size %d, exit\n",
+					pdrv->index, __func__, offset, max_size);
+			}
+			break;
+		}
+		p = buf + offset;
+		if (unlikely(!(ctrl_en & (1 << i)))) {
+			offset +=  4; //4 for attr_x and param_size
+			continue;
+		}
+
+		ctrl_attr = *(unsigned short *)p;
+		attr_conf.attr_index = i;
+		attr_conf.attr_flag = ctrl_attr & 0xf;
+		attr_conf.param_flag = (ctrl_attr >> 4) & 0xf;
+		attr_conf.attr_type = (ctrl_attr >> 8) & 0xff;
+		param_size = *(unsigned short *)(p + 2);
+		attr_conf.param_size = param_size;
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			len = sprintf(str, "attr_type=%x, attr_flag=%d, ",
+				attr_conf.attr_type,
+				attr_conf.attr_flag);
+			sprintf(str + len, "param_flag=%d, param_size=%d",
+				attr_conf.param_flag,
+				attr_conf.param_size);
+			LCDPR("[%d]: %s: attr[%d]: %s\n",
+				pdrv->index, __func__, i, str);
+		}
+
+		switch (attr_conf.attr_type) {
+		case LCD_CUS_CTRL_TYPE_UFR:
+			ret = lcd_cus_ctrl_attr_parse_ufr_ukey(pdrv, &attr_conf, (p + 4));
+			break;
+		case LCD_CUS_CTRL_TYPE_DFR:
+			ret = lcd_cus_ctrl_attr_parse_dfr_ukey(pdrv, &attr_conf, (p + 4));
+			break;
+		case LCD_CUS_CTRL_TYPE_EXTEND_TMG:
+			ret = lcd_cus_ctrl_attr_parse_extend_tmg_ukey(pdrv, &attr_conf, (p + 4));
+			break;
+		case LCD_CUS_CTRL_TYPE_CLK_ADV:
+			ret = lcd_cus_ctrl_attr_parse_clk_adv_ukey(pdrv, &attr_conf, (p + 4));
+			break;
+		case LCD_CUS_CTRL_TYPE_TUNING_ATTR:
+			if (version < 3) {
+				ret = -1;
+				LCDERR("[%d]: %s, invalid tuning_attr with ukey_ver %d\n",
+					pdrv->index, __func__, version);
+				break;
+			}
+			ret = lcd_cus_ctrl_attr_parse_tuning_attr_ukey(pdrv, &attr_conf, (p + 4));
+			break;
+		case LCD_CUS_CTRL_TYPE_TCON_SW_POL:
+			LCDERR("todo\n");
+			ret = lcd_cus_ctrl_attr_parse_tcon_sw_pol_ukey(pdrv, &attr_conf, (p + 4));
+			break;
+		case LCD_CUS_CTRL_TYPE_TCON_SW_PDF:
+			ret = lcd_cus_ctrl_attr_parse_tcon_sw_pdf_ukey(pdrv, &attr_conf, (p + 4));
+			break;
+		default:
+			LCDERR("[%d]: %s: invalid attr_type: 0x%x\n",
+				pdrv->index, __func__, attr_conf.attr_type);
+			goto lcd_cus_ctrl_load_from_unifykey_err;
+		}
+		n++;
+
+		if (ret)
+			goto lcd_cus_ctrl_load_from_unifykey_err;
+		offset += (param_size + 4); //4 for attr_x and param_size
+	}
+
+	return 0;
+
+lcd_cus_ctrl_load_from_unifykey_err:
+	return -1;
+}
+
+static int lcd_cus_ctrl_attr_parse_ufr_ini(struct aml_lcd_drv_s *pdrv,
+		void *inip, void *psec, struct lcd_cus_ctrl_attr_config_s *attr_conf)
+{
+	struct lcd_detail_timing_s *ptiming;
+	struct lcd_timing_s *tims = &pdrv->config.timing;
+	unsigned int temp;
+
+	if (!tims->timings[0])
+		return -1;
+
+	ptiming = lcd_timing_alloc(pdrv);
+	if (!ptiming)
+		return -1;
+
+	memcpy((void *)ptiming, (void *)tims->timings[0], sizeof(*ptiming));
+	ptiming->ss_force = 0;
+
+	temp = lcd_ini_get_val(inip, psec, "ufr_vtotal_min", 0);
+	if (temp == 0)
+		temp = lcd_ini_get_val(inip, psec, "ctrl_attr_0_parm0", 0);
+	if (temp)
+		ptiming->v_period_min = temp;
+
+	temp = lcd_ini_get_val(inip, psec, "ufr_vtotal_max", 0);
+	if (temp == 0)
+		temp = lcd_ini_get_val(inip, psec, "ctrl_attr_0_parm1", 0);
+	if (temp)
+		ptiming->v_period_max = temp;
+
+	temp = lcd_ini_get_val(inip, psec, "ufr_frame_rate_min", 0);
+	if (temp)
+		ptiming->frame_rate_min = temp;
+	temp = lcd_ini_get_val(inip, psec, "ufr_frame_rate_max", 0);
+	if (temp)
+		ptiming->frame_rate_max = temp;
+
+	temp = lcd_ini_get_val(inip, psec, "ufr_vpw", 0);
+	if (temp)
+		ptiming->vsync_width = temp;
+	temp = lcd_ini_get_val(inip, psec, "ufr_vbp", 0);
+	if (temp)
+		ptiming->vsync_bp = temp;
+
+	ptiming->v_active /= 2;
+	ptiming->v_period /= 2;
+	ptiming->hsync_fp = ptiming->h_period - ptiming->h_active -
+			ptiming->hsync_width - ptiming->hsync_bp;
+	ptiming->vsync_fp = ptiming->v_period - ptiming->v_active -
+			ptiming->vsync_width - ptiming->vsync_bp;
+	ptiming->switch_type = attr_conf->attr_flag;
+	lcd_clk_frame_rate_init(ptiming);
+	if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+		LCDPR("[%d]: %s: %dx%dp%dhz\n",
+			pdrv->index, UFR_TMG_PARSE,
+			ptiming->h_active, ptiming->v_active, ptiming->frame_rate);
+	}
+
+	lcd_config_timing_check(pdrv, ptiming);
+
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_dfr_ini(struct aml_lcd_drv_s *pdrv,
+		void *inip, void *psec, struct lcd_cus_ctrl_attr_config_s *attr_conf)
+{
+	struct lcd_detail_timing_s *ptiming, tmg_tmp;
+	struct lcd_timing_s *tims = &pdrv->config.timing;
+	char str[30];
+	unsigned int temp, tmg_index = 0;
+	int i;
+
+	if (!tims->timings[0])
+		return -1;
+
+	for (i = 0; i < 15; i++) {
+		memcpy((void *)&tmg_tmp, (void *)tims->timings[0], sizeof(tmg_tmp));
+
+		sprintf(str, "dfr_fr_%d_tmg_index", i);
+		tmg_index = lcd_ini_get_val(inip, psec, str, 0xffff);
+		if (tmg_index == 0xffff)
+			break;
+		if (tmg_index > 15) {
+			LCDERR("[%d]: %s: %s error: %d\n",
+				pdrv->index, DFR_TMG_PARSE, str, tmg_index);
+			return -1;
+		}
+
+		sprintf(str, "dfr_fr_%d_frame_rate", i);
+		tmg_tmp.frame_rate = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_tmp.frame_rate == 0)
+			break;
+
+		sprintf(str, "dfr_fr_%d_frame_rate_min", i);
+		tmg_tmp.frame_rate_min = lcd_ini_get_val(inip, psec, str, 0);
+
+		sprintf(str, "dfr_fr_%d_frame_rate_max", i);
+		tmg_tmp.frame_rate_max = lcd_ini_get_val(inip, psec, str, 0);
+
+		if (tmg_index) {
+			sprintf(str, "dfr_tmg_%d_vtotal", tmg_index);
+			tmg_tmp.v_period = lcd_ini_get_val(inip, psec, str, 0);
+			if (tmg_tmp.v_period == 0)
+				break;
+
+			sprintf(str, "dfr_tmg_%d_vtotal_min", i);
+			tmg_tmp.v_period_min = lcd_ini_get_val(inip, psec, str, 0);
+			if (tmg_tmp.v_period_min == 0)
+				break;
+
+			sprintf(str, "dfr_tmg_%d_vtotal_max", i);
+			tmg_tmp.v_period_max = lcd_ini_get_val(inip, psec, str, 0);
+			if (tmg_tmp.v_period_max == 0)
+				break;
+
+			sprintf(str, "dfr_tmg_%d_vpw", i);
+			temp = lcd_ini_get_val(inip, psec, str, 0);
+			if (temp)
+				tmg_tmp.vsync_width = temp;
+
+			sprintf(str, "dfr_tmg_%d_vbp", i);
+			temp = lcd_ini_get_val(inip, psec, str, 0);
+			if (temp == 0)
+				tmg_tmp.vsync_bp = temp;
+		}
+
+		ptiming = lcd_timing_alloc(pdrv);
+		if (!ptiming)
+			return -1;
+
+		memcpy((void *)ptiming, (void *)&tmg_tmp, sizeof(*ptiming));
+		ptiming->ss_force = 0;
+
+		ptiming->vsync_fp = ptiming->v_period - ptiming->v_active -
+			ptiming->vsync_width - ptiming->vsync_bp;
+		ptiming->pixel_clk = ptiming->frame_rate *
+			ptiming->h_period * ptiming->v_period;
+		ptiming->switch_type = attr_conf->attr_flag;
+		lcd_clk_frame_rate_init(ptiming);
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("[%d]: %s: dfr[%d]: %dx%dp%dhz\n",
+				pdrv->index, DFR_TMG_PARSE, i,
+				ptiming->h_active, ptiming->v_active, ptiming->frame_rate);
+		}
+
+		lcd_config_timing_check(pdrv, ptiming);
+	}
+
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_extend_tmg_ini(struct aml_lcd_drv_s *pdrv,
+		void *inip, void *psec, struct lcd_cus_ctrl_attr_config_s *attr_conf)
+{
+	struct lcd_detail_timing_s *ptiming, tmg_temp;
+	struct lcd_timing_s *tims = &pdrv->config.timing;
+	unsigned int val;
+	char str[30];
+	int i;
+
+	if (!tims->timings[0]) {
+		LCDERR("%s: no dft_timing, exit\n", EXT_TMG_PARSE);
+		return -1;
+	}
+
+	for (i = 0;  i < 15; i++) {
+		memcpy((void *)&tmg_temp, (void *)tims->timings[0], sizeof(tmg_temp));
+
+		sprintf(str, "extend_tmg_%d_hactive", i);
+		tmg_temp.h_active = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.h_active == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_vactive", i);
+		tmg_temp.v_active = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.v_active == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_htotal", i);
+		tmg_temp.h_period = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.h_period == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_vtotal", i);
+		tmg_temp.v_period = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.v_period == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_hpw", i);
+		tmg_temp.hsync_width = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.hsync_width == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_hbp", i);
+		tmg_temp.hsync_bp = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.hsync_bp == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_hs_pol", i);
+		val = lcd_ini_get_val(inip, psec, str, 0xffff);
+		if (val == 0xffff)
+			break;
+		tmg_temp.hsync_pol = val;
+		sprintf(str, "extend_tmg_%d_vpw", i);
+		tmg_temp.vsync_width = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.vsync_width)
+			break;
+		sprintf(str, "extend_tmg_%d_vbp", i);
+		tmg_temp.vsync_bp = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.vsync_bp == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_vs_pol", i);
+		val = lcd_ini_get_val(inip, psec, str, 0xffff);
+		if (val == 0xffff)
+			break;
+		tmg_temp.vsync_pol = val;
+		sprintf(str, "extend_tmg_%d_fr_adj_type", i);
+		val = lcd_ini_get_val(inip, psec, str, 0xffff);
+		if (val == 0xffff)
+			break;
+		tmg_temp.fr_adjust_type = val;
+		sprintf(str, "extend_tmg_%d_pixel_clk", i);
+		val = lcd_ini_get_val(inip, psec, str, 0xffffffff);
+		if (val == 0xffffffff)
+			break;
+		tmg_temp.pixel_clk = val;
+
+		sprintf(str, "extend_tmg_%d_htotal_min", i);
+		tmg_temp.h_period_min = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.h_period_min == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_htotal_max", i);
+		tmg_temp.h_period_max = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.h_period_max == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_vtotal_min", i);
+		tmg_temp.v_period_min = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.v_period_min == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_vtotal_max", i);
+		tmg_temp.v_period_max = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.v_period_max == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_frame_rate_min", i);
+		tmg_temp.frame_rate_min = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.frame_rate_min == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_frame_rate_max", i);
+		tmg_temp.frame_rate_max = lcd_ini_get_val(inip, psec, str, 0);
+		if (tmg_temp.frame_rate_max == 0)
+			break;
+		sprintf(str, "extend_tmg_%d_pclk_min", i);
+		tmg_temp.pclk_min = lcd_ini_get_val(inip, psec, str, 0);
+		sprintf(str, "extend_tmg_%d_pclk_max", i);
+		tmg_temp.pclk_max = lcd_ini_get_val(inip, psec, str, 0);
+
+		ptiming = lcd_timing_alloc(pdrv);
+		if (!ptiming) {
+			LCDERR("%s: ptiming alloc failed, exit\n", EXT_TMG_PARSE);
+			return -1;
+		}
+		memcpy((void *)ptiming, (void *)&tmg_temp, sizeof(*ptiming));
+		ptiming->ss_force = 0;
+
+		ptiming->hsync_fp = ptiming->h_period - ptiming->h_active -
+			ptiming->hsync_width - ptiming->hsync_bp;
+		ptiming->vsync_fp = ptiming->v_period - ptiming->v_active -
+			ptiming->vsync_width - ptiming->vsync_bp;
+		ptiming->switch_type = attr_conf->attr_flag;
+
+		lcd_clk_frame_rate_init(ptiming);
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("[%d]: %s: extend_tmg[%d]: %dx%dp%dhz\n",
+				pdrv->index, EXT_TMG_PARSE, i,
+				ptiming->h_active, ptiming->v_active, ptiming->frame_rate);
+		}
+
+		lcd_config_timing_check(pdrv, ptiming);
+	}
+
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_clk_adv_ini(struct aml_lcd_drv_s *pdrv,
+		void *inip, void *psec, struct lcd_cus_ctrl_attr_config_s *attr_conf)
+{
+	unsigned int temp;
+
+	if (attr_conf->attr_flag & (1 << 0)) {
+		temp = lcd_ini_get_val(inip, psec, "ss_freq", 0xffff);
+		if (temp != 0xffff)
+			pdrv->config.timing.ss_freq = temp;
+		temp = lcd_ini_get_val(inip, psec, "ss_mode", 0xffff);
+		if (temp != 0xffff)
+			pdrv->config.timing.ss_mode = temp;
+	}
+
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_tuning_attr_ini(struct aml_lcd_drv_s *pdrv,
+		void *inip, void *psec, struct lcd_cus_ctrl_attr_config_s *attr_conf)
+{
+	struct phy_config_s *phy_cfg;
+	struct phy_attr_s *phy, tmp_phy;
+	void *tuning_sec;
+	char sec_str[16], key_str[16];
+	unsigned short lane_cnt;
+	unsigned int temp;
+	int i, j;
+
+	if (!pdrv->config.phy_cfg.phys[0])
+		return -1;
+
+	tuning_sec = lcd_ini_get_section(inip, "lane_sel_Attr");
+	if (!tuning_sec) {
+		LCDERR("[%d]: %s: not find lane_sel_Attr\n", pdrv->index, TUNING_ATTR_PARSE);
+		return -1;
+	}
+
+	lane_cnt = lcd_ini_get_val(inip, tuning_sec, "lane_count", 0);
+	if (lane_cnt == 0)
+		return -1;
+	if (lane_cnt > CH_LANE_MAX) {
+		LCDERR("[%d]: %s: lane_cnt %d error\n", pdrv->index, TUNING_ATTR_PARSE, lane_cnt);
+		return -1;
+	}
+
+	phy_cfg = &pdrv->config.phy_cfg;
+	phy_cfg->lane_num = lane_cnt;
+	for (i = 0; i < lane_cnt; i++) {
+		sprintf(key_str, "ch%u_sel", i);
+		temp = lcd_ini_get_val(inip, tuning_sec, key_str, 0xffff);
+		if (temp == 0xffff)
+			goto lcd_cus_parse_phy_err;
+		phy_cfg->ch_ctrl[i].sel = temp;
+
+		sprintf(key_str, "ch%u_phase", i);
+		phy_cfg->ch_ctrl[i].phase_sel = lcd_ini_get_val(inip, tuning_sec, key_str, 0xff);
+
+		phy_cfg->ch_ctrl[i].pn_swap = 0; //reversed
+
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("%s: lane[%d]: sel=0x%x, pn_swap=%d, phase_sel=0x%x\n",
+			      TUNING_ATTR_PARSE, i, phy_cfg->ch_ctrl[i].sel,
+			      phy_cfg->ch_ctrl[i].pn_swap, phy_cfg->ch_ctrl[i].phase_sel);
+		}
+	}
+
+	for (i = 0; i < MAX_NUM_PHY_CFGS; i++) {
+		memcpy((void *)&tmp_phy, (void *)phy_cfg->phys[0], sizeof(tmp_phy));
+
+		if (i == 0)
+			sprintf(sec_str, "tuning_Attr");
+		else
+			sprintf(sec_str, "tuning_Attr%d", i);
+		tuning_sec = lcd_ini_get_section(inip, sec_str);
+		if (!tuning_sec) {
+			if (i == 0) {
+				LCDERR("[%d]: %s: not find %s\n",
+					pdrv->index, TUNING_ATTR_PARSE, sec_str);
+			}
+			break;
+		}
+
+		tmp_phy.phy_clk = lcd_ini_get_val(inip, tuning_sec, "phy_clk", 0);
+		//tmp_phy.phy_clk_min  //reversed
+		//tmp_phy.phy_clk_max  //reversed
+
+		tmp_phy.ss.level = lcd_ini_get_val(inip, tuning_sec, "ss_level", tmp_phy.ss.level);
+		tmp_phy.ss.freq =
+			lcd_ini_get_val(inip, tuning_sec, "ss_frequency", tmp_phy.ss.freq);
+		tmp_phy.ss.mode = lcd_ini_get_val(inip, tuning_sec, "ss_mode", tmp_phy.ss.mode);
+
+		if (pdrv->config.basic.lcd_type == LCD_MLVDS) {
+			tmp_phy.clk_phase = lcd_ini_get_val(inip, tuning_sec,
+						"mlvds_clk_phase", tmp_phy.clk_phase);
+		}
+
+		tmp_phy.vswing = lcd_ini_get_val(inip, tuning_sec, "vswing", tmp_phy.vswing);
+		tmp_phy.vcm = lcd_ini_get_val(inip, tuning_sec, "vcm", tmp_phy.vcm);
+		tmp_phy.ref_bias = lcd_ini_get_val(inip, tuning_sec, "ref_bias", tmp_phy.ref_bias);
+		tmp_phy.odt = lcd_ini_get_val(inip, tuning_sec, "odt", tmp_phy.odt);
+		tmp_phy.cv_mode = lcd_ini_get_val(inip, tuning_sec, "cv_mode", tmp_phy.cv_mode);
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("[%d]: %s: vswing=0x%x, vcm=0x%x, bias=0x%x, odt=0x%x, cv_mode=%d\n",
+				pdrv->index, TUNING_ATTR_PARSE, tmp_phy.vswing, tmp_phy.vcm,
+				tmp_phy.ref_bias, tmp_phy.odt,
+				tmp_phy.cv_mode);
+		}
+
+		for (j = 0; j < lane_cnt; j++) {
+			sprintf(key_str, "ch%u_amp", i);
+			tmp_phy.lane[j].amp =
+				lcd_ini_get_val(inip, tuning_sec, key_str, tmp_phy.lane[j].amp);
+			sprintf(key_str, "ch%u_preem", i);
+			tmp_phy.lane[j].preem =
+				lcd_ini_get_val(inip, tuning_sec, key_str, tmp_phy.lane[j].preem);
+			if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+				LCDPR("[%d]: %s: lane[%d]: preem=0x%x, amp=0x%x\n",
+					pdrv->index, TUNING_ATTR_PARSE, i,
+					tmp_phy.lane[j].preem, tmp_phy.lane[j].amp);
+			}
+		}
+
+		phy = lcd_phy_alloc(pdrv);
+		if (!phy)
+			return -1;
+		memcpy((void *)phy, (void *)&tmp_phy, sizeof(*phy));
+
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			LCDPR("[%d]: %s: tuning_param[%d]: phy_clk:%d, lane_cnt:%d\n",
+				pdrv->index, TUNING_ATTR_PARSE, i,
+				tmp_phy.phy_clk, lane_cnt);
+		}
+	}
+
+	if (phy_cfg->phys[0] && phy_cfg->phys[1] &&
+	    phy_cfg->phys[0]->phy_clk == phy_cfg->phys[1]->phy_clk) {
+		kfree(phy_cfg->phys[0]);
+		for (i = 0; i < phy_cfg->group_num - 1; i++)
+			phy_cfg->phys[i] = phy_cfg->phys[i + 1];
+		phy_cfg->phys[phy_cfg->group_num - 1] = NULL;
+		phy_cfg->group_num--;
+		phy_cfg->act_phy = phy_cfg->phys[0];
+	}
+
+	return 0;
+
+lcd_cus_parse_phy_err:
+	LCDERR("[%d]: %s: %s error\n", pdrv->index, TUNING_ATTR_PARSE, key_str);
+	return -1;
+}
+
+static int lcd_cus_ctrl_attr_parse_tcon_sw_pol_ini(struct aml_lcd_drv_s *pdrv,
+		void *inip, void *psec, struct lcd_cus_ctrl_attr_config_s *attr_conf)
+{
+	return 0;
+}
+
+static int lcd_cus_ctrl_attr_parse_tcon_sw_pdf_ini(struct aml_lcd_drv_s *pdrv,
+		void *inip, void *psec, struct lcd_cus_ctrl_attr_config_s *attr_conf)
+{
+	return 0;
+}
+
+int lcd_cus_ctrl_load_from_ini(struct aml_lcd_drv_s *pdrv, void *inip, void *psec,
+			       unsigned char version)
+{
+	struct lcd_cus_ctrl_attr_config_s attr_conf;
+	unsigned int ctrl_en, ctrl_attr;
+	unsigned int i;
+	char pr_buf[128], str[32];
+	int ret;
+
+	if (version < 2)
+		return 0;
+
+	ctrl_en = lcd_ini_get_val(inip, psec, "ctrl_attr_en", 0);
+	if (ctrl_en == 0)
+		ctrl_en = lcd_ini_get_val(inip, psec, "ctrl_attr_flag", 0);
+	if (ctrl_en == 0)
+		return 0;
+
+	if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL)
+		LCDPR("[%d]: %s: ctrl_en=0x%x\n", pdrv->index, __func__, ctrl_en);
+
+	for (i = 0; i < LCD_CUS_CTRL_ATTR_CNT_MAX; i++) {
+		if ((ctrl_en & (1 << i)) == 0)
+			continue;
+
+		memset(&attr_conf, 0, sizeof(attr_conf));
+
+		sprintf(str, "ctrl_attr_%d", i);
+		ctrl_attr = lcd_ini_get_val(inip, psec, str, 0xffff);
+		attr_conf.attr_index = i;
+		attr_conf.attr_flag = ctrl_attr & 0xf;
+		attr_conf.param_flag = (ctrl_attr >> 4) & 0xf;
+		attr_conf.attr_type = (ctrl_attr >> 8) & 0xff;
+
+		if (lcd_debug_print_flag & LCD_DBG_PR_NORMAL) {
+			sprintf(pr_buf, "attr_type=%x, attr_flag=%d, param_flag=%d",
+				attr_conf.attr_type,
+				attr_conf.attr_flag,
+				attr_conf.param_flag);
+			LCDPR("[%d]: %s: attr[%d]: %s\n", pdrv->index, __func__, i, pr_buf);
+		}
+
+		switch (attr_conf.attr_type) {
+		case LCD_CUS_CTRL_TYPE_UFR:
+			ret = lcd_cus_ctrl_attr_parse_ufr_ini(pdrv, inip, psec, &attr_conf);
+			break;
+		case LCD_CUS_CTRL_TYPE_DFR:
+			ret = lcd_cus_ctrl_attr_parse_dfr_ini(pdrv, inip, psec, &attr_conf);
+			break;
+		case LCD_CUS_CTRL_TYPE_EXTEND_TMG:
+			ret = lcd_cus_ctrl_attr_parse_extend_tmg_ini(pdrv, inip, psec, &attr_conf);
+			break;
+		case LCD_CUS_CTRL_TYPE_CLK_ADV:
+			ret = lcd_cus_ctrl_attr_parse_clk_adv_ini(pdrv, inip, psec, &attr_conf);
+			break;
+		case LCD_CUS_CTRL_TYPE_TUNING_ATTR:
+			if (version < 3) {
+				ret = -1;
+				LCDERR("[%d]: %s, invalid tuning_attr with ukey_ver %d\n",
+					pdrv->index, __func__, version);
+				break;
+			}
+			ret = lcd_cus_ctrl_attr_parse_tuning_attr_ini(pdrv, inip, psec, &attr_conf);
+			break;
+		case LCD_CUS_CTRL_TYPE_TCON_SW_POL:
+			ret = lcd_cus_ctrl_attr_parse_tcon_sw_pol_ini(pdrv, inip, psec, &attr_conf);
+			break;
+		case LCD_CUS_CTRL_TYPE_TCON_SW_PDF:
+			ret = lcd_cus_ctrl_attr_parse_tcon_sw_pdf_ini(pdrv, inip, psec, &attr_conf);
+			break;
+		default:
+			LCDERR("[%d]: %s: invalid attr_type: 0x%x\n",
+				pdrv->index, __func__, attr_conf.attr_type);
+			goto lcd_cus_ctrl_load_from_ini_err;
+		}
+		if (ret)
+			goto lcd_cus_ctrl_load_from_ini_err;
+	}
+
+	return 0;
+
+lcd_cus_ctrl_load_from_ini_err:
+	return -1;
+}
+

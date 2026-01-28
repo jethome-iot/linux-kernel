@@ -293,8 +293,9 @@ compress_algorithm=%s:%d Control compress algorithm and its compress level, now,
 			 algorithm	level range
 			 lz4		3 - 16
 			 zstd		1 - 22
-compress_log_size=%u	 Support configuring compress cluster size. The size will
-			 be 4KB * (1 << %u). The default and minimum sizes are 16KB.
+compress_log_size=%u	 Support configuring compress cluster size, the size will
+			 be 4KB * (1 << %u), 16KB is minimum size, also it's
+			 default size.
 compress_extension=%s	 Support adding specified extension, so that f2fs can enable
 			 compression on those corresponding files, e.g. if all files
 			 with '.ext' has high compression rate, we can set the '.ext'
@@ -303,7 +304,7 @@ compress_extension=%s	 Support adding specified extension, so that f2fs can enab
 			 For other files, we can still enable compression via ioctl.
 			 Note that, there is one reserved special extension '*', it
 			 can be set to enable compression for all files.
-nocompress_extension=%s	 Support adding specified extension, so that f2fs can disable
+nocompress_extension=%s	   Support adding specified extension, so that f2fs can disable
 			 compression on those corresponding files, just contrary to compression extension.
 			 If you know exactly which files cannot be compressed, you can use this.
 			 The same extension name can't appear in both compress and nocompress
@@ -351,22 +352,6 @@ age_extent_cache	 Enable an age extent cache based on rb-tree. It records
 			 data block update frequency of the extent per inode, in
 			 order to provide better temperature hints for data block
 			 allocation.
-errors=%s		 Specify f2fs behavior on critical errors. This supports modes:
-			 "panic", "continue" and "remount-ro", respectively, trigger
-			 panic immediately, continue without doing anything, and remount
-			 the partition in read-only mode. By default it uses "continue"
-			 mode.
-			 ====================== =============== =============== ========
-			 mode			continue	remount-ro	panic
-			 ====================== =============== =============== ========
-			 access ops		normal		normal		N/A
-			 syscall errors		-EIO		-EROFS		N/A
-			 mount option		rw		ro		N/A
-			 pending dir write	keep		keep		N/A
-			 pending non-dir write	drop		keep		N/A
-			 pending node write	drop		keep		N/A
-			 pending meta write	keep		keep		N/A
-			 ====================== =============== =============== ========
 ======================== ============================================================
 
 Debugfs Entries
@@ -480,7 +465,7 @@ Note: please refer to the manpage of dump.f2fs(8) to get full option list.
 
 sload.f2fs
 ----------
-The sload.f2fs gives a way to insert files and directories in the existing disk
+The sload.f2fs gives a way to insert files and directories in the exisiting disk
 image. This tool is useful when building f2fs images given compiled files.
 
 Note: please refer to the manpage of sload.f2fs(8) to get full option list.
@@ -792,7 +777,7 @@ Allocating disk space
     as a method of optimally implementing that function.
 
 However, once F2FS receives ioctl(fd, F2FS_IOC_SET_PIN_FILE) in prior to
-fallocate(fd, DEFAULT_MODE), it allocates on-disk block addresses having
+fallocate(fd, DEFAULT_MODE), it allocates on-disk block addressess having
 zero or random data, which is useful to the below scenario where:
 
  1. create(fd)
@@ -849,11 +834,10 @@ Compression implementation
   Instead, the main goal is to reduce data writes to flash disk as much as
   possible, resulting in extending disk life time as well as relaxing IO
   congestion. Alternatively, we've added ioctl(F2FS_IOC_RELEASE_COMPRESS_BLOCKS)
-  interface to reclaim compressed space and show it to user after setting a
-  special flag to the inode. Once the compressed space is released, the flag
-  will block writing data to the file until either the compressed space is
-  reserved via ioctl(F2FS_IOC_RESERVE_COMPRESS_BLOCKS) or the file size is
-  truncated to zero.
+  interface to reclaim compressed space and show it to user after putting the
+  immutable bit. Immutable bit, after release, it doesn't allow writing/mmaping
+  on the file, until reserving compressed space via
+  ioctl(F2FS_IOC_RESERVE_COMPRESS_BLOCKS) or truncating filesize to zero.
 
 Compress metadata layout::
 
@@ -862,12 +846,12 @@ Compress metadata layout::
 		| cluster 1 | cluster 2 | ......... | cluster N |
 		+-----------------------------------------------+
 		.           .                       .           .
-	  .                      .                .                      .
+	.                       .                .                      .
     .         Compressed Cluster       .        .        Normal Cluster            .
     +----------+---------+---------+---------+  +---------+---------+---------+---------+
     |compr flag| block 1 | block 2 | block 3 |  | block 1 | block 2 | block 3 | block 4 |
     +----------+---------+---------+---------+  +---------+---------+---------+---------+
-	       .                             .
+	    .                             .
 	    .                                           .
 	.                                                           .
 	+-------------+-------------+----------+----------------------------+

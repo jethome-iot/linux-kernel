@@ -44,11 +44,10 @@ u64 dma_direct_get_required_mask(struct device *dev)
 	return (1ULL << (fls64(max_dma) - 1)) * 2 - 1;
 }
 
-static gfp_t dma_direct_optimal_gfp_mask(struct device *dev, u64 *phys_limit)
+static gfp_t dma_direct_optimal_gfp_mask(struct device *dev, u64 dma_mask,
+				  u64 *phys_limit)
 {
-	u64 dma_limit = min_not_zero(
-		dev->coherent_dma_mask,
-		dev->bus_dma_limit);
+	u64 dma_limit = min_not_zero(dma_mask, dev->bus_dma_limit);
 
 	/*
 	 * Optimistically try the zone that the physical address mask falls
@@ -61,12 +60,13 @@ static gfp_t dma_direct_optimal_gfp_mask(struct device *dev, u64 *phys_limit)
 	*phys_limit = dma_to_phys(dev, dma_limit);
 	if (*phys_limit <= DMA_BIT_MASK(zone_dma_bits))
 		return GFP_DMA;
-	if (*phys_limit <= DMA_BIT_MASK(32))
+	if (*phys_limit <= DMA_BIT_MASK(32) &&
+		!zone_dma32_are_empty())
 		return GFP_DMA32;
 	return 0;
 }
 
-bool dma_coherent_ok(struct device *dev, phys_addr_t phys, size_t size)
+static bool dma_coherent_ok(struct device *dev, phys_addr_t phys, size_t size)
 {
 	dma_addr_t dma_addr = phys_to_dma_direct(dev, phys);
 
@@ -98,21 +98,10 @@ static int dma_set_encrypted(struct device *dev, void *vaddr, size_t size)
 static void __dma_direct_free_pages(struct device *dev, struct page *page,
 				    size_t size)
 {
-	if (swiotlb_free(dev, page, size))
+	if (IS_ENABLED(CONFIG_DMA_RESTRICTED_POOL) &&
+	    swiotlb_free(dev, page, size))
 		return;
 	dma_free_contiguous(dev, page, size);
-}
-
-static struct page *dma_direct_alloc_swiotlb(struct device *dev, size_t size)
-{
-	struct page *page = swiotlb_alloc(dev, size);
-
-	if (page && !dma_coherent_ok(dev, page_to_phys(page), size)) {
-		swiotlb_free(dev, page, size);
-		return NULL;
-	}
-
-	return page;
 }
 
 static struct page *__dma_direct_alloc_pages(struct device *dev, size_t size,
@@ -124,10 +113,18 @@ static struct page *__dma_direct_alloc_pages(struct device *dev, size_t size,
 
 	WARN_ON_ONCE(!PAGE_ALIGNED(size));
 
-	if (is_swiotlb_for_alloc(dev))
-		return dma_direct_alloc_swiotlb(dev, size);
+	gfp |= dma_direct_optimal_gfp_mask(dev, dev->coherent_dma_mask,
+					   &phys_limit);
+	if (IS_ENABLED(CONFIG_DMA_RESTRICTED_POOL) &&
+	    is_swiotlb_for_alloc(dev)) {
+		page = swiotlb_alloc(dev, size);
+		if (page && !dma_coherent_ok(dev, page_to_phys(page), size)) {
+			__dma_direct_free_pages(dev, page, size);
+			return NULL;
+		}
+		return page;
+	}
 
-	gfp |= dma_direct_optimal_gfp_mask(dev, &phys_limit);
 	page = dma_alloc_contiguous(dev, size, gfp);
 	if (page) {
 		if (!dma_coherent_ok(dev, page_to_phys(page), size) ||
@@ -145,7 +142,8 @@ again:
 
 		if (IS_ENABLED(CONFIG_ZONE_DMA32) &&
 		    phys_limit < DMA_BIT_MASK(64) &&
-		    !(gfp & (GFP_DMA32 | GFP_DMA))) {
+		    !(gfp & (GFP_DMA32 | GFP_DMA)) &&
+		    !zone_dma32_are_empty()) {
 			gfp |= GFP_DMA32;
 			goto again;
 		}
@@ -159,26 +157,15 @@ again:
 	return page;
 }
 
-/*
- * Check if a potentially blocking operations needs to dip into the atomic
- * pools for the given device/gfp.
- */
-static bool dma_direct_use_pool(struct device *dev, gfp_t gfp)
-{
-	return !gfpflags_allow_blocking(gfp) && !is_swiotlb_for_alloc(dev);
-}
-
 static void *dma_direct_alloc_from_pool(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp)
 {
 	struct page *page;
-	u64 phys_limit;
+	u64 phys_mask;
 	void *ret;
 
-	if (WARN_ON_ONCE(!IS_ENABLED(CONFIG_DMA_COHERENT_POOL)))
-		return NULL;
-
-	gfp |= dma_direct_optimal_gfp_mask(dev, &phys_limit);
+	gfp |= dma_direct_optimal_gfp_mask(dev, dev->coherent_dma_mask,
+					   &phys_mask);
 	page = dma_alloc_from_pool(dev, size, &ret, gfp, dma_coherent_ok);
 	if (!page)
 		return NULL;
@@ -207,7 +194,6 @@ static void *dma_direct_alloc_no_mapping(struct device *dev, size_t size,
 void *dma_direct_alloc(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
 {
-	bool remap = false, set_uncached = false;
 	struct page *page;
 	void *ret;
 
@@ -219,39 +205,30 @@ void *dma_direct_alloc(struct device *dev, size_t size,
 	    !force_dma_unencrypted(dev) && !is_swiotlb_for_alloc(dev))
 		return dma_direct_alloc_no_mapping(dev, size, dma_handle, gfp);
 
-	if (!dev_is_dma_coherent(dev)) {
-		if (IS_ENABLED(CONFIG_ARCH_HAS_DMA_ALLOC) &&
-		    !is_swiotlb_for_alloc(dev))
-			return arch_dma_alloc(dev, size, dma_handle, gfp,
-					      attrs);
+	if (!IS_ENABLED(CONFIG_ARCH_HAS_DMA_SET_UNCACHED) &&
+	    !IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
+	    !IS_ENABLED(CONFIG_DMA_GLOBAL_POOL) &&
+	    !dev_is_dma_coherent(dev) &&
+	    !is_swiotlb_for_alloc(dev))
+		return arch_dma_alloc(dev, size, dma_handle, gfp, attrs);
 
-		/*
-		 * If there is a global pool, always allocate from it for
-		 * non-coherent devices.
-		 */
-		if (IS_ENABLED(CONFIG_DMA_GLOBAL_POOL))
-			return dma_alloc_from_global_coherent(dev, size,
-					dma_handle);
-
-		/*
-		 * Otherwise we require the architecture to either be able to
-		 * mark arbitrary parts of the kernel direct mapping uncached,
-		 * or remapped it uncached.
-		 */
-		set_uncached = IS_ENABLED(CONFIG_ARCH_HAS_DMA_SET_UNCACHED);
-		remap = IS_ENABLED(CONFIG_DMA_DIRECT_REMAP);
-		if (!set_uncached && !remap) {
-			pr_warn_once("coherent DMA allocations not supported on this platform.\n");
-			return NULL;
-		}
-	}
+	if (IS_ENABLED(CONFIG_DMA_GLOBAL_POOL) &&
+	    !dev_is_dma_coherent(dev))
+		return dma_alloc_from_global_coherent(dev, size, dma_handle);
 
 	/*
-	 * Remapping or decrypting memory may block, allocate the memory from
-	 * the atomic pools instead if we aren't allowed block.
+	 * Remapping or decrypting memory may block. If either is required and
+	 * we can't block, allocate the memory from the atomic pools.
+	 * If restricted DMA (i.e., is_swiotlb_for_alloc) is required, one must
+	 * set up another device coherent pool by shared-dma-pool and use
+	 * dma_alloc_from_dev_coherent instead.
 	 */
-	if ((remap || force_dma_unencrypted(dev)) &&
-	    dma_direct_use_pool(dev, gfp))
+	if (IS_ENABLED(CONFIG_DMA_COHERENT_POOL) &&
+	    !gfpflags_allow_blocking(gfp) &&
+	    (force_dma_unencrypted(dev) ||
+	     (IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
+	      !dev_is_dma_coherent(dev))) &&
+	    !is_swiotlb_for_alloc(dev))
 		return dma_direct_alloc_from_pool(dev, size, dma_handle, gfp);
 
 	/* we always manually zero the memory once we are done */
@@ -259,45 +236,46 @@ void *dma_direct_alloc(struct device *dev, size_t size,
 	if (!page)
 		return NULL;
 
-	/*
-	 * dma_alloc_contiguous can return highmem pages depending on a
-	 * combination the cma= arguments and per-arch setup.  These need to be
-	 * remapped to return a kernel virtual address.
-	 */
-	if (PageHighMem(page)) {
-		remap = true;
-		set_uncached = false;
-	}
-
-	if (remap) {
-		pgprot_t prot = dma_pgprot(dev, PAGE_KERNEL, attrs);
-
-		if (force_dma_unencrypted(dev))
-			prot = pgprot_decrypted(prot);
-
+	if ((IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
+	     !dev_is_dma_coherent(dev)) ||
+	    (IS_ENABLED(CONFIG_DMA_REMAP) && PageHighMem(page))) {
 		/* remove any dirty cache lines on the kernel alias */
 		arch_dma_prep_coherent(page, size);
 
 		/* create a coherent mapping */
-		ret = dma_common_contiguous_remap(page, size, prot,
+		ret = dma_common_contiguous_remap(page, size,
+				dma_pgprot(dev, PAGE_KERNEL, attrs),
 				__builtin_return_address(0));
 		if (!ret)
 			goto out_free_pages;
-	} else {
-		ret = page_address(page);
-		if (dma_set_decrypted(dev, ret, size))
-			goto out_free_pages;
+		memset(ret, 0, size);
+		goto done;
 	}
 
+	if (PageHighMem(page)) {
+		/*
+		 * Depending on the cma= arguments and per-arch setup
+		 * dma_alloc_contiguous could return highmem pages.
+		 * Without remapping there is no way to return them here,
+		 * so log an error and fail.
+		 */
+		dev_info(dev, "Rejecting highmem page from CMA.\n");
+		goto out_free_pages;
+	}
+
+	ret = page_address(page);
+	if (dma_set_decrypted(dev, ret, size))
+		goto out_free_pages;
 	memset(ret, 0, size);
 
-	if (set_uncached) {
+	if (IS_ENABLED(CONFIG_ARCH_HAS_DMA_SET_UNCACHED) &&
+	    !dev_is_dma_coherent(dev)) {
 		arch_dma_prep_coherent(page, size);
 		ret = arch_dma_set_uncached(ret, size);
 		if (IS_ERR(ret))
 			goto out_encrypt_pages;
 	}
-
+done:
 	*dma_handle = phys_to_dma_direct(dev, page_to_phys(page));
 	return ret;
 
@@ -321,7 +299,9 @@ void dma_direct_free(struct device *dev, size_t size,
 		return;
 	}
 
-	if (IS_ENABLED(CONFIG_ARCH_HAS_DMA_ALLOC) &&
+	if (!IS_ENABLED(CONFIG_ARCH_HAS_DMA_SET_UNCACHED) &&
+	    !IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
+	    !IS_ENABLED(CONFIG_DMA_GLOBAL_POOL) &&
 	    !dev_is_dma_coherent(dev) &&
 	    !is_swiotlb_for_alloc(dev)) {
 		arch_dma_free(dev, size, cpu_addr, dma_addr, attrs);
@@ -340,7 +320,7 @@ void dma_direct_free(struct device *dev, size_t size,
 	    dma_free_from_pool(dev, cpu_addr, PAGE_ALIGN(size)))
 		return;
 
-	if (is_vmalloc_addr(cpu_addr)) {
+	if (IS_ENABLED(CONFIG_DMA_REMAP) && is_vmalloc_addr(cpu_addr)) {
 		vunmap(cpu_addr);
 	} else {
 		if (IS_ENABLED(CONFIG_ARCH_HAS_DMA_CLEAR_UNCACHED))
@@ -358,7 +338,9 @@ struct page *dma_direct_alloc_pages(struct device *dev, size_t size,
 	struct page *page;
 	void *ret;
 
-	if (force_dma_unencrypted(dev) && dma_direct_use_pool(dev, gfp))
+	if (IS_ENABLED(CONFIG_DMA_COHERENT_POOL) &&
+	    force_dma_unencrypted(dev) && !gfpflags_allow_blocking(gfp) &&
+	    !is_swiotlb_for_alloc(dev))
 		return dma_direct_alloc_from_pool(dev, size, dma_handle, gfp);
 
 	page = __dma_direct_alloc_pages(dev, size, gfp, false);
@@ -441,60 +423,29 @@ void dma_direct_sync_sg_for_cpu(struct device *dev,
 		arch_sync_dma_for_cpu_all();
 }
 
-/*
- * Unmaps segments, except for ones marked as pci_p2pdma which do not
- * require any further action as they contain a bus address.
- */
 void dma_direct_unmap_sg(struct device *dev, struct scatterlist *sgl,
 		int nents, enum dma_data_direction dir, unsigned long attrs)
 {
 	struct scatterlist *sg;
 	int i;
 
-	for_each_sg(sgl,  sg, nents, i) {
-		if (sg_dma_is_bus_address(sg))
-			sg_dma_unmark_bus_address(sg);
-		else
-			dma_direct_unmap_page(dev, sg->dma_address,
-					      sg_dma_len(sg), dir, attrs);
-	}
+	for_each_sg(sgl, sg, nents, i)
+		dma_direct_unmap_page(dev, sg->dma_address, sg_dma_len(sg), dir,
+			     attrs);
 }
 #endif
 
 int dma_direct_map_sg(struct device *dev, struct scatterlist *sgl, int nents,
 		enum dma_data_direction dir, unsigned long attrs)
 {
-	struct pci_p2pdma_map_state p2pdma_state = {};
-	enum pci_p2pdma_map_type map;
+	int i;
 	struct scatterlist *sg;
-	int i, ret;
 
 	for_each_sg(sgl, sg, nents, i) {
-		if (is_pci_p2pdma_page(sg_page(sg))) {
-			map = pci_p2pdma_map_segment(&p2pdma_state, dev, sg);
-			switch (map) {
-			case PCI_P2PDMA_MAP_BUS_ADDR:
-				continue;
-			case PCI_P2PDMA_MAP_THRU_HOST_BRIDGE:
-				/*
-				 * Any P2P mapping that traverses the PCI
-				 * host bridge must be mapped with CPU physical
-				 * address and not PCI bus addresses. This is
-				 * done with dma_direct_map_page() below.
-				 */
-				break;
-			default:
-				ret = -EREMOTEIO;
-				goto out_unmap;
-			}
-		}
-
 		sg->dma_address = dma_direct_map_page(dev, sg_page(sg),
 				sg->offset, sg->length, dir, attrs);
-		if (sg->dma_address == DMA_MAPPING_ERROR) {
-			ret = -EIO;
+		if (sg->dma_address == DMA_MAPPING_ERROR)
 			goto out_unmap;
-		}
 		sg_dma_len(sg) = sg->length;
 	}
 
@@ -502,7 +453,7 @@ int dma_direct_map_sg(struct device *dev, struct scatterlist *sgl, int nents,
 
 out_unmap:
 	dma_direct_unmap_sg(dev, sgl, i, dir, attrs | DMA_ATTR_SKIP_CPU_SYNC);
-	return ret;
+	return -EIO;
 }
 
 dma_addr_t dma_direct_map_resource(struct device *dev, phys_addr_t paddr,
@@ -550,8 +501,6 @@ int dma_direct_mmap(struct device *dev, struct vm_area_struct *vma,
 	int ret = -ENXIO;
 
 	vma->vm_page_prot = dma_pgprot(dev, vma->vm_page_prot, attrs);
-	if (force_dma_unencrypted(dev))
-		vma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);
 
 	if (dma_mmap_from_dev_coherent(dev, vma, cpu_addr, size, &ret))
 		return ret;
@@ -585,46 +534,6 @@ int dma_direct_supported(struct device *dev, u64 mask)
 	if (IS_ENABLED(CONFIG_ZONE_DMA))
 		min_mask = min_t(u64, min_mask, DMA_BIT_MASK(zone_dma_bits));
 	return mask >= phys_to_dma_unencrypted(dev, min_mask);
-}
-
-/*
- * To check whether all ram resource ranges are covered by dma range map
- * Returns 0 when further check is needed
- * Returns 1 if there is some RAM range can't be covered by dma_range_map
- */
-static int check_ram_in_range_map(unsigned long start_pfn,
-				  unsigned long nr_pages, void *data)
-{
-	unsigned long end_pfn = start_pfn + nr_pages;
-	const struct bus_dma_region *bdr = NULL;
-	const struct bus_dma_region *m;
-	struct device *dev = data;
-
-	while (start_pfn < end_pfn) {
-		for (m = dev->dma_range_map; PFN_DOWN(m->size); m++) {
-			unsigned long cpu_start_pfn = PFN_DOWN(m->cpu_start);
-
-			if (start_pfn >= cpu_start_pfn &&
-			    start_pfn - cpu_start_pfn < PFN_DOWN(m->size)) {
-				bdr = m;
-				break;
-			}
-		}
-		if (!bdr)
-			return 1;
-
-		start_pfn = PFN_DOWN(bdr->cpu_start) + PFN_DOWN(bdr->size);
-	}
-
-	return 0;
-}
-
-bool dma_direct_all_ram_mapped(struct device *dev)
-{
-	if (!dev->dma_range_map)
-		return true;
-	return !walk_system_ram_range(0, PFN_DOWN(ULONG_MAX) + 1, dev,
-				      check_ram_in_range_map);
 }
 
 size_t dma_direct_max_mapping_size(struct device *dev)
@@ -677,6 +586,7 @@ int dma_direct_set_offset(struct device *dev, phys_addr_t cpu_start,
 		return -ENOMEM;
 	map[0].cpu_start = cpu_start;
 	map[0].dma_start = dma_start;
+	map[0].offset = offset;
 	map[0].size = size;
 	dev->dma_range_map = map;
 	return 0;

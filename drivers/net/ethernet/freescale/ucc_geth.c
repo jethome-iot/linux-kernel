@@ -28,12 +28,11 @@
 #include <linux/phy.h>
 #include <linux/phy_fixed.h>
 #include <linux/workqueue.h>
-#include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/of_mdio.h>
 #include <linux/of_net.h>
-#include <linux/platform_device.h>
+#include <linux/of_platform.h>
 
 #include <linux/uaccess.h>
 #include <asm/irq.h>
@@ -3206,7 +3205,7 @@ static int ucc_geth_set_mac_addr(struct net_device *dev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	eth_hw_addr_set(dev, addr->sa_data);
+	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
 
 	/*
 	 * If device is not running, we will set mac addr register
@@ -3713,7 +3712,7 @@ static int ucc_geth_probe(struct platform_device* ofdev)
 	dev->netdev_ops = &ucc_geth_netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
 	INIT_WORK(&ugeth->timeout_work, ucc_geth_timeout_work);
-	netif_napi_add(dev, &ugeth->napi, ucc_geth_poll);
+	netif_napi_add(dev, &ugeth->napi, ucc_geth_poll, 64);
 	dev->mtu = 1500;
 	dev->max_mtu = 1518;
 
@@ -3754,7 +3753,7 @@ err_free_info:
 	return err;
 }
 
-static void ucc_geth_remove(struct platform_device* ofdev)
+static int ucc_geth_remove(struct platform_device* ofdev)
 {
 	struct net_device *dev = platform_get_drvdata(ofdev);
 	struct ucc_geth_private *ugeth = netdev_priv(dev);
@@ -3768,6 +3767,8 @@ static void ucc_geth_remove(struct platform_device* ofdev)
 	of_node_put(ugeth->ug_info->phy_node);
 	kfree(ugeth->ug_info);
 	free_netdev(dev);
+
+	return 0;
 }
 
 static const struct of_device_id ucc_geth_match[] = {
@@ -3786,7 +3787,7 @@ static struct platform_driver ucc_geth_driver = {
 		.of_match_table = ucc_geth_match,
 	},
 	.probe		= ucc_geth_probe,
-	.remove_new	= ucc_geth_remove,
+	.remove		= ucc_geth_remove,
 	.suspend	= ucc_geth_suspend,
 	.resume		= ucc_geth_resume,
 };

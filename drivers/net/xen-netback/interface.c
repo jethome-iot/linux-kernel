@@ -252,9 +252,6 @@ xenvif_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (vif->hash.alg == XEN_NETIF_CTRL_HASH_ALGORITHM_NONE)
 		skb_clear_hash(skb);
 
-	/* timestamp packet in software */
-	skb_tx_timestamp(skb);
-
 	if (!xenvif_rx_queue_tail(queue, skb))
 		goto drop;
 
@@ -461,7 +458,7 @@ static void xenvif_get_strings(struct net_device *dev, u32 stringset, u8 * data)
 
 static const struct ethtool_ops xenvif_ethtool_ops = {
 	.get_link	= ethtool_op_get_link,
-	.get_ts_info 	= ethtool_op_get_ts_info,
+
 	.get_sset_count = xenvif_get_sset_count,
 	.get_ethtool_stats = xenvif_get_ethtool_stats,
 	.get_strings = xenvif_get_strings,
@@ -482,9 +479,6 @@ static const struct net_device_ops xenvif_netdev_ops = {
 struct xenvif *xenvif_alloc(struct device *parent, domid_t domid,
 			    unsigned int handle)
 {
-	static const u8 dummy_addr[ETH_ALEN] = {
-		0xfe, 0xff, 0xff, 0xff, 0xff, 0xff,
-	};
 	int err;
 	struct net_device *dev;
 	struct xenvif *vif;
@@ -540,7 +534,8 @@ struct xenvif *xenvif_alloc(struct device *parent, domid_t domid,
 	 * stolen by an Ethernet bridge for STP purposes.
 	 * (FE:FF:FF:FF:FF:FF)
 	 */
-	eth_hw_addr_set(dev, dummy_addr);
+	eth_broadcast_addr(dev->dev_addr);
+	dev->dev_addr[0] &= ~0x01;
 
 	netif_carrier_off(dev);
 
@@ -592,8 +587,8 @@ int xenvif_init_queue(struct xenvif_queue *queue)
 	}
 
 	for (i = 0; i < MAX_PENDING_REQS; i++) {
-		queue->pending_tx_info[i].callback_struct = (struct ubuf_info_msgzc)
-			{ { .callback = xenvif_zerocopy_callback },
+		queue->pending_tx_info[i].callback_struct = (struct ubuf_info)
+			{ .callback = xenvif_zerocopy_callback,
 			  { { .ctx = NULL,
 			      .desc = i } } };
 		queue->grant_tx_handle[i] = NETBACK_INVALID_HANDLE;
@@ -671,7 +666,8 @@ err:
 static void xenvif_disconnect_queue(struct xenvif_queue *queue)
 {
 	if (queue->task) {
-		kthread_stop_put(queue->task);
+		kthread_stop(queue->task);
+		put_task_struct(queue->task);
 		queue->task = NULL;
 	}
 
@@ -723,7 +719,8 @@ int xenvif_connect_data(struct xenvif_queue *queue,
 	init_waitqueue_head(&queue->dealloc_wq);
 	atomic_set(&queue->inflight_packets, 0);
 
-	netif_napi_add(queue->vif->dev, &queue->napi, xenvif_poll);
+	netif_napi_add(queue->vif->dev, &queue->napi, xenvif_poll,
+			NAPI_POLL_WEIGHT);
 
 	queue->stalled = true;
 

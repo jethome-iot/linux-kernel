@@ -50,13 +50,11 @@ static struct sock *__l2tp_ip_bind_lookup(const struct net *net, __be32 laddr,
 	sk_for_each_bound(sk, &l2tp_ip_bind_table) {
 		const struct l2tp_ip_sock *l2tp = l2tp_ip_sk(sk);
 		const struct inet_sock *inet = inet_sk(sk);
-		int bound_dev_if;
 
 		if (!net_eq(sock_net(sk), net))
 			continue;
 
-		bound_dev_if = READ_ONCE(sk->sk_bound_dev_if);
-		if (bound_dev_if && dif && bound_dev_if != dif)
+		if (sk->sk_bound_dev_if && dif && sk->sk_bound_dev_if != dif)
 			continue;
 
 		if (inet->inet_rcv_saddr && laddr &&
@@ -517,7 +515,7 @@ no_route:
 }
 
 static int l2tp_ip_recvmsg(struct sock *sk, struct msghdr *msg,
-			   size_t len, int flags, int *addr_len)
+			   size_t len, int noblock, int flags, int *addr_len)
 {
 	struct inet_sock *inet = inet_sk(sk);
 	size_t copied = 0;
@@ -528,7 +526,7 @@ static int l2tp_ip_recvmsg(struct sock *sk, struct msghdr *msg,
 	if (flags & MSG_OOB)
 		goto out;
 
-	skb = skb_recv_datagram(sk, flags, &err);
+	skb = skb_recv_datagram(sk, flags, noblock, &err);
 	if (!skb)
 		goto out;
 
@@ -552,7 +550,7 @@ static int l2tp_ip_recvmsg(struct sock *sk, struct msghdr *msg,
 		memset(&sin->sin_zero, 0, sizeof(sin->sin_zero));
 		*addr_len = sizeof(*sin);
 	}
-	if (inet_cmsg_flags(inet))
+	if (inet->cmsg_flags)
 		ip_cmsg_recv(msg, skb);
 	if (flags & MSG_TRUNC)
 		copied = skb->len;
@@ -562,18 +560,19 @@ out:
 	return err ? err : copied;
 }
 
-int l2tp_ioctl(struct sock *sk, int cmd, int *karg)
+int l2tp_ioctl(struct sock *sk, int cmd, unsigned long arg)
 {
 	struct sk_buff *skb;
+	int amount;
 
 	switch (cmd) {
 	case SIOCOUTQ:
-		*karg = sk_wmem_alloc_get(sk);
+		amount = sk_wmem_alloc_get(sk);
 		break;
 	case SIOCINQ:
 		spin_lock_bh(&sk->sk_receive_queue.lock);
 		skb = skb_peek(&sk->sk_receive_queue);
-		*karg = skb ? skb->len : 0;
+		amount = skb ? skb->len : 0;
 		spin_unlock_bh(&sk->sk_receive_queue.lock);
 		break;
 
@@ -581,7 +580,7 @@ int l2tp_ioctl(struct sock *sk, int cmd, int *karg)
 		return -ENOIOCTLCMD;
 	}
 
-	return 0;
+	return put_user(amount, (int __user *)arg);
 }
 EXPORT_SYMBOL_GPL(l2tp_ioctl);
 
@@ -624,6 +623,7 @@ static const struct proto_ops l2tp_ip_ops = {
 	.sendmsg	   = inet_sendmsg,
 	.recvmsg	   = sock_common_recvmsg,
 	.mmap		   = sock_no_mmap,
+	.sendpage	   = sock_no_sendpage,
 };
 
 static struct inet_protosw l2tp_ip_protosw = {
@@ -675,8 +675,8 @@ MODULE_AUTHOR("James Chapman <jchapman@katalix.com>");
 MODULE_DESCRIPTION("L2TP over IP");
 MODULE_VERSION("1.0");
 
-/* Use the values of SOCK_DGRAM (2) as type and IPPROTO_L2TP (115) as protocol,
- * because __stringify doesn't like enums
+/* Use the value of SOCK_DGRAM (2) directory, because __stringify doesn't like
+ * enums
  */
-MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_INET, 115, 2);
-MODULE_ALIAS_NET_PF_PROTO(PF_INET, 115);
+MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_INET, 2, IPPROTO_L2TP);
+MODULE_ALIAS_NET_PF_PROTO(PF_INET, IPPROTO_L2TP);

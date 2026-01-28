@@ -63,6 +63,7 @@
 #define INTEL_QEP_CLK_PERIOD_NS		10
 
 struct intel_qep {
+	struct counter_device counter;
 	struct mutex lock;
 	struct device *dev;
 	void __iomem *regs;
@@ -108,7 +109,7 @@ static void intel_qep_init(struct intel_qep *qep)
 static int intel_qep_count_read(struct counter_device *counter,
 				struct counter_count *count, u64 *val)
 {
-	struct intel_qep *const qep = counter_priv(counter);
+	struct intel_qep *const qep = counter->priv;
 
 	pm_runtime_get_sync(qep->dev);
 	*val = intel_qep_readl(qep, INTEL_QEPCOUNT);
@@ -175,7 +176,7 @@ static struct counter_synapse intel_qep_count_synapses[] = {
 static int intel_qep_ceiling_read(struct counter_device *counter,
 				  struct counter_count *count, u64 *ceiling)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 
 	pm_runtime_get_sync(qep->dev);
 	*ceiling = intel_qep_readl(qep, INTEL_QEPMAX);
@@ -187,7 +188,7 @@ static int intel_qep_ceiling_read(struct counter_device *counter,
 static int intel_qep_ceiling_write(struct counter_device *counter,
 				   struct counter_count *count, u64 max)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 	int ret = 0;
 
 	/* Intel QEP ceiling configuration only supports 32-bit values */
@@ -212,7 +213,7 @@ out:
 static int intel_qep_enable_read(struct counter_device *counter,
 				 struct counter_count *count, u8 *enable)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 
 	*enable = qep->enabled;
 
@@ -222,7 +223,7 @@ static int intel_qep_enable_read(struct counter_device *counter,
 static int intel_qep_enable_write(struct counter_device *counter,
 				  struct counter_count *count, u8 val)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 	u32 reg;
 	bool changed;
 
@@ -255,7 +256,7 @@ static int intel_qep_spike_filter_ns_read(struct counter_device *counter,
 					  struct counter_count *count,
 					  u64 *length)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 	u32 reg;
 
 	pm_runtime_get_sync(qep->dev);
@@ -276,7 +277,7 @@ static int intel_qep_spike_filter_ns_write(struct counter_device *counter,
 					   struct counter_count *count,
 					   u64 length)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 	u32 reg;
 	bool enable;
 	int ret = 0;
@@ -325,7 +326,7 @@ static int intel_qep_preset_enable_read(struct counter_device *counter,
 					struct counter_count *count,
 					u8 *preset_enable)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 	u32 reg;
 
 	pm_runtime_get_sync(qep->dev);
@@ -340,7 +341,7 @@ static int intel_qep_preset_enable_read(struct counter_device *counter,
 static int intel_qep_preset_enable_write(struct counter_device *counter,
 					 struct counter_count *count, u8 val)
 {
-	struct intel_qep *qep = counter_priv(counter);
+	struct intel_qep *qep = counter->priv;
 	u32 reg;
 	int ret = 0;
 
@@ -391,16 +392,14 @@ static struct counter_count intel_qep_counter_count[] = {
 
 static int intel_qep_probe(struct pci_dev *pci, const struct pci_device_id *id)
 {
-	struct counter_device *counter;
 	struct intel_qep *qep;
 	struct device *dev = &pci->dev;
 	void __iomem *regs;
 	int ret;
 
-	counter = devm_counter_alloc(dev, sizeof(*qep));
-	if (!counter)
+	qep = devm_kzalloc(dev, sizeof(*qep), GFP_KERNEL);
+	if (!qep)
 		return -ENOMEM;
-	qep = counter_priv(counter);
 
 	ret = pcim_enable_device(pci);
 	if (ret)
@@ -423,23 +422,20 @@ static int intel_qep_probe(struct pci_dev *pci, const struct pci_device_id *id)
 	intel_qep_init(qep);
 	pci_set_drvdata(pci, qep);
 
-	counter->name = pci_name(pci);
-	counter->parent = dev;
-	counter->ops = &intel_qep_counter_ops;
-	counter->counts = intel_qep_counter_count;
-	counter->num_counts = ARRAY_SIZE(intel_qep_counter_count);
-	counter->signals = intel_qep_signals;
-	counter->num_signals = ARRAY_SIZE(intel_qep_signals);
+	qep->counter.name = pci_name(pci);
+	qep->counter.parent = dev;
+	qep->counter.ops = &intel_qep_counter_ops;
+	qep->counter.counts = intel_qep_counter_count;
+	qep->counter.num_counts = ARRAY_SIZE(intel_qep_counter_count);
+	qep->counter.signals = intel_qep_signals;
+	qep->counter.num_signals = ARRAY_SIZE(intel_qep_signals);
+	qep->counter.priv = qep;
 	qep->enabled = false;
 
 	pm_runtime_put(dev);
 	pm_runtime_allow(dev);
 
-	ret = devm_counter_add(&pci->dev, counter);
-	if (ret < 0)
-		return dev_err_probe(&pci->dev, ret, "Failed to add counter\n");
-
-	return 0;
+	return devm_counter_register(&pci->dev, &qep->counter);
 }
 
 static void intel_qep_remove(struct pci_dev *pci)
@@ -523,4 +519,3 @@ MODULE_AUTHOR("Jarkko Nikula <jarkko.nikula@linux.intel.com>");
 MODULE_AUTHOR("Raymond Tan <raymond.tan@intel.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Intel Quadrature Encoder Peripheral driver");
-MODULE_IMPORT_NS(COUNTER);

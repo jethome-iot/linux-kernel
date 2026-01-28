@@ -4,8 +4,6 @@
 #ifndef I40E_TXRX_COMMON_
 #define I40E_TXRX_COMMON_
 
-#include "i40e.h"
-
 int i40e_xmit_xdp_tx_ring(struct xdp_buff *xdp, struct i40e_ring *xdp_ring);
 void i40e_clean_programming_status(struct i40e_ring *rx_ring, u64 qword0_raw,
 				   u64 qword1);
@@ -22,7 +20,6 @@ void i40e_release_rx_desc(struct i40e_ring *rx_ring, u32 val);
 #define I40E_XDP_CONSUMED	BIT(0)
 #define I40E_XDP_TX		BIT(1)
 #define I40E_XDP_REDIR		BIT(2)
-#define I40E_XDP_EXIT		BIT(3)
 
 /*
  * build_ctob - Builds the Tx descriptor (cmd, offset and type) qword

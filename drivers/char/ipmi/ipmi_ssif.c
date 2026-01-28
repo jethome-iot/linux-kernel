@@ -247,6 +247,12 @@ struct ssif_info {
 	 */
 	bool                req_flags;
 
+	/*
+	 * Used to perform timer operations when run-to-completion
+	 * mode is on.  This is a countdown timer.
+	 */
+	int                 rtc_us_timer;
+
 	/* Used for sending/receiving data.  +1 for the length. */
 	unsigned char data[IPMI_MAX_MSG_LENGTH + 1];
 	unsigned int  data_len;
@@ -530,6 +536,7 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 
 static void start_get(struct ssif_info *ssif_info)
 {
+	ssif_info->rtc_us_timer = 0;
 	ssif_info->multi_pos = 0;
 
 	ssif_i2c_send(ssif_info, msg_done_handler, I2C_SMBUS_READ,
@@ -627,6 +634,7 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 
 			flags = ipmi_ssif_lock_cond(ssif_info, &oflags);
 			ssif_info->waiting_alert = true;
+			ssif_info->rtc_us_timer = SSIF_MSG_USEC;
 			if (!ssif_info->stopping)
 				mod_timer(&ssif_info->retry_timer,
 					  jiffies + SSIF_MSG_JIFFIES);
@@ -983,6 +991,7 @@ static void msg_written_handler(struct ssif_info *ssif_info, int result,
 			/* Wait a jiffie then request the next message */
 			ssif_info->waiting_alert = true;
 			ssif_info->retries_left = SSIF_RECV_RETRIES;
+			ssif_info->rtc_us_timer = SSIF_MSG_PART_USEC;
 			if (!ssif_info->stopping)
 				mod_timer(&ssif_info->retry_timer,
 					  jiffies + SSIF_MSG_PART_JIFFIES);
@@ -1071,7 +1080,7 @@ static void start_next_msg(struct ssif_info *ssif_info, unsigned long *flags)
 static void sender(void                *send_info,
 		   struct ipmi_smi_msg *msg)
 {
-	struct ssif_info *ssif_info = send_info;
+	struct ssif_info *ssif_info = (struct ssif_info *) send_info;
 	unsigned long oflags, *flags;
 
 	BUG_ON(ssif_info->waiting_msg);
@@ -1108,7 +1117,7 @@ static int get_smi_info(void *send_info, struct ipmi_smi_info *data)
  */
 static void request_events(void *send_info)
 {
-	struct ssif_info *ssif_info = send_info;
+	struct ssif_info *ssif_info = (struct ssif_info *) send_info;
 	unsigned long oflags, *flags;
 
 	if (!ssif_info->has_event_buffer)
@@ -1125,7 +1134,7 @@ static void request_events(void *send_info)
  */
 static void ssif_set_need_watch(void *send_info, unsigned int watch_mask)
 {
-	struct ssif_info *ssif_info = send_info;
+	struct ssif_info *ssif_info = (struct ssif_info *) send_info;
 	unsigned long oflags, *flags;
 	long timeout = 0;
 
@@ -1208,7 +1217,7 @@ static ssize_t ipmi_##name##_show(struct device *dev,			\
 {									\
 	struct ssif_info *ssif_info = dev_get_drvdata(dev);		\
 									\
-	return sysfs_emit(buf, "%u\n", ssif_get_stat(ssif_info, name));\
+	return snprintf(buf, 10, "%u\n", ssif_get_stat(ssif_info, name));\
 }									\
 static DEVICE_ATTR(name, S_IRUGO, ipmi_##name##_show, NULL)
 
@@ -1216,7 +1225,7 @@ static ssize_t ipmi_type_show(struct device *dev,
 			      struct device_attribute *attr,
 			      char *buf)
 {
-	return sysfs_emit(buf, "ssif\n");
+	return snprintf(buf, 10, "ssif\n");
 }
 static DEVICE_ATTR(type, S_IRUGO, ipmi_type_show, NULL);
 
@@ -1276,13 +1285,16 @@ static void shutdown_ssif(void *send_info)
 	}
 }
 
-static void ssif_remove(struct i2c_client *client)
+static int ssif_remove(struct i2c_client *client)
 {
 	struct ssif_info *ssif_info = i2c_get_clientdata(client);
 	struct ssif_addr_info *addr_info;
 
+	if (!ssif_info)
+		return 0;
+
 	/*
-	 * After this point, we won't deliver anything asynchronously
+	 * After this point, we won't deliver anything asychronously
 	 * to the message handler.  We can unregister ourself.
 	 */
 	ipmi_unregister_smi(ssif_info->intf);
@@ -1295,6 +1307,8 @@ static void ssif_remove(struct i2c_client *client)
 	}
 
 	kfree(ssif_info);
+
+	return 0;
 }
 
 static int read_response(struct i2c_client *client, unsigned char *resp)
@@ -1369,7 +1383,7 @@ static int ssif_detect(struct i2c_client *client, struct i2c_board_info *info)
 	if (rv)
 		rv = -ENODEV;
 	else
-		strscpy(info->type, DEVICE_NAME, I2C_NAME_SIZE);
+		strlcpy(info->type, DEVICE_NAME, I2C_NAME_SIZE);
 	kfree(resp);
 	return rv;
 }
@@ -1439,7 +1453,7 @@ static bool check_acpi(struct ssif_info *ssif_info, struct device *dev)
 	if (acpi_handle) {
 		ssif_info->addr_source = SI_ACPI;
 		ssif_info->addr_info.acpi_info.acpi_handle = acpi_handle;
-		request_module_nowait("acpi_ipmi");
+		request_module("acpi_ipmi");
 		return true;
 	}
 #endif
@@ -1641,13 +1655,13 @@ static int ssif_check_and_remove(struct i2c_client *client,
 	return 0;
 }
 
-static int ssif_probe(struct i2c_client *client)
+static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	unsigned char     msg[3];
 	unsigned char     *resp;
 	struct ssif_info   *ssif_info;
 	int               rv = 0;
-	int               len = 0;
+	int               len;
 	int               i;
 	u8		  slave_addr = 0;
 	struct ssif_addr_info *addr_info = NULL;
@@ -1945,7 +1959,7 @@ static int new_ssif_client(int addr, char *adapter_name,
 		}
 	}
 
-	strscpy(addr_info->binfo.type, DEVICE_NAME,
+	strncpy(addr_info->binfo.type, DEVICE_NAME,
 		sizeof(addr_info->binfo.type));
 	addr_info->binfo.addr = addr;
 	addr_info->binfo.platform_data = addr_info;
@@ -2075,6 +2089,9 @@ static int ssif_platform_remove(struct platform_device *dev)
 {
 	struct ssif_addr_info *addr_info = dev_get_drvdata(&dev->dev);
 
+	if (!addr_info)
+		return 0;
+
 	mutex_lock(&ssif_infos_mutex);
 	list_del(&addr_info->link);
 	kfree(addr_info);
@@ -2096,7 +2113,7 @@ static struct platform_driver ipmi_driver = {
 	.id_table       = ssif_plat_ids
 };
 
-static int __init init_ipmi_ssif(void)
+static int init_ipmi_ssif(void)
 {
 	int i;
 	int rv;
@@ -2138,7 +2155,7 @@ static int __init init_ipmi_ssif(void)
 }
 module_init(init_ipmi_ssif);
 
-static void __exit cleanup_ipmi_ssif(void)
+static void cleanup_ipmi_ssif(void)
 {
 	if (!initialized)
 		return;

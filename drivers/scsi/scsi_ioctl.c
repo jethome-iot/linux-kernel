@@ -69,15 +69,12 @@ static int ioctl_internal_command(struct scsi_device *sdev, char *cmd,
 {
 	int result;
 	struct scsi_sense_hdr sshdr;
-	const struct scsi_exec_args exec_args = {
-		.sshdr = &sshdr,
-	};
 
 	SCSI_LOG_IOCTL(1, sdev_printk(KERN_INFO, sdev,
 				      "Trying ioctl with scsi command %d\n", *cmd));
 
-	result = scsi_execute_cmd(sdev, cmd, REQ_OP_DRV_IN, NULL, 0, timeout,
-				  retries, &exec_args);
+	result = scsi_execute_req(sdev, cmd, DMA_NONE, NULL, 0,
+				  &sshdr, timeout, retries, NULL);
 
 	SCSI_LOG_IOCTL(2, sdev_printk(KERN_INFO, sdev,
 				      "Ioctl returned  0x%x\n", result));
@@ -248,7 +245,7 @@ static int scsi_send_start_stop(struct scsi_device *sdev, int data)
  * Only a subset of commands are allowed for unprivileged users. Commands used
  * to format the media, update the firmware, etc. are not permitted.
  */
-bool scsi_cmd_allowed(unsigned char *cmd, bool open_for_write)
+bool scsi_cmd_allowed(unsigned char *cmd, fmode_t mode)
 {
 	/* root can do any command. */
 	if (capable(CAP_SYS_RAWIO))
@@ -338,7 +335,7 @@ bool scsi_cmd_allowed(unsigned char *cmd, bool open_for_write)
 	case GPCMD_SET_READ_AHEAD:
 	/* ZBC */
 	case ZBC_OUT:
-		return open_for_write;
+		return (mode & FMODE_WRITE);
 	default:
 		return false;
 	}
@@ -346,17 +343,21 @@ bool scsi_cmd_allowed(unsigned char *cmd, bool open_for_write)
 EXPORT_SYMBOL(scsi_cmd_allowed);
 
 static int scsi_fill_sghdr_rq(struct scsi_device *sdev, struct request *rq,
-		struct sg_io_hdr *hdr, bool open_for_write)
+		struct sg_io_hdr *hdr, fmode_t mode)
 {
-	struct scsi_cmnd *scmd = blk_mq_rq_to_pdu(rq);
+	struct scsi_request *req = scsi_req(rq);
 
 	if (hdr->cmd_len < 6)
 		return -EMSGSIZE;
-	if (copy_from_user(scmd->cmnd, hdr->cmdp, hdr->cmd_len))
+	if (copy_from_user(req->cmd, hdr->cmdp, hdr->cmd_len))
 		return -EFAULT;
-	if (!scsi_cmd_allowed(scmd->cmnd, open_for_write))
+	if (!scsi_cmd_allowed(req->cmd, mode))
 		return -EPERM;
-	scmd->cmd_len = hdr->cmd_len;
+
+	/*
+	 * fill in request structure
+	 */
+	req->cmd_len = hdr->cmd_len;
 
 	rq->timeout = msecs_to_jiffies(hdr->timeout);
 	if (!rq->timeout)
@@ -372,29 +373,29 @@ static int scsi_fill_sghdr_rq(struct scsi_device *sdev, struct request *rq,
 static int scsi_complete_sghdr_rq(struct request *rq, struct sg_io_hdr *hdr,
 		struct bio *bio)
 {
-	struct scsi_cmnd *scmd = blk_mq_rq_to_pdu(rq);
+	struct scsi_request *req = scsi_req(rq);
 	int r, ret = 0;
 
 	/*
 	 * fill in all the output members
 	 */
-	hdr->status = scmd->result & 0xff;
-	hdr->masked_status = sg_status_byte(scmd->result);
+	hdr->status = req->result & 0xff;
+	hdr->masked_status = status_byte(req->result);
 	hdr->msg_status = COMMAND_COMPLETE;
-	hdr->host_status = host_byte(scmd->result);
+	hdr->host_status = host_byte(req->result);
 	hdr->driver_status = 0;
 	if (scsi_status_is_check_condition(hdr->status))
 		hdr->driver_status = DRIVER_SENSE;
 	hdr->info = 0;
 	if (hdr->masked_status || hdr->host_status || hdr->driver_status)
 		hdr->info |= SG_INFO_CHECK;
-	hdr->resid = scmd->resid_len;
+	hdr->resid = req->resid_len;
 	hdr->sb_len_wr = 0;
 
-	if (scmd->sense_len && hdr->sbp) {
-		int len = min((unsigned int) hdr->mx_sb_len, scmd->sense_len);
+	if (req->sense_len && hdr->sbp) {
+		int len = min((unsigned int) hdr->mx_sb_len, req->sense_len);
 
-		if (!copy_to_user(hdr->sbp, scmd->sense_buffer, len))
+		if (!copy_to_user(hdr->sbp, req->sense, len))
 			hdr->sb_len_wr = len;
 		else
 			ret = -EFAULT;
@@ -407,15 +408,15 @@ static int scsi_complete_sghdr_rq(struct request *rq, struct sg_io_hdr *hdr,
 	return ret;
 }
 
-static int sg_io(struct scsi_device *sdev, struct sg_io_hdr *hdr,
-		bool open_for_write)
+static int sg_io(struct scsi_device *sdev, struct gendisk *disk,
+		struct sg_io_hdr *hdr, fmode_t mode)
 {
 	unsigned long start_time;
 	ssize_t ret = 0;
 	int writing = 0;
 	int at_head = 0;
 	struct request *rq;
-	struct scsi_cmnd *scmd;
+	struct scsi_request *req;
 	struct bio *bio;
 
 	if (hdr->interface_id != 'S')
@@ -438,51 +439,79 @@ static int sg_io(struct scsi_device *sdev, struct sg_io_hdr *hdr,
 	if (hdr->flags & SG_FLAG_Q_AT_HEAD)
 		at_head = 1;
 
-	rq = scsi_alloc_request(sdev->request_queue, writing ?
+	ret = -ENOMEM;
+	rq = blk_get_request(sdev->request_queue, writing ?
 			     REQ_OP_DRV_OUT : REQ_OP_DRV_IN, 0);
 	if (IS_ERR(rq))
 		return PTR_ERR(rq);
-	scmd = blk_mq_rq_to_pdu(rq);
+	req = scsi_req(rq);
 
-	if (hdr->cmd_len > sizeof(scmd->cmnd)) {
-		ret = -EINVAL;
-		goto out_put_request;
+	if (hdr->cmd_len > BLK_MAX_CDB) {
+		req->cmd = kzalloc(hdr->cmd_len, GFP_KERNEL);
+		if (!req->cmd)
+			goto out_put_request;
 	}
 
-	ret = scsi_fill_sghdr_rq(sdev, rq, hdr, open_for_write);
+	ret = scsi_fill_sghdr_rq(sdev, rq, hdr, mode);
 	if (ret < 0)
-		goto out_put_request;
+		goto out_free_cdb;
 
-	ret = blk_rq_map_user_io(rq, NULL, hdr->dxferp, hdr->dxfer_len,
-			GFP_KERNEL, hdr->iovec_count && hdr->dxfer_len,
-			hdr->iovec_count, 0, rq_data_dir(rq));
+	ret = 0;
+	if (hdr->iovec_count && hdr->dxfer_len) {
+		struct iov_iter i;
+		struct iovec *iov = NULL;
+
+		ret = import_iovec(rq_data_dir(rq), hdr->dxferp,
+				   hdr->iovec_count, 0, &iov, &i);
+		if (ret < 0)
+			goto out_free_cdb;
+
+		/* SG_IO howto says that the shorter of the two wins */
+		iov_iter_truncate(&i, hdr->dxfer_len);
+
+		ret = blk_rq_map_user_iov(rq->q, rq, NULL, &i, GFP_KERNEL);
+		kfree(iov);
+	} else if (hdr->dxfer_len)
+		ret = blk_rq_map_user(rq->q, rq, NULL, hdr->dxferp,
+				      hdr->dxfer_len, GFP_KERNEL);
+
 	if (ret)
-		goto out_put_request;
+		goto out_free_cdb;
 
 	bio = rq->bio;
-	scmd->allowed = 0;
+	req->retries = 0;
 
 	start_time = jiffies;
 
-	blk_execute_rq(rq, at_head);
+	blk_execute_rq(disk, rq, at_head);
 
 	hdr->duration = jiffies_to_msecs(jiffies - start_time);
 
 	ret = scsi_complete_sghdr_rq(rq, hdr, bio);
 
+out_free_cdb:
+	scsi_req_free_cmd(req);
 out_put_request:
-	blk_mq_free_request(rq);
+	blk_put_request(rq);
 	return ret;
 }
 
 /**
  * sg_scsi_ioctl  --  handle deprecated SCSI_IOCTL_SEND_COMMAND ioctl
  * @q:		request queue to send scsi commands down
- * @open_for_write: is the file / block device opened for writing?
+ * @disk:	gendisk to operate on (option)
+ * @mode:	mode used to open the file through which the ioctl has been
+ *		submitted
  * @sic:	userspace structure describing the command to perform
  *
  * Send down the scsi command described by @sic to the device below
- * the request queue @q.
+ * the request queue @q.  If @file is non-NULL it's used to perform
+ * fine-grained permission checks that allow users to send down
+ * non-destructive SCSI commands.  If the caller has a struct gendisk
+ * available it should be passed in as @disk to allow the low level
+ * driver to use the information contained in it.  A non-NULL @disk
+ * is only allowed if the caller knows that the low level driver doesn't
+ * need it (e.g. in the scsi subsystem).
  *
  * Notes:
  *   -  This interface is deprecated - users should use the SG_IO
@@ -501,13 +530,14 @@ out_put_request:
  *      Positive numbers returned are the compacted SCSI error codes (4
  *      bytes in one int) where the lowest byte is the SCSI status.
  */
-static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
-		struct scsi_ioctl_command __user *sic)
+static int sg_scsi_ioctl(struct request_queue *q, struct gendisk *disk,
+		fmode_t mode, struct scsi_ioctl_command __user *sic)
 {
+	enum { OMAX_SB_LEN = 16 };	/* For backward compatibility */
 	struct request *rq;
+	struct scsi_request *req;
 	int err;
 	unsigned int in_len, out_len, bytes, opcode, cmdlen;
-	struct scsi_cmnd *scmd;
 	char *buffer = NULL;
 
 	if (!sic)
@@ -522,7 +552,7 @@ static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
 		return -EFAULT;
 	if (in_len > PAGE_SIZE || out_len > PAGE_SIZE)
 		return -EINVAL;
-	if (get_user(opcode, &sic->data[0]))
+	if (get_user(opcode, sic->data))
 		return -EFAULT;
 
 	bytes = max(in_len, out_len);
@@ -533,12 +563,12 @@ static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
 
 	}
 
-	rq = scsi_alloc_request(q, in_len ? REQ_OP_DRV_OUT : REQ_OP_DRV_IN, 0);
+	rq = blk_get_request(q, in_len ? REQ_OP_DRV_OUT : REQ_OP_DRV_IN, 0);
 	if (IS_ERR(rq)) {
 		err = PTR_ERR(rq);
 		goto error_free_buffer;
 	}
-	scmd = blk_mq_rq_to_pdu(rq);
+	req = scsi_req(rq);
 
 	cmdlen = COMMAND_SIZE(opcode);
 
@@ -546,25 +576,25 @@ static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
 	 * get command and data to send to device, if any
 	 */
 	err = -EFAULT;
-	scmd->cmd_len = cmdlen;
-	if (copy_from_user(scmd->cmnd, sic->data, cmdlen))
+	req->cmd_len = cmdlen;
+	if (copy_from_user(req->cmd, sic->data, cmdlen))
 		goto error;
 
 	if (in_len && copy_from_user(buffer, sic->data + cmdlen, in_len))
 		goto error;
 
 	err = -EPERM;
-	if (!scsi_cmd_allowed(scmd->cmnd, open_for_write))
+	if (!scsi_cmd_allowed(req->cmd, mode))
 		goto error;
 
 	/* default.  possible overridden later */
-	scmd->allowed = 5;
+	req->retries = 5;
 
 	switch (opcode) {
 	case SEND_DIAGNOSTIC:
 	case FORMAT_UNIT:
 		rq->timeout = FORMAT_UNIT_TIMEOUT;
-		scmd->allowed = 1;
+		req->retries = 1;
 		break;
 	case START_STOP:
 		rq->timeout = START_STOP_TIMEOUT;
@@ -577,7 +607,7 @@ static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
 		break;
 	case READ_DEFECT_DATA:
 		rq->timeout = READ_DEFECT_DATA_TIMEOUT;
-		scmd->allowed = 1;
+		req->retries = 1;
 		break;
 	default:
 		rq->timeout = BLK_DEFAULT_SG_TIMEOUT;
@@ -590,14 +620,14 @@ static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
 			goto error;
 	}
 
-	blk_execute_rq(rq, false);
+	blk_execute_rq(disk, rq, 0);
 
-	err = scmd->result & 0xff;	/* only 8 bit SCSI status */
+	err = req->result & 0xff;	/* only 8 bit SCSI status */
 	if (err) {
-		if (scmd->sense_len && scmd->sense_buffer) {
-			/* limit sense len for backward compatibility */
-			if (copy_to_user(sic->data, scmd->sense_buffer,
-					 min(scmd->sense_len, 16U)))
+		if (req->sense_len && req->sense) {
+			bytes = (OMAX_SB_LEN > req->sense_len) ?
+				req->sense_len : OMAX_SB_LEN;
+			if (copy_to_user(sic->data, req->sense, bytes))
 				err = -EFAULT;
 		}
 	} else {
@@ -606,7 +636,7 @@ static int sg_scsi_ioctl(struct request_queue *q, bool open_for_write,
 	}
 
 error:
-	blk_mq_free_request(rq);
+	blk_put_request(rq);
 
 error_free_buffer:
 	kfree(buffer);
@@ -776,8 +806,8 @@ static int scsi_put_cdrom_generic_arg(const struct cdrom_generic_command *cgc,
 	return 0;
 }
 
-static int scsi_cdrom_send_packet(struct scsi_device *sdev, bool open_for_write,
-		void __user *arg)
+static int scsi_cdrom_send_packet(struct scsi_device *sdev, struct gendisk *disk,
+		fmode_t mode, void __user *arg)
 {
 	struct cdrom_generic_command cgc;
 	struct sg_io_hdr hdr;
@@ -817,7 +847,7 @@ static int scsi_cdrom_send_packet(struct scsi_device *sdev, bool open_for_write,
 	hdr.cmdp = ((struct cdrom_generic_command __user *) arg)->cmd;
 	hdr.cmd_len = sizeof(cgc.cmd);
 
-	err = sg_io(sdev, &hdr, open_for_write);
+	err = sg_io(sdev, disk, &hdr, mode);
 	if (err == -EFAULT)
 		return -EFAULT;
 
@@ -832,8 +862,8 @@ static int scsi_cdrom_send_packet(struct scsi_device *sdev, bool open_for_write,
 	return err;
 }
 
-static int scsi_ioctl_sg_io(struct scsi_device *sdev, bool open_for_write,
-		void __user *argp)
+static int scsi_ioctl_sg_io(struct scsi_device *sdev, struct gendisk *disk,
+		fmode_t mode, void __user *argp)
 {
 	struct sg_io_hdr hdr;
 	int error;
@@ -841,7 +871,7 @@ static int scsi_ioctl_sg_io(struct scsi_device *sdev, bool open_for_write,
 	error = get_sg_io_hdr(&hdr, argp);
 	if (error)
 		return error;
-	error = sg_io(sdev, &hdr, open_for_write);
+	error = sg_io(sdev, disk, &hdr, mode);
 	if (error == -EFAULT)
 		return error;
 	if (put_sg_io_hdr(&hdr, argp))
@@ -852,7 +882,8 @@ static int scsi_ioctl_sg_io(struct scsi_device *sdev, bool open_for_write,
 /**
  * scsi_ioctl - Dispatch ioctl to scsi device
  * @sdev: scsi device receiving ioctl
- * @open_for_write: is the file / block device opened for writing?
+ * @disk: disk receiving the ioctl
+ * @mode: mode the block/char device is opened with
  * @cmd: which ioctl is it
  * @arg: data associated with ioctl
  *
@@ -860,8 +891,8 @@ static int scsi_ioctl_sg_io(struct scsi_device *sdev, bool open_for_write,
  * does not take a major/minor number as the dev field.  Rather, it takes
  * a pointer to a &struct scsi_device.
  */
-int scsi_ioctl(struct scsi_device *sdev, bool open_for_write, int cmd,
-		void __user *arg)
+int scsi_ioctl(struct scsi_device *sdev, struct gendisk *disk, fmode_t mode,
+		int cmd, void __user *arg)
 {
 	struct request_queue *q = sdev->request_queue;
 	struct scsi_sense_hdr sense_hdr;
@@ -896,11 +927,11 @@ int scsi_ioctl(struct scsi_device *sdev, bool open_for_write, int cmd,
 	case SG_EMULATED_HOST:
 		return sg_emulated_host(q, arg);
 	case SG_IO:
-		return scsi_ioctl_sg_io(sdev, open_for_write, arg);
+		return scsi_ioctl_sg_io(sdev, disk, mode, arg);
 	case SCSI_IOCTL_SEND_COMMAND:
-		return sg_scsi_ioctl(q, open_for_write, arg);
+		return sg_scsi_ioctl(q, disk, mode, arg);
 	case CDROM_SEND_PACKET:
-		return scsi_cdrom_send_packet(sdev, open_for_write, arg);
+		return scsi_cdrom_send_packet(sdev, disk, mode, arg);
 	case CDROMCLOSETRAY:
 		return scsi_send_start_stop(sdev, 3);
 	case CDROMEJECT:

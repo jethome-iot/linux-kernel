@@ -15,6 +15,7 @@
 #include <linux/mailbox_controller.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 
 #define INTR_STAT_OFS	0x0
 #define INTR_SET_OFS	0x8
@@ -43,7 +44,7 @@ struct arm_mhu {
 };
 
 /**
- * struct mhu_db_channel - ARM MHU Mailbox allocated channel information
+ * ARM MHU Mailbox allocated channel information
  *
  * @mhu: Pointer to parent mailbox device
  * @pchan: Physical channel within which this doorbell resides in

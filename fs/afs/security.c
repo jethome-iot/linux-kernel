@@ -219,7 +219,8 @@ void afs_cache_permit(struct afs_vnode *vnode, struct key *key,
 	 * yet.
 	 */
 	size++;
-	new = kzalloc(struct_size(new, permits, size), GFP_NOFS);
+	new = kzalloc(sizeof(struct afs_permits) +
+		      sizeof(struct afs_permit) * size, GFP_NOFS);
 	if (!new)
 		goto out_put;
 
@@ -395,7 +396,7 @@ int afs_check_permit(struct afs_vnode *vnode, struct key *key,
  * - AFS ACLs are attached to directories only, and a file is controlled by its
  *   parent directory's ACL
  */
-int afs_permission(struct mnt_idmap *idmap, struct inode *inode,
+int afs_permission(struct user_namespace *mnt_userns, struct inode *inode,
 		   int mask)
 {
 	struct afs_vnode *vnode = AFS_FS_I(inode);

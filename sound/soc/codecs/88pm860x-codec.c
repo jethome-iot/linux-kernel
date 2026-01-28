@@ -143,7 +143,7 @@ struct pm860x_priv {
 	struct pm860x_det	det;
 
 	int			irq[4];
-	unsigned char		name[4][MAX_NAME_LEN];
+	unsigned char		name[4][MAX_NAME_LEN+1];
 };
 
 /* -9450dB to 0dB in 150dB steps ( mute instead of -9450dB) */
@@ -400,9 +400,9 @@ static int pm860x_dac_event(struct snd_soc_dapm_widget *w,
 	unsigned int dac = 0;
 	int data;
 
-	if (!snd_soc_dapm_widget_name_cmp(w, "Left DAC"))
+	if (!strcmp(w->name, "Left DAC"))
 		dac = DAC_LEFT;
-	if (!snd_soc_dapm_widget_name_cmp(w, "Right DAC"))
+	if (!strcmp(w->name, "Right DAC"))
 		dac = DAC_RIGHT;
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
@@ -968,16 +968,16 @@ static int pm860x_pcm_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	mask |= PCM_INF2_BCLK | PCM_INF2_FS | PCM_INF2_MASTER;
 
-	/* set audio interface clocking */
-	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
-	case SND_SOC_DAIFMT_CBP_CFC:
+	/* set master/slave audio interface */
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBM_CFS:
 		if (pm860x->dir == PM860X_CLK_DIR_OUT) {
 			inf |= PCM_INF2_MASTER;
 			ret = 0;
 		}
 		break;
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		if (pm860x->dir == PM860X_CLK_DIR_IN) {
 			inf &= ~PCM_INF2_MASTER;
 			ret = 0;
@@ -1072,15 +1072,15 @@ static int pm860x_i2s_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	mask |= PCM_INF2_BCLK | PCM_INF2_FS | PCM_INF2_MASTER;
 
-	/* set audio interface clocking */
-	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_CBP_CFP:
+	/* set master/slave audio interface */
+	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBM_CFM:
 		if (pm860x->dir == PM860X_CLK_DIR_OUT)
 			inf |= PCM_INF2_MASTER;
 		else
 			return -EINVAL;
 		break;
-	case SND_SOC_DAIFMT_CBC_CFC:
+	case SND_SOC_DAIFMT_CBS_CFS:
 		if (pm860x->dir == PM860X_CLK_DIR_IN)
 			inf &= ~PCM_INF2_MASTER;
 		else
@@ -1345,6 +1345,7 @@ static const struct snd_soc_component_driver soc_component_dev_pm860x = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static int pm860x_codec_probe(struct platform_device *pdev)
@@ -1373,7 +1374,7 @@ static int pm860x_codec_probe(struct platform_device *pdev)
 			return -EINVAL;
 		}
 		pm860x->irq[i] = res->start + chip->irq_base;
-		strscpy(pm860x->name[i], res->name, MAX_NAME_LEN);
+		strncpy(pm860x->name[i], res->name, MAX_NAME_LEN);
 	}
 
 	ret = devm_snd_soc_register_component(&pdev->dev,
@@ -1386,11 +1387,17 @@ static int pm860x_codec_probe(struct platform_device *pdev)
 	return ret;
 }
 
+static int pm860x_codec_remove(struct platform_device *pdev)
+{
+	return 0;
+}
+
 static struct platform_driver pm860x_codec_driver = {
 	.driver	= {
 		.name	= "88pm860x-codec",
 	},
 	.probe	= pm860x_codec_probe,
+	.remove	= pm860x_codec_remove,
 };
 
 module_platform_driver(pm860x_codec_driver);

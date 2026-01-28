@@ -559,13 +559,11 @@ static const struct isi_format *find_format_by_fourcc(struct atmel_isi *isi,
 static void isi_try_fse(struct atmel_isi *isi, const struct isi_format *isi_fmt,
 			struct v4l2_subdev_state *sd_state)
 {
-	struct v4l2_rect *try_crop =
-		v4l2_subdev_state_get_crop(sd_state, 0);
+	int ret;
 	struct v4l2_subdev_frame_size_enum fse = {
 		.code = isi_fmt->mbus_code,
 		.which = V4L2_SUBDEV_FORMAT_TRY,
 	};
-	int ret;
 
 	ret = v4l2_subdev_call(isi->entity.subdev, pad, enum_frame_size,
 			       sd_state, &fse);
@@ -574,11 +572,11 @@ static void isi_try_fse(struct atmel_isi *isi, const struct isi_format *isi_fmt,
 	 * just use the maximum ISI can receive.
 	 */
 	if (ret) {
-		try_crop->width = MAX_SUPPORT_WIDTH;
-		try_crop->height = MAX_SUPPORT_HEIGHT;
+		sd_state->pads->try_crop.width = MAX_SUPPORT_WIDTH;
+		sd_state->pads->try_crop.height = MAX_SUPPORT_HEIGHT;
 	} else {
-		try_crop->width = fse.max_width;
-		try_crop->height = fse.max_height;
+		sd_state->pads->try_crop.width = fse.max_width;
+		sd_state->pads->try_crop.height = fse.max_height;
 	}
 }
 
@@ -589,9 +587,8 @@ static int isi_try_fmt(struct atmel_isi *isi, struct v4l2_format *f,
 	struct v4l2_pix_format *pixfmt = &f->fmt.pix;
 	struct v4l2_subdev_pad_config pad_cfg = {};
 	struct v4l2_subdev_state pad_state = {
-		.sd = isi->entity.subdev,
-		.pads = &pad_cfg,
-	};
+		.pads = &pad_cfg
+		};
 	struct v4l2_subdev_format format = {
 		.which = V4L2_SUBDEV_FORMAT_TRY,
 	};
@@ -1123,7 +1120,7 @@ static int isi_graph_notify_complete(struct v4l2_async_notifier *notifier)
 
 static void isi_graph_notify_unbind(struct v4l2_async_notifier *notifier,
 				     struct v4l2_subdev *sd,
-				     struct v4l2_async_connection *asd)
+				     struct v4l2_async_subdev *asd)
 {
 	struct atmel_isi *isi = notifier_to_isi(notifier);
 
@@ -1135,7 +1132,7 @@ static void isi_graph_notify_unbind(struct v4l2_async_notifier *notifier,
 
 static int isi_graph_notify_bound(struct v4l2_async_notifier *notifier,
 				   struct v4l2_subdev *subdev,
-				   struct v4l2_async_connection *asd)
+				   struct v4l2_async_subdev *asd)
 {
 	struct atmel_isi *isi = notifier_to_isi(notifier);
 
@@ -1154,7 +1151,7 @@ static const struct v4l2_async_notifier_operations isi_graph_notify_ops = {
 
 static int isi_graph_init(struct atmel_isi *isi)
 {
-	struct v4l2_async_connection *asd;
+	struct v4l2_async_subdev *asd;
 	struct device_node *ep;
 	int ret;
 
@@ -1162,11 +1159,12 @@ static int isi_graph_init(struct atmel_isi *isi)
 	if (!ep)
 		return -EINVAL;
 
-	v4l2_async_nf_init(&isi->notifier, &isi->v4l2_dev);
+	v4l2_async_notifier_init(&isi->notifier);
 
-	asd = v4l2_async_nf_add_fwnode_remote(&isi->notifier,
-					      of_fwnode_handle(ep),
-					      struct v4l2_async_connection);
+	asd = v4l2_async_notifier_add_fwnode_remote_subdev(
+						&isi->notifier,
+						of_fwnode_handle(ep),
+						struct v4l2_async_subdev);
 	of_node_put(ep);
 
 	if (IS_ERR(asd))
@@ -1174,10 +1172,10 @@ static int isi_graph_init(struct atmel_isi *isi)
 
 	isi->notifier.ops = &isi_graph_notify_ops;
 
-	ret = v4l2_async_nf_register(&isi->notifier);
+	ret = v4l2_async_notifier_register(&isi->v4l2_dev, &isi->notifier);
 	if (ret < 0) {
 		dev_err(isi->dev, "Notifier registration failed\n");
-		v4l2_async_nf_cleanup(&isi->notifier);
+		v4l2_async_notifier_cleanup(&isi->notifier);
 		return ret;
 	}
 
@@ -1190,6 +1188,7 @@ static int atmel_isi_probe(struct platform_device *pdev)
 	int irq;
 	struct atmel_isi *isi;
 	struct vb2_queue *q;
+	struct resource *regs;
 	int ret, i;
 
 	isi = devm_kzalloc(&pdev->dev, sizeof(struct atmel_isi), GFP_KERNEL);
@@ -1245,7 +1244,7 @@ static int atmel_isi_probe(struct platform_device *pdev)
 	q->ops = &isi_video_qops;
 	q->mem_ops = &vb2_dma_contig_memops;
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-	q->min_queued_buffers = 2;
+	q->min_buffers_needed = 2;
 	q->dev = &pdev->dev;
 
 	ret = vb2_queue_init(q);
@@ -1270,7 +1269,8 @@ static int atmel_isi_probe(struct platform_device *pdev)
 		list_add(&isi->dma_desc[i].list, &isi->dma_desc_head);
 	}
 
-	isi->regs = devm_platform_ioremap_resource(pdev, 0);
+	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	isi->regs = devm_ioremap_resource(&pdev->dev, regs);
 	if (IS_ERR(isi->regs)) {
 		ret = PTR_ERR(isi->regs);
 		goto err_ioremap;
@@ -1318,7 +1318,7 @@ err_vdev_alloc:
 	return ret;
 }
 
-static void atmel_isi_remove(struct platform_device *pdev)
+static int atmel_isi_remove(struct platform_device *pdev)
 {
 	struct atmel_isi *isi = platform_get_drvdata(pdev);
 
@@ -1327,9 +1327,11 @@ static void atmel_isi_remove(struct platform_device *pdev)
 			isi->p_fb_descriptors,
 			isi->fb_descriptors_phys);
 	pm_runtime_disable(&pdev->dev);
-	v4l2_async_nf_unregister(&isi->notifier);
-	v4l2_async_nf_cleanup(&isi->notifier);
+	v4l2_async_notifier_unregister(&isi->notifier);
+	v4l2_async_notifier_cleanup(&isi->notifier);
 	v4l2_device_unregister(&isi->v4l2_dev);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -1367,7 +1369,7 @@ static struct platform_driver atmel_isi_driver = {
 		.pm	= &atmel_isi_dev_pm_ops,
 	},
 	.probe		= atmel_isi_probe,
-	.remove_new	= atmel_isi_remove,
+	.remove		= atmel_isi_remove,
 };
 
 module_platform_driver(atmel_isi_driver);

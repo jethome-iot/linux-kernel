@@ -1,14 +1,24 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// Copyright (C) 2015-2017 Broadcom
+/*
+ * Copyright (C) 2015-2017 Broadcom
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation version 2.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
 
 #include <linux/bitops.h>
 #include <linux/gpio/driver.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
 #include <linux/module.h>
 #include <linux/irqdomain.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/interrupt.h>
-#include <linux/platform_device.h>
 
 enum gio_reg_index {
 	GIO_REG_ODEN = 0,
@@ -371,11 +381,16 @@ static int brcmstb_gpio_sanity_check_banks(struct device *dev,
 	}
 }
 
-static void brcmstb_gpio_remove(struct platform_device *pdev)
+static int brcmstb_gpio_remove(struct platform_device *pdev)
 {
 	struct brcmstb_gpio_priv *priv = platform_get_drvdata(pdev);
 	struct brcmstb_gpio_bank *bank;
-	int offset, virq;
+	int offset, ret = 0, virq;
+
+	if (!priv) {
+		dev_err(&pdev->dev, "called %s without drvdata!\n", __func__);
+		return -EFAULT;
+	}
 
 	if (priv->parent_irq > 0)
 		irq_set_chained_handler_and_data(priv->parent_irq, NULL, NULL);
@@ -395,6 +410,8 @@ static void brcmstb_gpio_remove(struct platform_device *pdev)
 	 */
 	list_for_each_entry(bank, &priv->bank_list, node)
 		gpiochip_remove(&bank->gc);
+
+	return ret;
 }
 
 static int brcmstb_gpio_of_xlate(struct gpio_chip *gc,
@@ -607,7 +624,8 @@ static int brcmstb_gpio_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, priv);
 	INIT_LIST_HEAD(&priv->bank_list);
 
-	reg_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	reg_base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(reg_base))
 		return PTR_ERR(reg_base);
 
@@ -685,8 +703,9 @@ static int brcmstb_gpio_probe(struct platform_device *pdev)
 			goto fail;
 		}
 
+		gc->of_node = np;
 		gc->owner = THIS_MODULE;
-		gc->label = devm_kasprintf(dev, GFP_KERNEL, "%pOF", np);
+		gc->label = devm_kasprintf(dev, GFP_KERNEL, "%pOF", dev->of_node);
 		if (!gc->label) {
 			err = -ENOMEM;
 			goto fail;
@@ -755,7 +774,7 @@ static struct platform_driver brcmstb_gpio_driver = {
 		.pm = &brcmstb_gpio_pm_ops,
 	},
 	.probe = brcmstb_gpio_probe,
-	.remove_new = brcmstb_gpio_remove,
+	.remove = brcmstb_gpio_remove,
 	.shutdown = brcmstb_gpio_shutdown,
 };
 module_platform_driver(brcmstb_gpio_driver);

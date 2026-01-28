@@ -16,6 +16,7 @@
 #include <nvhe/memory.h>
 #include <nvhe/mem_protect.h>
 #include <nvhe/mm.h>
+#include <nvhe/modules.h>
 #include <nvhe/spinlock.h>
 
 struct kvm_pgtable pkvm_pgtable;
@@ -24,7 +25,8 @@ hyp_spinlock_t pkvm_pgd_lock;
 struct memblock_region hyp_memory[HYP_MEMBLOCK_REGIONS];
 unsigned int hyp_memblock_nr;
 
-static u64 __io_map_base;
+static u64 __private_range_base;
+static u64 __private_range_cur;
 
 struct hyp_fixmap_slot {
 	u64 addr;
@@ -44,48 +46,38 @@ static int __pkvm_create_mappings(unsigned long start, unsigned long size,
 	return err;
 }
 
-static int __pkvm_alloc_private_va_range(unsigned long start, size_t size)
-{
-	unsigned long cur;
-
-	hyp_assert_lock_held(&pkvm_pgd_lock);
-
-	if (!start || start < __io_map_base)
-		return -EINVAL;
-
-	/* The allocated size is always a multiple of PAGE_SIZE */
-	cur = start + PAGE_ALIGN(size);
-
-	/* Are we overflowing on the vmemmap ? */
-	if (cur > __hyp_vmemmap)
-		return -ENOMEM;
-
-	__io_map_base = cur;
-
-	return 0;
-}
-
 /**
  * pkvm_alloc_private_va_range - Allocates a private VA range.
  * @size:	The size of the VA range to reserve.
  * @haddr:	The hypervisor virtual start address of the allocation.
  *
- * The private virtual address (VA) range is allocated above __io_map_base
+ * The private virtual address (VA) range is allocated above __private_range_base
  * and aligned based on the order of @size.
  *
  * Return: 0 on success or negative error code on failure.
  */
 int pkvm_alloc_private_va_range(size_t size, unsigned long *haddr)
 {
-	unsigned long addr;
-	int ret;
+	unsigned long cur, addr;
+	int ret = 0;
 
 	hyp_spin_lock(&pkvm_pgd_lock);
-	addr = __io_map_base;
-	ret = __pkvm_alloc_private_va_range(addr, size);
-	hyp_spin_unlock(&pkvm_pgd_lock);
 
-	*haddr = addr;
+	/* Align the allocation based on the order of its size */
+	addr = ALIGN(__private_range_cur, PAGE_SIZE << get_order(size));
+
+	/* The allocated size is always a multiple of PAGE_SIZE */
+	cur = addr + PAGE_ALIGN(size);
+
+	/* Has the private range grown too large ? */
+	if (!addr || cur > __hyp_vmemmap || (cur - __private_range_base) > __PKVM_PRIVATE_SZ) {
+		ret = -ENOMEM;
+	} else {
+		__private_range_cur = cur;
+		*haddr = addr;
+	}
+
+	hyp_spin_unlock(&pkvm_pgd_lock);
 
 	return ret;
 }
@@ -108,6 +100,71 @@ int __pkvm_create_private_mapping(phys_addr_t phys, size_t size,
 
 	*haddr = addr + offset_in_page(phys);
 	return err;
+}
+
+#ifdef CONFIG_NVHE_EL2_DEBUG
+static unsigned long mod_range_start = ULONG_MAX;
+static unsigned long mod_range_end;
+static DEFINE_HYP_SPINLOCK(mod_range_lock);
+
+static void update_mod_range(unsigned long addr, size_t size)
+{
+	hyp_spin_lock(&mod_range_lock);
+	mod_range_start = min(mod_range_start, addr);
+	mod_range_end = max(mod_range_end, addr + size);
+	hyp_spin_unlock(&mod_range_lock);
+}
+
+void assert_in_mod_range(unsigned long addr)
+{
+	/*
+	 * This is not entirely watertight if there are private range
+	 * allocations between modules being loaded, but in practice that is
+	 * probably going to be allocation initiated by the modules themselves.
+	 */
+	hyp_spin_lock(&mod_range_lock);
+	WARN_ON(addr < mod_range_start || mod_range_end <= addr);
+	hyp_spin_unlock(&mod_range_lock);
+}
+#else
+static inline void update_mod_range(unsigned long addr, size_t size) { }
+#endif
+
+void *__pkvm_alloc_module_va(u64 nr_pages)
+{
+	size_t size = nr_pages << PAGE_SHIFT;
+	unsigned long addr = 0;
+
+	if (!pkvm_alloc_private_va_range(size, &addr))
+		update_mod_range(addr, size);
+
+	return (void *)addr;
+}
+
+int __pkvm_map_module_page(u64 pfn, void *va, enum kvm_pgtable_prot prot, bool is_protected)
+{
+	unsigned long addr = (unsigned long)va;
+	int ret;
+
+	assert_in_mod_range(addr);
+
+	if (!is_protected) {
+		ret = __pkvm_host_donate_hyp(pfn, 1);
+		if (ret)
+			return ret;
+	}
+
+	ret = __pkvm_create_mappings(addr, PAGE_SIZE, hyp_pfn_to_phys(pfn), prot);
+	if (ret && !is_protected)
+		WARN_ON(__pkvm_hyp_donate_host(pfn, 1));
+
+	return ret;
+}
+
+void __pkvm_unmap_module_page(u64 pfn, void *va)
+{
+	WARN_ON(__pkvm_hyp_donate_host(pfn, 1));
+	pkvm_remove_mappings(va, va + PAGE_SIZE);
 }
 
 int pkvm_create_mappings_locked(void *from, void *to, enum kvm_pgtable_prot prot)
@@ -144,6 +201,15 @@ int pkvm_create_mappings(void *from, void *to, enum kvm_pgtable_prot prot)
 	hyp_spin_unlock(&pkvm_pgd_lock);
 
 	return ret;
+}
+
+void pkvm_remove_mappings(void *from, void *to)
+{
+	unsigned long size = (unsigned long)to - (unsigned long)from;
+
+	hyp_spin_lock(&pkvm_pgd_lock);
+	WARN_ON(kvm_pgtable_hyp_unmap(&pkvm_pgtable, (u64)from, size) != size);
+	hyp_spin_unlock(&pkvm_pgd_lock);
 }
 
 int hyp_back_vmemmap(phys_addr_t back)
@@ -240,6 +306,22 @@ void *hyp_fixmap_map(phys_addr_t phys)
 	WRITE_ONCE(*ptep, pte);
 	dsb(ishst);
 
+	return (void *)slot->addr + offset_in_page(phys);
+}
+
+#define KVM_PTE_LEAF_ATTR_LO_S1_ATTRIDX	GENMASK(4, 2)
+void *hyp_fixmap_map_nc(phys_addr_t phys)
+{
+	struct hyp_fixmap_slot *slot = this_cpu_ptr(&fixmap_slots);
+	kvm_pte_t pte, *ptep = slot->ptep;
+
+	pte = *ptep;
+	pte &= ~kvm_phys_to_pte(KVM_PHYS_INVALID);
+	pte |= kvm_phys_to_pte(phys) | KVM_PTE_VALID |
+	       FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S1_ATTRIDX, MT_NORMAL_NC);
+	WRITE_ONCE(*ptep, pte);
+	dsb(ishst);
+
 	return (void *)slot->addr;
 }
 
@@ -248,7 +330,8 @@ static void fixmap_clear_slot(struct hyp_fixmap_slot *slot)
 	kvm_pte_t *ptep = slot->ptep;
 	u64 addr = slot->addr;
 
-	WRITE_ONCE(*ptep, *ptep & ~KVM_PTE_VALID);
+	/* Zap the memory type too. MT_NORMAL is 0 so the fixmap is cacheable by default */
+	WRITE_ONCE(*ptep, *ptep & ~(KVM_PTE_VALID | KVM_PTE_LEAF_ATTR_LO_S1_ATTRIDX));
 
 	/*
 	 * Irritatingly, the architecture requires that we use inner-shareable
@@ -260,7 +343,7 @@ static void fixmap_clear_slot(struct hyp_fixmap_slot *slot)
 	 * https://lore.kernel.org/kvm/20221017115209.2099-1-will@kernel.org/T/#mf10dfbaf1eaef9274c581b81c53758918c1d0f03
 	 */
 	dsb(ishst);
-	__tlbi_level(vale2is, __TLBI_VADDR(addr, 0), KVM_PGTABLE_LAST_LEVEL);
+	__tlbi_level(vale2is, __TLBI_VADDR(addr, 0), (KVM_PGTABLE_MAX_LEVELS - 1));
 	dsb(ish);
 	isb();
 }
@@ -270,16 +353,17 @@ void hyp_fixmap_unmap(void)
 	fixmap_clear_slot(this_cpu_ptr(&fixmap_slots));
 }
 
-static int __create_fixmap_slot_cb(const struct kvm_pgtable_visit_ctx *ctx,
-				   enum kvm_pgtable_walk_flags visit)
+static int __create_fixmap_slot_cb(u64 addr, u64 end, u32 level, kvm_pte_t *ptep,
+				   enum kvm_pgtable_walk_flags flag,
+				   void * const arg)
 {
-	struct hyp_fixmap_slot *slot = per_cpu_ptr(&fixmap_slots, (u64)ctx->arg);
+	struct hyp_fixmap_slot *slot = per_cpu_ptr(&fixmap_slots, (u64)arg);
 
-	if (!kvm_pte_valid(ctx->old) || ctx->level != KVM_PGTABLE_LAST_LEVEL)
+	if (!kvm_pte_valid(*ptep) || level != KVM_PGTABLE_MAX_LEVELS - 1)
 		return -EINVAL;
 
-	slot->addr = ctx->addr;
-	slot->ptep = ctx->ptep;
+	slot->addr = addr;
+	slot->ptep = ptep;
 
 	/*
 	 * Clear the PTE, but keep the page-table page refcount elevated to
@@ -343,50 +427,12 @@ int hyp_create_idmap(u32 hyp_va_bits)
 	 * with the idmap to place the IOs and the vmemmap. IOs use the lower
 	 * half of the quarter and the vmemmap the upper half.
 	 */
-	__io_map_base = start & BIT(hyp_va_bits - 2);
-	__io_map_base ^= BIT(hyp_va_bits - 2);
-	__hyp_vmemmap = __io_map_base | BIT(hyp_va_bits - 3);
+	__private_range_base = start & BIT(hyp_va_bits - 2);
+	__private_range_base ^= BIT(hyp_va_bits - 2);
+	__private_range_cur = __private_range_base;
+	__hyp_vmemmap = __private_range_base | BIT(hyp_va_bits - 3);
 
 	return __pkvm_create_mappings(start, end - start, start, PAGE_HYP_EXEC);
-}
-
-int pkvm_create_stack(phys_addr_t phys, unsigned long *haddr)
-{
-	unsigned long addr, prev_base;
-	size_t size;
-	int ret;
-
-	hyp_spin_lock(&pkvm_pgd_lock);
-
-	prev_base = __io_map_base;
-	/*
-	 * Efficient stack verification using the PAGE_SHIFT bit implies
-	 * an alignment of our allocation on the order of the size.
-	 */
-	size = PAGE_SIZE * 2;
-	addr = ALIGN(__io_map_base, size);
-
-	ret = __pkvm_alloc_private_va_range(addr, size);
-	if (!ret) {
-		/*
-		 * Since the stack grows downwards, map the stack to the page
-		 * at the higher address and leave the lower guard page
-		 * unbacked.
-		 *
-		 * Any valid stack address now has the PAGE_SHIFT bit as 1
-		 * and addresses corresponding to the guard page have the
-		 * PAGE_SHIFT bit as 0 - this is used for overflow detection.
-		 */
-		ret = kvm_pgtable_hyp_map(&pkvm_pgtable, addr + PAGE_SIZE,
-					  PAGE_SIZE, phys, PAGE_HYP);
-		if (ret)
-			__io_map_base = prev_base;
-	}
-	hyp_spin_unlock(&pkvm_pgd_lock);
-
-	*haddr = addr + size;
-
-	return ret;
 }
 
 static void *admit_host_page(void *arg)

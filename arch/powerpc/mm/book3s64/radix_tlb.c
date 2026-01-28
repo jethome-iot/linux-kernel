@@ -329,7 +329,7 @@ static inline void _tlbie_pid(unsigned long pid, unsigned long ric)
 
 	/*
 	 * Workaround the fact that the "ric" argument to __tlbie_pid
-	 * must be a compile-time constraint to match the "i" constraint
+	 * must be a compile-time contraint to match the "i" constraint
 	 * in the asm statement.
 	 */
 	switch (ric) {
@@ -581,13 +581,12 @@ static inline void _tlbiel_va_range_multicast(struct mm_struct *mm,
  */
 void radix__local_flush_tlb_mm(struct mm_struct *mm)
 {
-	unsigned long pid = mm->context.id;
-
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
-		return;
+	unsigned long pid;
 
 	preempt_disable();
-	_tlbiel_pid(pid, RIC_FLUSH_TLB);
+	pid = mm->context.id;
+	if (pid != MMU_NO_CONTEXT)
+		_tlbiel_pid(pid, RIC_FLUSH_TLB);
 	preempt_enable();
 }
 EXPORT_SYMBOL(radix__local_flush_tlb_mm);
@@ -595,13 +594,12 @@ EXPORT_SYMBOL(radix__local_flush_tlb_mm);
 #ifndef CONFIG_SMP
 void radix__local_flush_all_mm(struct mm_struct *mm)
 {
-	unsigned long pid = mm->context.id;
-
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
-		return;
+	unsigned long pid;
 
 	preempt_disable();
-	_tlbiel_pid(pid, RIC_FLUSH_ALL);
+	pid = mm->context.id;
+	if (pid != MMU_NO_CONTEXT)
+		_tlbiel_pid(pid, RIC_FLUSH_ALL);
 	preempt_enable();
 }
 EXPORT_SYMBOL(radix__local_flush_all_mm);
@@ -615,13 +613,12 @@ static void __flush_all_mm(struct mm_struct *mm, bool fullmm)
 void radix__local_flush_tlb_page_psize(struct mm_struct *mm, unsigned long vmaddr,
 				       int psize)
 {
-	unsigned long pid = mm->context.id;
-
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
-		return;
+	unsigned long pid;
 
 	preempt_disable();
-	_tlbiel_va(vmaddr, pid, psize, RIC_FLUSH_TLB);
+	pid = mm->context.id;
+	if (pid != MMU_NO_CONTEXT)
+		_tlbiel_va(vmaddr, pid, psize, RIC_FLUSH_TLB);
 	preempt_enable();
 }
 
@@ -639,18 +636,10 @@ EXPORT_SYMBOL(radix__local_flush_tlb_page);
 static bool mm_needs_flush_escalation(struct mm_struct *mm)
 {
 	/*
-	 * The P9 nest MMU has issues with the page walk cache caching PTEs
-	 * and not flushing them when RIC = 0 for a PID/LPID invalidate.
-	 *
-	 * This may have been fixed in shipping firmware (by disabling PWC
-	 * or preventing it from caching PTEs), but until that is confirmed,
-	 * this workaround is required - escalate all RIC=0 IS=1/2/3 flushes
-	 * to RIC=2.
-	 *
-	 * POWER10 (and P9P) does not have this problem.
+	 * P9 nest MMU has issues with the page walk cache
+	 * caching PTEs and not flushing them properly when
+	 * RIC = 0 for a PID/LPID invalidate
 	 */
-	if (cpu_has_feature(CPU_FTR_ARCH_31))
-		return false;
 	if (atomic_read(&mm->context.copros) > 0)
 		return true;
 	return false;
@@ -676,20 +665,12 @@ void exit_lazy_flush_tlb(struct mm_struct *mm, bool always_flush)
 		goto out;
 
 	if (current->active_mm == mm) {
-		unsigned long flags;
-
 		WARN_ON_ONCE(current->mm != NULL);
-		/*
-		 * It is a kernel thread and is using mm as the lazy tlb, so
-		 * switch it to init_mm. This is not always called from IPI
-		 * (e.g., flush_type_needed), so must disable irqs.
-		 */
-		local_irq_save(flags);
-		mmgrab_lazy_tlb(&init_mm);
+		/* Is a kernel thread and is using mm as the lazy tlb */
+		mmgrab(&init_mm);
 		current->active_mm = &init_mm;
 		switch_mm_irqs_off(mm, &init_mm, current);
-		mmdrop_lazy_tlb(mm);
-		local_irq_restore(flags);
+		mmdrop(mm);
 	}
 
 	/*
@@ -701,7 +682,7 @@ void exit_lazy_flush_tlb(struct mm_struct *mm, bool always_flush)
 	 * that's what the caller expects.
 	 */
 	if (cpumask_test_cpu(cpu, mm_cpumask(mm))) {
-		dec_mm_active_cpus(mm);
+		atomic_dec(&mm->context.active_cpus);
 		cpumask_clear_cpu(cpu, mm_cpumask(mm));
 		always_flush = true;
 	}
@@ -837,7 +818,7 @@ void radix__flush_tlb_mm(struct mm_struct *mm)
 	enum tlb_flush_type type;
 
 	pid = mm->context.id;
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
+	if (unlikely(pid == MMU_NO_CONTEXT))
 		return;
 
 	preempt_disable();
@@ -868,7 +849,6 @@ void radix__flush_tlb_mm(struct mm_struct *mm)
 		}
 	}
 	preempt_enable();
-	mmu_notifier_arch_invalidate_secondary_tlbs(mm, 0, -1UL);
 }
 EXPORT_SYMBOL(radix__flush_tlb_mm);
 
@@ -878,7 +858,7 @@ static void __flush_all_mm(struct mm_struct *mm, bool fullmm)
 	enum tlb_flush_type type;
 
 	pid = mm->context.id;
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
+	if (unlikely(pid == MMU_NO_CONTEXT))
 		return;
 
 	preempt_disable();
@@ -902,7 +882,6 @@ static void __flush_all_mm(struct mm_struct *mm, bool fullmm)
 			_tlbiel_pid_multicast(mm, pid, RIC_FLUSH_ALL);
 	}
 	preempt_enable();
-	mmu_notifier_arch_invalidate_secondary_tlbs(mm, 0, -1UL);
 }
 
 void radix__flush_all_mm(struct mm_struct *mm)
@@ -918,7 +897,7 @@ void radix__flush_tlb_page_psize(struct mm_struct *mm, unsigned long vmaddr,
 	enum tlb_flush_type type;
 
 	pid = mm->context.id;
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
+	if (unlikely(pid == MMU_NO_CONTEXT))
 		return;
 
 	preempt_disable();
@@ -998,9 +977,6 @@ void radix__flush_tlb_kernel_range(unsigned long start, unsigned long end)
 }
 EXPORT_SYMBOL(radix__flush_tlb_kernel_range);
 
-/*
- * Doesn't appear to be used anywhere. Remove.
- */
 #define TLB_FLUSH_ALL -1UL
 
 /*
@@ -1022,22 +998,23 @@ static inline void __radix__flush_tlb_range(struct mm_struct *mm,
 	unsigned int page_shift = mmu_psize_defs[mmu_virtual_psize].shift;
 	unsigned long page_size = 1UL << page_shift;
 	unsigned long nr_pages = (end - start) >> page_shift;
+	bool fullmm = (end == TLB_FLUSH_ALL);
 	bool flush_pid, flush_pwc = false;
 	enum tlb_flush_type type;
 
 	pid = mm->context.id;
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
+	if (unlikely(pid == MMU_NO_CONTEXT))
 		return;
-
-	WARN_ON_ONCE(end == TLB_FLUSH_ALL);
 
 	preempt_disable();
 	smp_mb(); /* see radix__flush_tlb_mm */
-	type = flush_type_needed(mm, false);
+	type = flush_type_needed(mm, fullmm);
 	if (type == FLUSH_TYPE_NONE)
 		goto out;
 
-	if (type == FLUSH_TYPE_GLOBAL)
+	if (fullmm)
+		flush_pid = true;
+	else if (type == FLUSH_TYPE_GLOBAL)
 		flush_pid = nr_pages > tlb_single_page_flush_ceiling;
 	else
 		flush_pid = nr_pages > tlb_local_single_page_flush_ceiling;
@@ -1111,7 +1088,6 @@ static inline void __radix__flush_tlb_range(struct mm_struct *mm,
 	}
 out:
 	preempt_enable();
-	mmu_notifier_arch_invalidate_secondary_tlbs(mm, start, end);
 }
 
 void radix__flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
@@ -1196,29 +1172,8 @@ void radix__tlb_flush(struct mmu_gather *tlb)
 	 * that flushes the process table entry cache upon process teardown.
 	 * See the comment for radix in arch_exit_mmap().
 	 */
-	if (tlb->fullmm) {
-		if (IS_ENABLED(CONFIG_MMU_LAZY_TLB_SHOOTDOWN)) {
-			/*
-			 * Shootdown based lazy tlb mm refcounting means we
-			 * have to IPI everyone in the mm_cpumask anyway soon
-			 * when the mm goes away, so might as well do it as
-			 * part of the final flush now.
-			 *
-			 * If lazy shootdown was improved to reduce IPIs (e.g.,
-			 * by batching), then it may end up being better to use
-			 * tlbies here instead.
-			 */
-			preempt_disable();
-
-			smp_mb(); /* see radix__flush_tlb_mm */
-			exit_flush_lazy_tlbs(mm);
-			__flush_all_mm(mm, true);
-
-			preempt_enable();
-		} else {
-			__flush_all_mm(mm, true);
-		}
-
+	if (tlb->fullmm || tlb->need_flush_all) {
+		__flush_all_mm(mm, true);
 	} else if ( (psize = radix_get_mmu_psize(page_size)) == -1) {
 		if (!tlb->freed_tables)
 			radix__flush_tlb_mm(mm);
@@ -1240,22 +1195,25 @@ static void __radix__flush_tlb_range_psize(struct mm_struct *mm,
 	unsigned int page_shift = mmu_psize_defs[psize].shift;
 	unsigned long page_size = 1UL << page_shift;
 	unsigned long nr_pages = (end - start) >> page_shift;
+	bool fullmm = (end == TLB_FLUSH_ALL);
 	bool flush_pid;
 	enum tlb_flush_type type;
 
 	pid = mm->context.id;
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
+	if (unlikely(pid == MMU_NO_CONTEXT))
 		return;
 
-	WARN_ON_ONCE(end == TLB_FLUSH_ALL);
+	fullmm = (end == TLB_FLUSH_ALL);
 
 	preempt_disable();
 	smp_mb(); /* see radix__flush_tlb_mm */
-	type = flush_type_needed(mm, false);
+	type = flush_type_needed(mm, fullmm);
 	if (type == FLUSH_TYPE_NONE)
 		goto out;
 
-	if (type == FLUSH_TYPE_GLOBAL)
+	if (fullmm)
+		flush_pid = true;
+	else if (type == FLUSH_TYPE_GLOBAL)
 		flush_pid = nr_pages > tlb_single_page_flush_ceiling;
 	else
 		flush_pid = nr_pages > tlb_local_single_page_flush_ceiling;
@@ -1297,7 +1255,6 @@ static void __radix__flush_tlb_range_psize(struct mm_struct *mm,
 	}
 out:
 	preempt_enable();
-	mmu_notifier_arch_invalidate_secondary_tlbs(mm, start, end);
 }
 
 void radix__flush_tlb_range_psize(struct mm_struct *mm, unsigned long start,
@@ -1319,7 +1276,7 @@ void radix__flush_tlb_collapsed_pmd(struct mm_struct *mm, unsigned long addr)
 	enum tlb_flush_type type;
 
 	pid = mm->context.id;
-	if (WARN_ON_ONCE(pid == MMU_NO_CONTEXT))
+	if (unlikely(pid == MMU_NO_CONTEXT))
 		return;
 
 	/* 4k page size, just blow the world */
@@ -1366,13 +1323,6 @@ void radix__flush_pmd_tlb_range(struct vm_area_struct *vma,
 	radix__flush_tlb_range_psize(vma->vm_mm, start, end, MMU_PAGE_2M);
 }
 EXPORT_SYMBOL(radix__flush_pmd_tlb_range);
-
-void radix__flush_pud_tlb_range(struct vm_area_struct *vma,
-				unsigned long start, unsigned long end)
-{
-	radix__flush_tlb_range_psize(vma->vm_mm, start, end, MMU_PAGE_1G);
-}
-EXPORT_SYMBOL(radix__flush_pud_tlb_range);
 
 void radix__flush_tlb_all(void)
 {

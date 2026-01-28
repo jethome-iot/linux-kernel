@@ -11,11 +11,13 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
+#include <linux/pm_runtime.h>
 #include <linux/i2c.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
 #include <linux/acpi.h>
-#include <linux/gpio/consumer.h>
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
 #include <linux/mutex.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -45,7 +47,7 @@ static const struct regmap_config rt5682_regmap = {
 	.max_register = RT5682_I2C_MODE,
 	.volatile_reg = rt5682_volatile_register,
 	.readable_reg = rt5682_readable_register,
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 	.reg_defaults = rt5682_reg,
 	.num_reg_defaults = RT5682_REG_NUM,
 	.use_single_read = true,
@@ -116,7 +118,8 @@ static void rt5682_i2c_disable_regulators(void *data)
 	regulator_bulk_disable(ARRAY_SIZE(rt5682->supplies), rt5682->supplies);
 }
 
-static int rt5682_i2c_probe(struct i2c_client *i2c)
+static int rt5682_i2c_probe(struct i2c_client *i2c,
+		const struct i2c_device_id *id)
 {
 	struct rt5682_platform_data *pdata = dev_get_platdata(&i2c->dev);
 	struct rt5682_priv *rt5682;
@@ -157,6 +160,11 @@ static int rt5682_i2c_probe(struct i2c_client *i2c)
 		return ret;
 	}
 
+	ret = devm_add_action_or_reset(&i2c->dev, rt5682_i2c_disable_regulators,
+				       rt5682);
+	if (ret)
+		return ret;
+
 	ret = regulator_bulk_enable(ARRAY_SIZE(rt5682->supplies),
 				    rt5682->supplies);
 	if (ret) {
@@ -164,14 +172,11 @@ static int rt5682_i2c_probe(struct i2c_client *i2c)
 		return ret;
 	}
 
-	ret = devm_add_action_or_reset(&i2c->dev, rt5682_i2c_disable_regulators,
-				       rt5682);
-	if (ret)
-		return ret;
-
-	ret = rt5682_get_ldo1(rt5682, &i2c->dev);
-	if (ret)
-		return ret;
+	if (gpio_is_valid(rt5682->pdata.ldo1_en)) {
+		if (devm_gpio_request_one(&i2c->dev, rt5682->pdata.ldo1_en,
+					  GPIOF_OUT_INIT_HIGH, "rt5682"))
+			dev_err(&i2c->dev, "Fail gpio_request gpio_ldo\n");
+	}
 
 	/* Sleep for 300 ms miniumum */
 	usleep_range(300000, 350000);
@@ -271,9 +276,14 @@ static int rt5682_i2c_probe(struct i2c_client *i2c)
 
 #ifdef CONFIG_COMMON_CLK
 	/* Check if MCLK provided */
-	rt5682->mclk = devm_clk_get_optional(&i2c->dev, "mclk");
-	if (IS_ERR(rt5682->mclk))
-		return PTR_ERR(rt5682->mclk);
+	rt5682->mclk = devm_clk_get(&i2c->dev, "mclk");
+	if (IS_ERR(rt5682->mclk)) {
+		if (PTR_ERR(rt5682->mclk) != -ENOENT) {
+			ret = PTR_ERR(rt5682->mclk);
+			return ret;
+		}
+		rt5682->mclk = NULL;
+	}
 
 	/* Register CCF DAI clock control */
 	ret = rt5682_register_dai_clks(rt5682);
@@ -300,9 +310,11 @@ static void rt5682_i2c_shutdown(struct i2c_client *client)
 	rt5682_reset(rt5682);
 }
 
-static void rt5682_i2c_remove(struct i2c_client *client)
+static int rt5682_i2c_remove(struct i2c_client *client)
 {
 	rt5682_i2c_shutdown(client);
+
+	return 0;
 }
 
 static const struct of_device_id rt5682_of_match[] = {

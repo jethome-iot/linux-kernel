@@ -285,8 +285,9 @@ static int _mlx5_eswitch_set_vepa_locked(struct mlx5_eswitch *esw,
 	if (IS_ERR(flow_rule)) {
 		err = PTR_ERR(flow_rule);
 		goto out;
+	} else {
+		esw->fdb_table.legacy.vepa_uplink_rule = flow_rule;
 	}
-	esw->fdb_table.legacy.vepa_uplink_rule = flow_rule;
 
 	/* Star rule to forward all traffic to uplink vport */
 	memset(&dest, 0, sizeof(dest));
@@ -298,8 +299,9 @@ static int _mlx5_eswitch_set_vepa_locked(struct mlx5_eswitch *esw,
 	if (IS_ERR(flow_rule)) {
 		err = PTR_ERR(flow_rule);
 		goto out;
+	} else {
+		esw->fdb_table.legacy.vepa_star_rule = flow_rule;
 	}
-	esw->fdb_table.legacy.vepa_star_rule = flow_rule;
 
 out:
 	kvfree(spec);
@@ -521,7 +523,9 @@ int mlx5_eswitch_set_vport_rate(struct mlx5_eswitch *esw, u16 vport,
 		return PTR_ERR(evport);
 
 	mutex_lock(&esw->state_lock);
-	err = mlx5_esw_qos_set_vport_rate(esw, evport, max_rate, min_rate);
+	err = mlx5_esw_qos_set_vport_min_rate(esw, evport, min_rate, NULL);
+	if (!err)
+		err = mlx5_esw_qos_set_vport_max_rate(esw, evport, max_rate, NULL);
 	mutex_unlock(&esw->state_lock);
 	return err;
 }

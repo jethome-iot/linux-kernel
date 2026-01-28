@@ -173,24 +173,7 @@ static int hsr_dev_open(struct net_device *dev)
 
 static int hsr_dev_close(struct net_device *dev)
 {
-	struct hsr_port *port;
-	struct hsr_priv *hsr;
-
-	hsr = netdev_priv(dev);
-	hsr_for_each_port(hsr, port) {
-		if (port->type == HSR_PT_MASTER)
-			continue;
-		switch (port->type) {
-		case HSR_PT_SLAVE_A:
-		case HSR_PT_SLAVE_B:
-			dev_uc_unsync(port->dev, dev);
-			dev_mc_unsync(port->dev, dev);
-			break;
-		default:
-			break;
-		}
-	}
-
+	/* Nothing to do here. */
 	return 0;
 }
 
@@ -240,7 +223,7 @@ static netdev_tx_t hsr_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 		hsr_forward_skb(skb, master);
 		spin_unlock_bh(&hsr->seqnr_lock);
 	} else {
-		dev_core_stats_tx_dropped_inc(dev);
+		atomic_long_inc(&dev->tx_dropped);
 		dev_kfree_skb_any(skb);
 	}
 	return NETDEV_TX_OK;
@@ -326,9 +309,9 @@ static void send_hsr_supervision_frame(struct hsr_port *master,
 		hsr->sequence_nr++;
 	}
 
-	hsr_stag->tlv.HSR_TLV_type = type;
+	hsr_stag->HSR_TLV_type = type;
 	/* TODO: Why 12 in HSRv0? */
-	hsr_stag->tlv.HSR_TLV_length = hsr->prot_version ?
+	hsr_stag->HSR_TLV_length = hsr->prot_version ?
 				sizeof(struct hsr_sup_payload) : 12;
 
 	/* Payload: MacAddressA */
@@ -368,8 +351,8 @@ static void send_prp_supervision_frame(struct hsr_port *master,
 	spin_lock_bh(&hsr->seqnr_lock);
 	hsr_stag->sequence_nr = htons(hsr->sup_sequence_nr);
 	hsr->sup_sequence_nr++;
-	hsr_stag->tlv.HSR_TLV_type = PRP_TLV_LIFE_CHECK_DD;
-	hsr_stag->tlv.HSR_TLV_length = sizeof(struct hsr_sup_payload);
+	hsr_stag->HSR_TLV_type = PRP_TLV_LIFE_CHECK_DD;
+	hsr_stag->HSR_TLV_length = sizeof(struct hsr_sup_payload);
 
 	/* Payload: MacAddressA */
 	hsr_sp = skb_put(skb, sizeof(struct hsr_sup_payload));
@@ -421,60 +404,12 @@ void hsr_del_ports(struct hsr_priv *hsr)
 		hsr_del_port(port);
 }
 
-static void hsr_set_rx_mode(struct net_device *dev)
-{
-	struct hsr_port *port;
-	struct hsr_priv *hsr;
-
-	hsr = netdev_priv(dev);
-
-	hsr_for_each_port(hsr, port) {
-		if (port->type == HSR_PT_MASTER)
-			continue;
-		switch (port->type) {
-		case HSR_PT_SLAVE_A:
-		case HSR_PT_SLAVE_B:
-			dev_mc_sync_multiple(port->dev, dev);
-			dev_uc_sync_multiple(port->dev, dev);
-			break;
-		default:
-			break;
-		}
-	}
-}
-
-static void hsr_change_rx_flags(struct net_device *dev, int change)
-{
-	struct hsr_port *port;
-	struct hsr_priv *hsr;
-
-	hsr = netdev_priv(dev);
-
-	hsr_for_each_port(hsr, port) {
-		if (port->type == HSR_PT_MASTER)
-			continue;
-		switch (port->type) {
-		case HSR_PT_SLAVE_A:
-		case HSR_PT_SLAVE_B:
-			if (change & IFF_ALLMULTI)
-				dev_set_allmulti(port->dev,
-						 dev->flags &
-						 IFF_ALLMULTI ? 1 : -1);
-			break;
-		default:
-			break;
-		}
-	}
-}
-
 static const struct net_device_ops hsr_device_ops = {
 	.ndo_change_mtu = hsr_dev_change_mtu,
 	.ndo_open = hsr_dev_open,
 	.ndo_stop = hsr_dev_close,
 	.ndo_start_xmit = hsr_dev_xmit,
-	.ndo_change_rx_flags = hsr_change_rx_flags,
 	.ndo_fix_features = hsr_fix_features,
-	.ndo_set_rx_mode = hsr_set_rx_mode,
 };
 
 static struct device_type hsr_type = {
@@ -555,6 +490,7 @@ int hsr_dev_finalize(struct net_device *hsr_dev, struct net_device *slave[2],
 	hsr = netdev_priv(hsr_dev);
 	INIT_LIST_HEAD(&hsr->ports);
 	INIT_LIST_HEAD(&hsr->node_db);
+	INIT_LIST_HEAD(&hsr->self_node_db);
 	spin_lock_init(&hsr->list_lock);
 
 	eth_hw_addr_set(hsr_dev, slave[0]->dev_addr);
@@ -595,11 +531,6 @@ int hsr_dev_finalize(struct net_device *hsr_dev, struct net_device *slave[2],
 	res = hsr_add_port(hsr, hsr_dev, HSR_PT_MASTER, extack);
 	if (res)
 		goto err_add_master;
-
-	/* HSR forwarding offload supported in lower device? */
-	if ((slave[0]->features & NETIF_F_HW_HSR_FWD) &&
-	    (slave[1]->features & NETIF_F_HW_HSR_FWD))
-		hsr->fwd_offloaded = true;
 
 	res = register_netdevice(hsr_dev);
 	if (res)

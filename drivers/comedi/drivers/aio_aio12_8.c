@@ -22,9 +22,10 @@
  */
 
 #include <linux/module.h>
-#include <linux/comedi/comedidev.h>
-#include <linux/comedi/comedi_8255.h>
-#include <linux/comedi/comedi_8254.h>
+#include "../comedidev.h"
+
+#include "comedi_8254.h"
+#include "8255.h"
 
 /*
  * Register map
@@ -206,10 +207,10 @@ static int aio_aio12_8_attach(struct comedi_device *dev,
 	if (ret)
 		return ret;
 
-	dev->pacer = comedi_8254_io_alloc(dev->iobase + AIO12_8_8254_BASE_REG,
-					  0, I8254_IO8, 0);
-	if (IS_ERR(dev->pacer))
-		return PTR_ERR(dev->pacer);
+	dev->pacer = comedi_8254_init(dev->iobase + AIO12_8_8254_BASE_REG,
+				      0, I8254_IO8, 0);
+	if (!dev->pacer)
+		return -ENOMEM;
 
 	ret = comedi_alloc_subdevices(dev, 4);
 	if (ret)
@@ -247,7 +248,7 @@ static int aio_aio12_8_attach(struct comedi_device *dev,
 
 	/* Digital I/O subdevice (8255) */
 	s = &dev->subdevices[2];
-	ret = subdev_8255_io_init(dev, s, AIO12_8_8255_BASE_REG);
+	ret = subdev_8255_init(dev, s, NULL, AIO12_8_8255_BASE_REG);
 	if (ret)
 		return ret;
 

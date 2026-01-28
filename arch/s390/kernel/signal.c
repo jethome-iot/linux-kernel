@@ -12,7 +12,6 @@
 
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
-#include <linux/rseq.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/kernel.h>
@@ -26,6 +25,7 @@
 #include <linux/tty.h>
 #include <linux/personality.h>
 #include <linux/binfmts.h>
+#include <linux/tracehook.h>
 #include <linux/syscalls.h>
 #include <linux/compat.h>
 #include <asm/ucontext.h>
@@ -141,13 +141,17 @@ static int restore_sigregs(struct pt_regs *regs, _sigregs __user *sregs)
 {
 	_sigregs user_sregs;
 
-	/* Always make any pending restarted system call return -EINTR */
+	/* Alwys make any pending restarted system call return -EINTR */
 	current->restart_block.fn = do_no_restart_syscall;
 
 	if (__copy_from_user(&user_sregs, sregs, sizeof(user_sregs)))
 		return -EFAULT;
 
 	if (!is_ri_task(current) && (user_sregs.regs.psw.mask & PSW_MASK_RI))
+		return -EINVAL;
+
+	/* Test the floating-point-control word. */
+	if (test_fp_ctl(user_sregs.fpregs.fpc))
 		return -EINVAL;
 
 	/* Use regs->psw.mask instead of PSW_USER_BITS to preserve PER bit. */
@@ -179,9 +183,9 @@ static int save_sigregs_ext(struct pt_regs *regs,
 	int i;
 
 	/* Save vector registers to signal stack */
-	if (cpu_has_vx()) {
+	if (MACHINE_HAS_VX) {
 		for (i = 0; i < __NUM_VXRS_LOW; i++)
-			vxrs[i] = current->thread.fpu.vxrs[i].low;
+			vxrs[i] = *((__u64 *)(current->thread.fpu.vxrs + i) + 1);
 		if (__copy_to_user(&sregs_ext->vxrs_low, vxrs,
 				   sizeof(sregs_ext->vxrs_low)) ||
 		    __copy_to_user(&sregs_ext->vxrs_high,
@@ -199,7 +203,7 @@ static int restore_sigregs_ext(struct pt_regs *regs,
 	int i;
 
 	/* Restore vector registers from signal stack */
-	if (cpu_has_vx()) {
+	if (MACHINE_HAS_VX) {
 		if (__copy_from_user(vxrs, &sregs_ext->vxrs_low,
 				     sizeof(sregs_ext->vxrs_low)) ||
 		    __copy_from_user(current->thread.fpu.vxrs + __NUM_VXRS_LOW,
@@ -207,7 +211,7 @@ static int restore_sigregs_ext(struct pt_regs *regs,
 				     sizeof(sregs_ext->vxrs_high)))
 			return -EFAULT;
 		for (i = 0; i < __NUM_VXRS_LOW; i++)
-			current->thread.fpu.vxrs[i].low = vxrs[i];
+			*((__u64 *)(current->thread.fpu.vxrs + i) + 1) = vxrs[i];
 	}
 	return 0;
 }
@@ -297,7 +301,7 @@ static int setup_frame(int sig, struct k_sigaction *ka,
 	 * included in the signal frame on a 31-bit system.
 	 */
 	frame_size = sizeof(*frame) - sizeof(frame->sregs_ext);
-	if (cpu_has_vx())
+	if (MACHINE_HAS_VX)
 		frame_size += sizeof(frame->sregs_ext);
 	frame = get_sigframe(ka, regs, frame_size);
 	if (frame == (void __user *) -1UL)
@@ -374,7 +378,7 @@ static int setup_rt_frame(struct ksignal *ksig, sigset_t *set,
 	 * included in the signal frame on a 31-bit system.
 	 */
 	uc_flags = 0;
-	if (cpu_has_vx()) {
+	if (MACHINE_HAS_VX) {
 		frame_size += sizeof(_sigregs_ext);
 		uc_flags |= UC_VXRS;
 	}
@@ -449,7 +453,7 @@ static void handle_signal(struct ksignal *ksig, sigset_t *oldset,
  * stack-frames in one go after that.
  */
 
-void arch_do_signal_or_restart(struct pt_regs *regs)
+void arch_do_signal_or_restart(struct pt_regs *regs, bool has_signal)
 {
 	struct ksignal ksig;
 	sigset_t *oldset = sigmask_to_save();
@@ -462,7 +466,7 @@ void arch_do_signal_or_restart(struct pt_regs *regs)
 	current->thread.system_call =
 		test_pt_regs_flag(regs, PIF_SYSCALL) ? regs->int_code : 0;
 
-	if (get_signal(&ksig)) {
+	if (has_signal && get_signal(&ksig)) {
 		/* Whee!  Actually deliver the signal.  */
 		if (current->thread.system_call) {
 			regs->int_code = current->thread.system_call;

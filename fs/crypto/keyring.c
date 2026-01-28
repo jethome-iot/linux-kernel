@@ -21,6 +21,9 @@
 #include <asm/unaligned.h>
 #include <crypto/skcipher.h>
 #include <linux/key-type.h>
+#if IS_ENABLED(CONFIG_AMLOGIC_LINUX_FBE)
+#include <keys/trusted-type.h>
+#endif
 #include <linux/random.h>
 #include <linux/seq_file.h>
 
@@ -99,10 +102,10 @@ void fscrypt_put_master_key_activeref(struct super_block *sb,
 	spin_unlock(&sb->s_master_keys->lock);
 
 	/*
-	 * ->mk_active_refs == 0 implies that ->mk_present is false and
-	 * ->mk_decrypted_inodes is empty.
+	 * ->mk_active_refs == 0 implies that ->mk_secret is not present and
+	 * that ->mk_decrypted_inodes is empty.
 	 */
-	WARN_ON_ONCE(mk->mk_present);
+	WARN_ON_ONCE(is_master_key_secret_present(&mk->mk_secret));
 	WARN_ON_ONCE(!list_empty(&mk->mk_decrypted_inodes));
 
 	for (i = 0; i <= FSCRYPT_MODE_MAX; i++) {
@@ -121,18 +124,6 @@ void fscrypt_put_master_key_activeref(struct super_block *sb,
 	fscrypt_put_master_key(mk);
 }
 
-/*
- * This transitions the key state from present to incompletely removed, and then
- * potentially to absent (depending on whether inodes remain).
- */
-static void fscrypt_initiate_key_removal(struct super_block *sb,
-					 struct fscrypt_master_key *mk)
-{
-	WRITE_ONCE(mk->mk_present, false);
-	wipe_master_key_secret(&mk->mk_secret);
-	fscrypt_put_master_key_activeref(sb, mk);
-}
-
 static inline bool valid_key_spec(const struct fscrypt_key_specifier *spec)
 {
 	if (spec->__reserved)
@@ -140,15 +131,34 @@ static inline bool valid_key_spec(const struct fscrypt_key_specifier *spec)
 	return master_key_spec_len(spec) != 0;
 }
 
+#if IS_ENABLED(CONFIG_AMLOGIC_LINUX_FBE_RDK)
+int fscrypt_check_accessibility(struct inode *inode)
+{
+	struct fscrypt_info *ci = inode->i_crypt_info;
+	int ret = 0;
+
+	if (ci && ci->ci_policy.version == FSCRYPT_POLICY_V2) {
+		ret = fscrypt_verify_key_added(inode->i_sb,
+			ci->ci_policy.v2.master_key_identifier);
+		if (ret) {
+			fscrypt_err(inode,
+				"Not owner of master key. Access denied!(%d)", ret);
+			return -EPERM;
+		}
+	}
+	return ret;
+}
+#endif
+
 static int fscrypt_user_key_instantiate(struct key *key,
 					struct key_preparsed_payload *prep)
 {
 	/*
-	 * We just charge FSCRYPT_MAX_KEY_SIZE bytes to the user's key quota for
-	 * each key, regardless of the exact key size.  The amount of memory
-	 * actually used is greater than the size of the raw key anyway.
+	 * We just charge FSCRYPT_MAX_STANDARD_KEY_SIZE bytes to the user's key
+	 * quota for each key, regardless of the exact key size.  The amount of
+	 * memory actually used is greater than the size of the raw key anyway.
 	 */
-	return key_payload_reserve(key, FSCRYPT_MAX_KEY_SIZE);
+	return key_payload_reserve(key, FSCRYPT_MAX_STANDARD_KEY_SIZE);
 }
 
 static void fscrypt_user_key_describe(const struct key *key, struct seq_file *m)
@@ -246,13 +256,14 @@ void fscrypt_destroy_keyring(struct super_block *sb)
 			 * evicted, every key remaining in the keyring should
 			 * have an empty inode list, and should only still be in
 			 * the keyring due to the single active ref associated
-			 * with ->mk_present.  There should be no structural
-			 * refs beyond the one associated with the active ref.
+			 * with ->mk_secret.  There should be no structural refs
+			 * beyond the one associated with the active ref.
 			 */
 			WARN_ON_ONCE(refcount_read(&mk->mk_active_refs) != 1);
 			WARN_ON_ONCE(refcount_read(&mk->mk_struct_refs) != 1);
-			WARN_ON_ONCE(!mk->mk_present);
-			fscrypt_initiate_key_removal(sb, mk);
+			WARN_ON_ONCE(!is_master_key_secret_present(&mk->mk_secret));
+			wipe_master_key_secret(&mk->mk_secret);
+			fscrypt_put_master_key_activeref(sb, mk);
 		}
 	}
 	kfree_sensitive(keyring);
@@ -450,8 +461,7 @@ static int add_new_master_key(struct super_block *sb,
 	}
 
 	move_master_key_secret(&mk->mk_secret, secret);
-	mk->mk_present = true;
-	refcount_set(&mk->mk_active_refs, 1); /* ->mk_present is true */
+	refcount_set(&mk->mk_active_refs, 1); /* ->mk_secret is present */
 
 	spin_lock(&keyring->lock);
 	hlist_add_head_rcu(&mk->mk_node,
@@ -490,18 +500,11 @@ static int add_existing_master_key(struct fscrypt_master_key *mk,
 			return err;
 	}
 
-	/* If the key is incompletely removed, make it present again. */
-	if (!mk->mk_present) {
-		if (!refcount_inc_not_zero(&mk->mk_active_refs)) {
-			/*
-			 * Raced with the last active ref being dropped, so the
-			 * key has become, or is about to become, "absent".
-			 * Therefore, we need to allocate a new key struct.
-			 */
+	/* Re-add the secret if needed. */
+	if (!is_master_key_secret_present(&mk->mk_secret)) {
+		if (!refcount_inc_not_zero(&mk->mk_active_refs))
 			return KEY_DEAD;
-		}
 		move_master_key_secret(&mk->mk_secret, secret);
-		WRITE_ONCE(mk->mk_present, true);
 	}
 
 	return 0;
@@ -525,8 +528,8 @@ static int do_add_master_key(struct super_block *sb,
 			err = add_new_master_key(sb, secret, mk_spec);
 	} else {
 		/*
-		 * Found the key in ->s_master_keys.  Add the user to ->mk_users
-		 * if needed, and make the key "present" again if possible.
+		 * Found the key in ->s_master_keys.  Re-add the secret if
+		 * needed, and add the user to ->mk_users if needed.
 		 */
 		down_write(&mk->mk_sem);
 		err = add_existing_master_key(mk, secret);
@@ -553,20 +556,36 @@ static int add_master_key(struct super_block *sb,
 	int err;
 
 	if (key_spec->type == FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER) {
-		err = fscrypt_init_hkdf(&secret->hkdf, secret->raw,
-					secret->size);
+		u8 sw_secret[BLK_CRYPTO_SW_SECRET_SIZE];
+		u8 *kdf_key = secret->raw;
+		unsigned int kdf_key_size = secret->size;
+		u8 keyid_kdf_ctx = HKDF_CONTEXT_KEY_IDENTIFIER;
+
+		/*
+		 * For standard keys, the fscrypt master key is used directly as
+		 * the fscrypt KDF key.  For hardware-wrapped keys, we have to
+		 * pass the master key to the hardware to derive the KDF key,
+		 * which is then only used to derive non-file-contents subkeys.
+		 */
+		if (secret->is_hw_wrapped) {
+			err = fscrypt_derive_sw_secret(sb, secret->raw,
+						       secret->size, sw_secret);
+			if (err)
+				return err;
+			kdf_key = sw_secret;
+			kdf_key_size = sizeof(sw_secret);
+		}
+		err = fscrypt_init_hkdf(&secret->hkdf, kdf_key, kdf_key_size);
+		/*
+		 * Now that the KDF context is initialized, the raw KDF key is
+		 * no longer needed.
+		 */
+		memzero_explicit(kdf_key, kdf_key_size);
 		if (err)
 			return err;
 
-		/*
-		 * Now that the HKDF context is initialized, the raw key is no
-		 * longer needed.
-		 */
-		memzero_explicit(secret->raw, secret->size);
-
 		/* Calculate the key identifier */
-		err = fscrypt_hkdf_expand(&secret->hkdf,
-					  HKDF_CONTEXT_KEY_IDENTIFIER, NULL, 0,
+		err = fscrypt_hkdf_expand(&secret->hkdf, keyid_kdf_ctx, NULL, 0,
 					  key_spec->u.identifier,
 					  FSCRYPT_KEY_IDENTIFIER_SIZE);
 		if (err)
@@ -580,7 +599,7 @@ static int fscrypt_provisioning_key_preparse(struct key_preparsed_payload *prep)
 	const struct fscrypt_provisioning_key_payload *payload = prep->data;
 
 	if (prep->datalen < sizeof(*payload) + FSCRYPT_MIN_KEY_SIZE ||
-	    prep->datalen > sizeof(*payload) + FSCRYPT_MAX_KEY_SIZE)
+	    prep->datalen > sizeof(*payload) + FSCRYPT_MAX_ANY_KEY_SIZE)
 		return -EINVAL;
 
 	if (payload->type != FSCRYPT_KEY_SPEC_TYPE_DESCRIPTOR &&
@@ -657,7 +676,33 @@ static int get_keyring_key(u32 key_id, u32 type,
 	if (IS_ERR(ref))
 		return PTR_ERR(ref);
 	key = key_ref_to_ptr(ref);
+#if IS_ENABLED(CONFIG_AMLOGIC_LINUX_FBE)
+	if (key->type == &key_type_fscrypt_provisioning) {
+		payload = key->payload.data[0];
 
+		/* Don't allow fscrypt v1 keys to be used as v2 keys and vice versa. */
+		if (payload->type != type)
+			goto bad_key;
+
+		secret->size = key->datalen - sizeof(*payload);
+		memcpy(secret->raw, payload->raw, secret->size);
+		err = 0;
+		goto out_put;
+	} else if (!strncmp(key->type->name, "trusted", strlen(key->type->name))) {
+		struct trusted_key_payload *payload = NULL;
+
+		payload = key->payload.rcu_data0;
+
+		//dump_payload(payload);
+
+		secret->size = payload->key_len;
+		memcpy(secret->raw, payload->key, secret->size);
+		err = 0;
+		goto out_put;
+	} else {
+		goto bad_key;
+	}
+#else
 	if (key->type != &key_type_fscrypt_provisioning)
 		goto bad_key;
 	payload = key->payload.data[0];
@@ -670,7 +715,7 @@ static int get_keyring_key(u32 key_id, u32 type,
 	memcpy(secret->raw, payload->raw, secret->size);
 	err = 0;
 	goto out_put;
-
+#endif
 bad_key:
 	err = -EKEYREJECTED;
 out_put:
@@ -729,15 +774,30 @@ int fscrypt_ioctl_add_key(struct file *filp, void __user *_uarg)
 		return -EACCES;
 
 	memset(&secret, 0, sizeof(secret));
+
+	if (arg.__flags) {
+		if (arg.__flags & ~__FSCRYPT_ADD_KEY_FLAG_HW_WRAPPED)
+			return -EINVAL;
+		if (arg.key_spec.type != FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER)
+			return -EINVAL;
+		secret.is_hw_wrapped = true;
+	}
+
 	if (arg.key_id) {
 		if (arg.raw_size != 0)
 			return -EINVAL;
 		err = get_keyring_key(arg.key_id, arg.key_spec.type, &secret);
 		if (err)
 			goto out_wipe_secret;
+		err = -EINVAL;
+		if (secret.size > FSCRYPT_MAX_STANDARD_KEY_SIZE &&
+		    !secret.is_hw_wrapped)
+			goto out_wipe_secret;
 	} else {
 		if (arg.raw_size < FSCRYPT_MIN_KEY_SIZE ||
-		    arg.raw_size > FSCRYPT_MAX_KEY_SIZE)
+		    arg.raw_size > (secret.is_hw_wrapped ?
+				    FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE :
+				    FSCRYPT_MAX_STANDARD_KEY_SIZE))
 			return -EINVAL;
 		secret.size = arg.raw_size;
 		err = -EFAULT;
@@ -765,13 +825,13 @@ EXPORT_SYMBOL_GPL(fscrypt_ioctl_add_key);
 static void
 fscrypt_get_test_dummy_secret(struct fscrypt_master_key_secret *secret)
 {
-	static u8 test_key[FSCRYPT_MAX_KEY_SIZE];
+	static u8 test_key[FSCRYPT_MAX_STANDARD_KEY_SIZE];
 
-	get_random_once(test_key, FSCRYPT_MAX_KEY_SIZE);
+	get_random_once(test_key, sizeof(test_key));
 
 	memset(secret, 0, sizeof(*secret));
-	secret->size = FSCRYPT_MAX_KEY_SIZE;
-	memcpy(secret->raw, test_key, FSCRYPT_MAX_KEY_SIZE);
+	secret->size = sizeof(test_key);
+	memcpy(secret->raw, test_key, sizeof(test_key));
 }
 
 int fscrypt_get_test_dummy_key_identifier(
@@ -860,8 +920,14 @@ int fscrypt_verify_key_added(struct super_block *sb,
 	up_read(&mk->mk_sem);
 	fscrypt_put_master_key(mk);
 out:
+
+#if IS_ENABLED(CONFIG_AMLOGIC_LINUX_FBE_RDK)
+	/* Make root(uid 0) unable to access other users' file */
+	/* NOP */
+#else
 	if (err == -ENOKEY && capable(CAP_FOWNER))
 		err = 0;
+#endif
 	return err;
 }
 
@@ -886,7 +952,7 @@ static void shrink_dcache_inode(struct inode *inode)
 
 static void evict_dentries_for_decrypted_inodes(struct fscrypt_master_key *mk)
 {
-	struct fscrypt_inode_info *ci;
+	struct fscrypt_info *ci;
 	struct inode *inode;
 	struct inode *toput_inode = NULL;
 
@@ -936,7 +1002,7 @@ static int check_for_busy_inodes(struct super_block *sb,
 		/* select an example file to show for debugging purposes */
 		struct inode *inode =
 			list_first_entry(&mk->mk_decrypted_inodes,
-					 struct fscrypt_inode_info,
+					 struct fscrypt_info,
 					 ci_master_key_link)->ci_inode;
 		ino = inode->i_ino;
 	}
@@ -1002,14 +1068,15 @@ static int try_to_lock_encrypted_files(struct super_block *sb,
  * FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS (all_users=true) always removes the
  * key itself.
  *
- * To "remove the key itself", first we transition the key to the "incompletely
- * removed" state, so that no more inodes can be unlocked with it.  Then we try
- * to evict all cached inodes that had been unlocked with the key.
+ * To "remove the key itself", first we wipe the actual master key secret, so
+ * that no more inodes can be unlocked with it.  Then we try to evict all cached
+ * inodes that had been unlocked with the key.
  *
  * If all inodes were evicted, then we unlink the fscrypt_master_key from the
  * keyring.  Otherwise it remains in the keyring in the "incompletely removed"
- * state where it tracks the list of remaining inodes.  Userspace can execute
- * the ioctl again later to retry eviction, or alternatively can re-add the key.
+ * state (without the actual secret key) where it tracks the list of remaining
+ * inodes.  Userspace can execute the ioctl again later to retry eviction, or
+ * alternatively can re-add the secret key again.
  *
  * For more details, see the "Removing keys" section of
  * Documentation/filesystems/fscrypt.rst.
@@ -1071,10 +1138,11 @@ static int do_remove_key(struct file *filp, void __user *_uarg, bool all_users)
 		}
 	}
 
-	/* No user claims remaining.  Initiate removal of the key. */
+	/* No user claims remaining.  Go ahead and wipe the secret. */
 	err = -ENOKEY;
-	if (mk->mk_present) {
-		fscrypt_initiate_key_removal(sb, mk);
+	if (is_master_key_secret_present(&mk->mk_secret)) {
+		wipe_master_key_secret(&mk->mk_secret);
+		fscrypt_put_master_key_activeref(sb, mk);
 		err = 0;
 	}
 	inodes_remain = refcount_read(&mk->mk_active_refs) > 0;
@@ -1091,9 +1159,9 @@ static int do_remove_key(struct file *filp, void __user *_uarg, bool all_users)
 	}
 	/*
 	 * We return 0 if we successfully did something: removed a claim to the
-	 * key, initiated removal of the key, or tried locking the files again.
-	 * Users need to check the informational status flags if they care
-	 * whether the key has been fully removed including all files locked.
+	 * key, wiped the secret, or tried locking the files again.  Users need
+	 * to check the informational status flags if they care whether the key
+	 * has been fully removed including all files locked.
 	 */
 out_put_key:
 	fscrypt_put_master_key(mk);
@@ -1120,11 +1188,12 @@ EXPORT_SYMBOL_GPL(fscrypt_ioctl_remove_key_all_users);
  * Retrieve the status of an fscrypt master encryption key.
  *
  * We set ->status to indicate whether the key is absent, present, or
- * incompletely removed.  (For an explanation of what these statuses mean and
- * how they are represented internally, see struct fscrypt_master_key.)  This
- * field allows applications to easily determine the status of an encrypted
- * directory without using a hack such as trying to open a regular file in it
- * (which can confuse the "incompletely removed" status with absent or present).
+ * incompletely removed.  "Incompletely removed" means that the master key
+ * secret has been removed, but some files which had been unlocked with it are
+ * still in use.  This field allows applications to easily determine the state
+ * of an encrypted directory without using a hack such as trying to open a
+ * regular file in it (which can confuse the "incompletely removed" state with
+ * absent or present).
  *
  * In addition, for v2 policy keys we allow applications to determine, via
  * ->status_flags and ->user_count, whether the key has been added by the
@@ -1166,7 +1235,7 @@ int fscrypt_ioctl_get_key_status(struct file *filp, void __user *uarg)
 	}
 	down_read(&mk->mk_sem);
 
-	if (!mk->mk_present) {
+	if (!is_master_key_secret_present(&mk->mk_secret)) {
 		arg.status = refcount_read(&mk->mk_active_refs) > 0 ?
 			FSCRYPT_KEY_STATUS_INCOMPLETELY_REMOVED :
 			FSCRYPT_KEY_STATUS_ABSENT /* raced with full removal */;

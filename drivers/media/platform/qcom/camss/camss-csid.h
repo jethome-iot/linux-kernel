@@ -159,8 +159,7 @@ struct csid_device {
 	char irq_name[30];
 	struct camss_clock *clock;
 	int nclocks;
-	struct regulator_bulk_data *supplies;
-	int num_supplies;
+	struct regulator *vdda;
 	struct completion reset_complete;
 	struct csid_testgen_config testgen;
 	struct csid_phy_config phy;
@@ -172,7 +171,7 @@ struct csid_device {
 	const struct csid_hw_ops *ops;
 };
 
-struct camss_subdev_resources;
+struct resources;
 
 /*
  * csid_find_code - Find a format code in an array using array index or format code
@@ -200,7 +199,7 @@ const struct csid_format *csid_get_fmt_entry(const struct csid_format *formats,
 					     u32 code);
 
 int msm_csid_subdev_init(struct camss *camss, struct csid_device *csid,
-			 const struct camss_subdev_resources *res, u8 id);
+			 const struct resources *res, u8 id);
 
 int msm_csid_register_entity(struct csid_device *csid,
 			     struct v4l2_device *v4l2_dev);
@@ -213,14 +212,7 @@ extern const char * const csid_testgen_modes[];
 
 extern const struct csid_hw_ops csid_ops_4_1;
 extern const struct csid_hw_ops csid_ops_4_7;
-extern const struct csid_hw_ops csid_ops_gen2;
+extern const struct csid_hw_ops csid_ops_170;
 
-/*
- * csid_is_lite - Check if CSID is CSID lite.
- * @csid: CSID Device
- *
- * Return whether CSID is CSID lite
- */
-bool csid_is_lite(struct csid_device *csid);
 
 #endif /* QC_MSM_CAMSS_CSID_H */

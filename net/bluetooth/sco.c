@@ -68,7 +68,7 @@ struct sco_pinfo {
 	bdaddr_t	dst;
 	__u32		flags;
 	__u16		setting;
-	struct bt_codec codec;
+	__u8		cmsg_mask;
 	struct sco_conn	*conn;
 };
 
@@ -125,11 +125,8 @@ static struct sco_conn *sco_conn_add(struct hci_conn *hcon)
 	struct hci_dev *hdev = hcon->hdev;
 	struct sco_conn *conn = hcon->sco_data;
 
-	if (conn) {
-		if (!conn->hcon)
-			conn->hcon = hcon;
+	if (conn)
 		return conn;
-	}
 
 	conn = kzalloc(sizeof(struct sco_conn), GFP_KERNEL);
 	if (!conn)
@@ -237,20 +234,13 @@ static int sco_chan_add(struct sco_conn *conn, struct sock *sk,
 	return err;
 }
 
-static int sco_connect(struct sock *sk)
+static int sco_connect(struct hci_dev *hdev, struct sock *sk)
 {
 	struct sco_conn *conn;
 	struct hci_conn *hcon;
-	struct hci_dev  *hdev;
 	int err, type;
 
 	BT_DBG("%pMR -> %pMR", &sco_pi(sk)->src, &sco_pi(sk)->dst);
-
-	hdev = hci_get_route(&sco_pi(sk)->dst, &sco_pi(sk)->src, BDADDR_BREDR);
-	if (!hdev)
-		return -EHOSTUNREACH;
-
-	hci_dev_lock(hdev);
 
 	if (lmp_esco_capable(hdev) && !disable_esco)
 		type = ESCO_LINK;
@@ -258,35 +248,26 @@ static int sco_connect(struct sock *sk)
 		type = SCO_LINK;
 
 	if (sco_pi(sk)->setting == BT_VOICE_TRANSPARENT &&
-	    (!lmp_transp_capable(hdev) || !lmp_esco_capable(hdev))) {
-		err = -EOPNOTSUPP;
-		goto unlock;
-	}
+	    (!lmp_transp_capable(hdev) || !lmp_esco_capable(hdev)))
+		return -EOPNOTSUPP;
 
 	hcon = hci_connect_sco(hdev, type, &sco_pi(sk)->dst,
-			       sco_pi(sk)->setting, &sco_pi(sk)->codec);
-	if (IS_ERR(hcon)) {
-		err = PTR_ERR(hcon);
-		goto unlock;
-	}
+			       sco_pi(sk)->setting);
+	if (IS_ERR(hcon))
+		return PTR_ERR(hcon);
 
 	conn = sco_conn_add(hcon);
 	if (!conn) {
 		hci_conn_drop(hcon);
-		err = -ENOMEM;
-		goto unlock;
-	}
-
-	lock_sock(sk);
-
-	err = sco_chan_add(conn, sk, NULL);
-	if (err) {
-		release_sock(sk);
-		goto unlock;
+		return -ENOMEM;
 	}
 
 	/* Update source addr of the socket */
 	bacpy(&sco_pi(sk)->src, &hcon->src);
+
+	err = sco_chan_add(conn, sk, NULL);
+	if (err)
+		return err;
 
 	if (hcon->state == BT_CONNECTED) {
 		sco_sock_clear_timer(sk);
@@ -296,11 +277,6 @@ static int sco_connect(struct sock *sk)
 		sco_sock_set_timer(sk, sk->sk_sndtimeo);
 	}
 
-	release_sock(sk);
-
-unlock:
-	hci_dev_unlock(hdev);
-	hci_dev_put(hdev);
 	return err;
 }
 
@@ -458,7 +434,6 @@ static void __sco_sock_close(struct sock *sk)
 		sock_set_flag(sk, SOCK_ZAPPED);
 		break;
 	}
-
 }
 
 /* Must be called on unlocked socket. */
@@ -470,6 +445,15 @@ static void sco_sock_close(struct sock *sk)
 	release_sock(sk);
 }
 
+static void sco_skb_put_cmsg(struct sk_buff *skb, struct msghdr *msg,
+			     struct sock *sk)
+{
+	if (sco_pi(sk)->cmsg_mask & SCO_CMSG_PKT_STATUS)
+		put_cmsg(msg, SOL_BLUETOOTH, BT_SCM_PKT_STATUS,
+			 sizeof(bt_cb(skb)->sco.pkt_status),
+			 &bt_cb(skb)->sco.pkt_status);
+}
+
 static void sco_sock_init(struct sock *sk, struct sock *parent)
 {
 	BT_DBG("sk %p", sk);
@@ -478,6 +462,8 @@ static void sco_sock_init(struct sock *sk, struct sock *parent)
 		sk->sk_type = parent->sk_type;
 		bt_sk(sk)->flags = bt_sk(parent)->flags;
 		security_sk_clone(parent, sk);
+	} else {
+		bt_sk(sk)->skb_put_cmsg = sco_skb_put_cmsg;
 	}
 }
 
@@ -492,18 +478,22 @@ static struct sock *sco_sock_alloc(struct net *net, struct socket *sock,
 {
 	struct sock *sk;
 
-	sk = bt_sock_alloc(net, sock, &sco_proto, proto, prio, kern);
+	sk = sk_alloc(net, PF_BLUETOOTH, prio, &sco_proto, kern);
 	if (!sk)
 		return NULL;
+
+	sock_init_data(sock, sk);
+	INIT_LIST_HEAD(&bt_sk(sk)->accept_q);
 
 	sk->sk_destruct = sco_sock_destruct;
 	sk->sk_sndtimeo = SCO_CONN_TIMEOUT;
 
+	sock_reset_flag(sk, SOCK_ZAPPED);
+
+	sk->sk_protocol = proto;
+	sk->sk_state    = BT_OPEN;
+
 	sco_pi(sk)->setting = BT_VOICE_CVSD_16BIT;
-	sco_pi(sk)->codec.id = BT_CODEC_CVSD;
-	sco_pi(sk)->codec.cid = 0xffff;
-	sco_pi(sk)->codec.vid = 0xffff;
-	sco_pi(sk)->codec.data_path = 0x00;
 
 	bt_sock_link(&sco_sk_list, sk);
 	return sk;
@@ -569,6 +559,7 @@ static int sco_sock_connect(struct socket *sock, struct sockaddr *addr, int alen
 {
 	struct sockaddr_sco *sa = (struct sockaddr_sco *) addr;
 	struct sock *sk = sock->sk;
+	struct hci_dev  *hdev;
 	int err;
 
 	BT_DBG("sk %p", sk);
@@ -577,26 +568,37 @@ static int sco_sock_connect(struct socket *sock, struct sockaddr *addr, int alen
 	    addr->sa_family != AF_BLUETOOTH)
 		return -EINVAL;
 
-	if (sk->sk_state != BT_OPEN && sk->sk_state != BT_BOUND)
-		return -EBADFD;
-
-	if (sk->sk_type != SOCK_SEQPACKET)
-		err = -EINVAL;
-
 	lock_sock(sk);
+	if (sk->sk_state != BT_OPEN && sk->sk_state != BT_BOUND) {
+		err = -EBADFD;
+		goto done;
+	}
+
+	if (sk->sk_type != SOCK_SEQPACKET) {
+		err = -EINVAL;
+		goto done;
+	}
+
+	hdev = hci_get_route(&sa->sco_bdaddr, &sco_pi(sk)->src, BDADDR_BREDR);
+	if (!hdev) {
+		err = -EHOSTUNREACH;
+		goto done;
+	}
+	hci_dev_lock(hdev);
+
 	/* Set destination address and psm */
 	bacpy(&sco_pi(sk)->dst, &sa->sco_bdaddr);
-	release_sock(sk);
 
-	err = sco_connect(sk);
+	err = sco_connect(hdev, sk);
+	hci_dev_unlock(hdev);
+	hci_dev_put(hdev);
 	if (err)
-		return err;
-
-	lock_sock(sk);
+		goto done;
 
 	err = bt_sock_wait_state(sk, BT_CONNECTED,
 				 sock_sndtimeo(sk, flags & O_NONBLOCK));
 
+done:
 	release_sock(sk);
 	return err;
 }
@@ -826,9 +828,6 @@ static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
 	int len, err = 0;
 	struct bt_voice voice;
 	u32 opt;
-	struct bt_codecs *codecs;
-	struct hci_dev *hdev;
-	__u8 buffer[255];
 
 	BT_DBG("sk %p", sk);
 
@@ -876,16 +875,6 @@ static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 
 		sco_pi(sk)->setting = voice.setting;
-		hdev = hci_get_route(&sco_pi(sk)->dst, &sco_pi(sk)->src,
-				     BDADDR_BREDR);
-		if (!hdev) {
-			err = -EBADFD;
-			break;
-		}
-		if (enhanced_sync_conn_capable(hdev) &&
-		    voice.setting == BT_VOICE_TRANSPARENT)
-			sco_pi(sk)->codec.id = BT_CODEC_TRANSPARENT;
-		hci_dev_put(hdev);
 		break;
 
 	case BT_PKT_STATUS:
@@ -895,60 +884,9 @@ static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
 		}
 
 		if (opt)
-			set_bit(BT_SK_PKT_STATUS, &bt_sk(sk)->flags);
+			sco_pi(sk)->cmsg_mask |= SCO_CMSG_PKT_STATUS;
 		else
-			clear_bit(BT_SK_PKT_STATUS, &bt_sk(sk)->flags);
-		break;
-
-	case BT_CODEC:
-		if (sk->sk_state != BT_OPEN && sk->sk_state != BT_BOUND &&
-		    sk->sk_state != BT_CONNECT2) {
-			err = -EINVAL;
-			break;
-		}
-
-		hdev = hci_get_route(&sco_pi(sk)->dst, &sco_pi(sk)->src,
-				     BDADDR_BREDR);
-		if (!hdev) {
-			err = -EBADFD;
-			break;
-		}
-
-		if (!hci_dev_test_flag(hdev, HCI_OFFLOAD_CODECS_ENABLED)) {
-			hci_dev_put(hdev);
-			err = -EOPNOTSUPP;
-			break;
-		}
-
-		if (!hdev->get_data_path_id) {
-			hci_dev_put(hdev);
-			err = -EOPNOTSUPP;
-			break;
-		}
-
-		if (optlen < sizeof(struct bt_codecs) ||
-		    optlen > sizeof(buffer)) {
-			hci_dev_put(hdev);
-			err = -EINVAL;
-			break;
-		}
-
-		if (copy_from_sockptr(buffer, optval, optlen)) {
-			hci_dev_put(hdev);
-			err = -EFAULT;
-			break;
-		}
-
-		codecs = (void *)buffer;
-
-		if (codecs->num_codecs > 1) {
-			hci_dev_put(hdev);
-			err = -EINVAL;
-			break;
-		}
-
-		sco_pi(sk)->codec = codecs->codecs[0];
-		hci_dev_put(hdev);
+			sco_pi(sk)->cmsg_mask &= SCO_CMSG_PKT_STATUS;
 		break;
 
 	default:
@@ -1028,12 +966,7 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 	int len, err = 0;
 	struct bt_voice voice;
 	u32 phys;
-	int buf_len;
-	struct codec_list *c;
-	u8 num_codecs, i, __user *ptr;
-	struct hci_dev *hdev;
-	struct hci_codec_caps *caps;
-	struct bt_codec codec;
+	int pkt_status;
 
 	BT_DBG("sk %p", sk);
 
@@ -1081,8 +1014,9 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 		break;
 
 	case BT_PKT_STATUS:
-		if (put_user(test_bit(BT_SK_PKT_STATUS, &bt_sk(sk)->flags),
-			     (int __user *)optval))
+		pkt_status = (sco_pi(sk)->cmsg_mask & SCO_CMSG_PKT_STATUS);
+
+		if (put_user(pkt_status, (int __user *)optval))
 			err = -EFAULT;
 		break;
 
@@ -1095,103 +1029,6 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 
 		if (put_user(sco_pi(sk)->conn->mtu, (u32 __user *)optval))
 			err = -EFAULT;
-		break;
-
-	case BT_CODEC:
-		num_codecs = 0;
-		buf_len = 0;
-
-		hdev = hci_get_route(&sco_pi(sk)->dst, &sco_pi(sk)->src, BDADDR_BREDR);
-		if (!hdev) {
-			err = -EBADFD;
-			break;
-		}
-
-		if (!hci_dev_test_flag(hdev, HCI_OFFLOAD_CODECS_ENABLED)) {
-			hci_dev_put(hdev);
-			err = -EOPNOTSUPP;
-			break;
-		}
-
-		if (!hdev->get_data_path_id) {
-			hci_dev_put(hdev);
-			err = -EOPNOTSUPP;
-			break;
-		}
-
-		release_sock(sk);
-
-		/* find total buffer size required to copy codec + caps */
-		hci_dev_lock(hdev);
-		list_for_each_entry(c, &hdev->local_codecs, list) {
-			if (c->transport != HCI_TRANSPORT_SCO_ESCO)
-				continue;
-			num_codecs++;
-			for (i = 0, caps = c->caps; i < c->num_caps; i++) {
-				buf_len += 1 + caps->len;
-				caps = (void *)&caps->data[caps->len];
-			}
-			buf_len += sizeof(struct bt_codec);
-		}
-		hci_dev_unlock(hdev);
-
-		buf_len += sizeof(struct bt_codecs);
-		if (buf_len > len) {
-			hci_dev_put(hdev);
-			return -ENOBUFS;
-		}
-		ptr = optval;
-
-		if (put_user(num_codecs, ptr)) {
-			hci_dev_put(hdev);
-			return -EFAULT;
-		}
-		ptr += sizeof(num_codecs);
-
-		/* Iterate all the codecs supported over SCO and populate
-		 * codec data
-		 */
-		hci_dev_lock(hdev);
-		list_for_each_entry(c, &hdev->local_codecs, list) {
-			if (c->transport != HCI_TRANSPORT_SCO_ESCO)
-				continue;
-
-			codec.id = c->id;
-			codec.cid = c->cid;
-			codec.vid = c->vid;
-			err = hdev->get_data_path_id(hdev, &codec.data_path);
-			if (err < 0)
-				break;
-			codec.num_caps = c->num_caps;
-			if (copy_to_user(ptr, &codec, sizeof(codec))) {
-				err = -EFAULT;
-				break;
-			}
-			ptr += sizeof(codec);
-
-			/* find codec capabilities data length */
-			len = 0;
-			for (i = 0, caps = c->caps; i < c->num_caps; i++) {
-				len += 1 + caps->len;
-				caps = (void *)&caps->data[caps->len];
-			}
-
-			/* copy codec capabilities data */
-			if (len && copy_to_user(ptr, c->caps, len)) {
-				err = -EFAULT;
-				break;
-			}
-			ptr += len;
-		}
-
-		hci_dev_unlock(hdev);
-		hci_dev_put(hdev);
-
-		lock_sock(sk);
-
-		if (!err && put_user(buf_len, optlen))
-			err = -EFAULT;
-
 		break;
 
 	default:
@@ -1245,7 +1082,7 @@ static int sco_sock_release(struct socket *sock)
 
 	sco_sock_close(sk);
 
-	if (sock_flag(sk, SOCK_LINGER) && READ_ONCE(sk->sk_lingertime) &&
+	if (sock_flag(sk, SOCK_LINGER) && sk->sk_lingertime &&
 	    !(current->flags & PF_EXITING)) {
 		lock_sock(sk);
 		err = bt_sock_wait_state(sk, BT_CLOSED, sk->sk_lingertime);

@@ -40,10 +40,7 @@ static const uuid_t tee_client_uuid_ns = UUID_INIT(0x58ac9ca0, 0x2086, 0x4683,
 static DECLARE_BITMAP(dev_mask, TEE_NUM_DEVICES);
 static DEFINE_SPINLOCK(driver_lock);
 
-static const struct class tee_class = {
-	.name = "tee",
-};
-
+static struct class *tee_class;
 static dev_t tee_devt;
 
 struct tee_context *teedev_open(struct tee_device *teedev)
@@ -300,11 +297,12 @@ static int tee_ioctl_shm_alloc(struct tee_context *ctx,
 	if (data.flags)
 		return -EINVAL;
 
-	shm = tee_shm_alloc_user_buf(ctx, data.size);
+	shm = tee_shm_alloc(ctx, data.size, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
 	if (IS_ERR(shm))
 		return PTR_ERR(shm);
 
 	data.id = shm->id;
+	data.flags = shm->flags;
 	data.size = shm->size;
 
 	if (copy_to_user(udata, &data, sizeof(data)))
@@ -336,11 +334,16 @@ tee_ioctl_shm_register(struct tee_context *ctx,
 	if (data.flags)
 		return -EINVAL;
 
-	shm = tee_shm_register_user_buf(ctx, data.addr, data.length);
+	if (!access_ok((void __user *)(unsigned long)data.addr, data.length))
+		return -EFAULT;
+
+	shm = tee_shm_register(ctx, data.addr, data.length,
+			       TEE_SHM_DMA_BUF | TEE_SHM_USER_MAPPED);
 	if (IS_ERR(shm))
 		return PTR_ERR(shm);
 
 	data.id = shm->id;
+	data.flags = shm->flags;
 	data.length = shm->size;
 
 	if (copy_to_user(udata, &data, sizeof(data)))
@@ -922,7 +925,7 @@ struct tee_device *tee_device_alloc(const struct tee_desc *teedesc,
 		 teedesc->flags & TEE_DESC_PRIVILEGED ? "priv" : "",
 		 teedev->id - offs);
 
-	teedev->dev.class = &tee_class;
+	teedev->dev.class = tee_class;
 	teedev->dev.release = tee_release_device;
 	teedev->dev.parent = dev;
 
@@ -1076,7 +1079,7 @@ EXPORT_SYMBOL_GPL(tee_device_unregister);
 /**
  * tee_get_drvdata() - Return driver_data pointer
  * @teedev:	Device containing the driver_data pointer
- * @returns the driver_data pointer supplied to tee_device_alloc().
+ * @returns the driver_data pointer supplied to tee_register().
  */
 void *tee_get_drvdata(struct tee_device *teedev)
 {
@@ -1115,7 +1118,7 @@ tee_client_open_context(struct tee_context *start,
 		dev = &start->teedev->dev;
 
 	do {
-		dev = class_find_device(&tee_class, dev, &match_data, match_dev);
+		dev = class_find_device(tee_class, dev, &match_data, match_dev);
 		if (!dev) {
 			ctx = ERR_PTR(-ENOENT);
 			break;
@@ -1173,14 +1176,6 @@ int tee_client_close_session(struct tee_context *ctx, u32 session)
 }
 EXPORT_SYMBOL_GPL(tee_client_close_session);
 
-int tee_client_system_session(struct tee_context *ctx, u32 session)
-{
-	if (!ctx->teedev->desc->ops->system_session)
-		return -EINVAL;
-	return ctx->teedev->desc->ops->system_session(ctx, session);
-}
-EXPORT_SYMBOL_GPL(tee_client_system_session);
-
 int tee_client_invoke_func(struct tee_context *ctx,
 			   struct tee_ioctl_invoke_arg *arg,
 			   struct tee_param *param)
@@ -1218,7 +1213,7 @@ static int tee_client_device_match(struct device *dev,
 	return 0;
 }
 
-static int tee_client_device_uevent(const struct device *dev,
+static int tee_client_device_uevent(struct device *dev,
 				    struct kobj_uevent_env *env)
 {
 	uuid_t *dev_id = &to_tee_client_device(dev)->id.uuid;
@@ -1237,10 +1232,10 @@ static int __init tee_init(void)
 {
 	int rc;
 
-	rc = class_register(&tee_class);
-	if (rc) {
+	tee_class = class_create(THIS_MODULE, "tee");
+	if (IS_ERR(tee_class)) {
 		pr_err("couldn't create class\n");
-		return rc;
+		return PTR_ERR(tee_class);
 	}
 
 	rc = alloc_chrdev_region(&tee_devt, 0, TEE_NUM_DEVICES, "tee");
@@ -1260,7 +1255,8 @@ static int __init tee_init(void)
 out_unreg_chrdev:
 	unregister_chrdev_region(tee_devt, TEE_NUM_DEVICES);
 out_unreg_class:
-	class_unregister(&tee_class);
+	class_destroy(tee_class);
+	tee_class = NULL;
 
 	return rc;
 }
@@ -1269,7 +1265,8 @@ static void __exit tee_exit(void)
 {
 	bus_unregister(&tee_bus_type);
 	unregister_chrdev_region(tee_devt, TEE_NUM_DEVICES);
-	class_unregister(&tee_class);
+	class_destroy(tee_class);
+	tee_class = NULL;
 }
 
 subsys_initcall(tee_init);

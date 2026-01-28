@@ -5,25 +5,22 @@
  * Copyright 2020 Analog Devices Inc.
  */
 
-#include <linux/bitops.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of_device.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/regulator/consumer.h>
 #include <linux/sysfs.h>
 
 enum hmc425a_type {
 	ID_HMC425A,
-	ID_HMC540S,
-	ID_ADRF5740
 };
 
 struct hmc425a_chip_info {
@@ -37,6 +34,7 @@ struct hmc425a_chip_info {
 };
 
 struct hmc425a_state {
+	struct	regulator *reg;
 	struct	mutex lock; /* protect sensor state */
 	struct	hmc425a_chip_info *chip_info;
 	struct	gpio_descs *gpios;
@@ -73,13 +71,6 @@ static int hmc425a_read_raw(struct iio_dev *indio_dev,
 		case ID_HMC425A:
 			gain = ~code * -500;
 			break;
-		case ID_HMC540S:
-			gain = ~code * -1000;
-			break;
-		case ID_ADRF5740:
-			code = code & BIT(3) ? code & ~BIT(2) : code;
-			gain = code * -2000;
-			break;
 		}
 
 		*val = gain / 1000;
@@ -115,13 +106,6 @@ static int hmc425a_write_raw(struct iio_dev *indio_dev,
 	switch (st->type) {
 	case ID_HMC425A:
 		code = ~((abs(gain) / 500) & 0x3F);
-		break;
-	case ID_HMC540S:
-		code = ~((abs(gain) / 1000) & 0xF);
-		break;
-	case ID_ADRF5740:
-		code = (abs(gain) / 2000) & 0xF;
-		code = code & BIT(3) ? code | BIT(2) : code;
 		break;
 	}
 
@@ -174,11 +158,16 @@ static const struct iio_chan_spec hmc425a_channels[] = {
 /* Match table for of_platform binding */
 static const struct of_device_id hmc425a_of_match[] = {
 	{ .compatible = "adi,hmc425a", .data = (void *)ID_HMC425A },
-	{ .compatible = "adi,hmc540s", .data = (void *)ID_HMC540S },
-	{ .compatible = "adi,adrf5740", .data = (void *)ID_ADRF5740 },
 	{},
 };
 MODULE_DEVICE_TABLE(of, hmc425a_of_match);
+
+static void hmc425a_reg_disable(void *data)
+{
+	struct hmc425a_state *st = data;
+
+	regulator_disable(st->reg);
+}
 
 static struct hmc425a_chip_info hmc425a_chip_info_tbl[] = {
 	[ID_HMC425A] = {
@@ -189,24 +178,6 @@ static struct hmc425a_chip_info hmc425a_chip_info_tbl[] = {
 		.gain_min = -31500,
 		.gain_max = 0,
 		.default_gain = -0x40, /* set default gain -31.5db*/
-	},
-	[ID_HMC540S] = {
-		.name = "hmc540s",
-		.channels = hmc425a_channels,
-		.num_channels = ARRAY_SIZE(hmc425a_channels),
-		.num_gpios = 4,
-		.gain_min = -15000,
-		.gain_max = 0,
-		.default_gain = -0x10, /* set default gain -15.0db*/
-	},
-	[ID_ADRF5740] = {
-		.name = "adrf5740",
-		.channels = hmc425a_channels,
-		.num_channels = ARRAY_SIZE(hmc425a_channels),
-		.num_gpios = 4,
-		.gain_min = -22000,
-		.gain_max = 0,
-		.default_gain = 0xF, /* set default gain -22.0db*/
 	},
 };
 
@@ -221,7 +192,7 @@ static int hmc425a_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	st = iio_priv(indio_dev);
-	st->type = (uintptr_t)device_get_match_data(&pdev->dev);
+	st->type = (enum hmc425a_type)of_device_get_match_data(&pdev->dev);
 
 	st->chip_info = &hmc425a_chip_info_tbl[st->type];
 	indio_dev->num_channels = st->chip_info->num_channels;
@@ -240,7 +211,14 @@ static int hmc425a_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	ret = devm_regulator_get_enable(&pdev->dev, "vcc-supply");
+	st->reg = devm_regulator_get(&pdev->dev, "vcc-supply");
+	if (IS_ERR(st->reg))
+		return PTR_ERR(st->reg);
+
+	ret = regulator_enable(st->reg);
+	if (ret)
+		return ret;
+	ret = devm_add_action_or_reset(&pdev->dev, hmc425a_reg_disable, st);
 	if (ret)
 		return ret;
 
@@ -248,9 +226,6 @@ static int hmc425a_probe(struct platform_device *pdev)
 
 	indio_dev->info = &hmc425a_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-
-	/* Set default gain */
-	hmc425a_write(indio_dev, st->gain);
 
 	return devm_iio_device_register(&pdev->dev, indio_dev);
 }

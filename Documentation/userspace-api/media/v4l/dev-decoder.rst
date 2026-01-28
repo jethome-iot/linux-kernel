@@ -72,12 +72,6 @@ coded resolution
 coded width
    width for given coded resolution.
 
-coding tree unit
-   processing unit of the HEVC codec (corresponds to macroblock units in
-   H.264, VP8, VP9),
-   can use block structures of up to 64×64 pixels.
-   Good at sub-partitioning the picture into variable sized structures.
-
 decode order
    the order in which frames are decoded; may differ from display order if the
    coded format includes a feature of frame reordering; for decoders,
@@ -110,8 +104,7 @@ keyframe
 macroblock
    a processing unit in image and video compression formats based on linear
    block transforms (e.g. H.264, VP8, VP9); codec-specific, but for most of
-   popular codecs the size is 16x16 samples (pixels). The HEVC codec uses a
-   slightly more flexible processing unit called coding tree unit (CTU).
+   popular codecs the size is 16x16 samples (pixels).
 
 OUTPUT
    the source buffer queue; for decoders, the queue of buffers containing
@@ -277,7 +270,7 @@ Initialization
      other fields
          follow standard semantics.
 
-   * **Returned fields:**
+   * **Return fields:**
 
      ``sizeimage``
          adjusted size of ``OUTPUT`` buffers.
@@ -311,7 +304,7 @@ Initialization
       ``memory``
           follows standard semantics.
 
-    * **Returned fields:**
+    * **Return fields:**
 
       ``count``
           the actual number of buffers allocated.
@@ -339,7 +332,7 @@ Initialization
       ``format``
           follows standard semantics.
 
-    * **Returned fields:**
+    * **Return fields:**
 
       ``count``
           adjusted to the number of allocated buffers.
@@ -410,7 +403,7 @@ Capture Setup
       ``type``
           a ``V4L2_BUF_TYPE_*`` enum appropriate for ``CAPTURE``.
 
-    * **Returned fields:**
+    * **Return fields:**
 
       ``width``, ``height``
           frame buffer resolution for the decoded frames.
@@ -443,7 +436,7 @@ Capture Setup
       ``target``
           set to ``V4L2_SEL_TGT_COMPOSE``.
 
-    * **Returned fields:**
+    * **Return fields:**
 
       ``r.left``, ``r.top``, ``r.width``, ``r.height``
           the visible rectangle; it must fit within the frame buffer resolution
@@ -552,7 +545,7 @@ Capture Setup
          frame is written; defaults to ``V4L2_SEL_TGT_COMPOSE_DEFAULT``;
          read-only on hardware without additional compose/scaling capabilities.
 
-   * **Returned fields:**
+   * **Return fields:**
 
      ``r.left``, ``r.top``, ``r.width``, ``r.height``
          the visible rectangle; it must fit within the frame buffer resolution
@@ -629,7 +622,7 @@ Capture Setup
       ``memory``
           follows standard semantics.
 
-    * **Returned fields:**
+    * **Return fields:**
 
       ``count``
           actual number of buffers allocated.
@@ -668,7 +661,7 @@ Capture Setup
           a format representing the maximum framebuffer resolution to be
           accommodated by newly allocated buffers.
 
-    * **Returned fields:**
+    * **Return fields:**
 
       ``count``
           adjusted to the number of allocated buffers.
@@ -758,23 +751,6 @@ available to dequeue. Specifically:
    * the decoding order differs from the display order (i.e. the ``CAPTURE``
      buffers are out-of-order compared to the ``OUTPUT`` buffers): ``CAPTURE``
      timestamps will not retain the order of ``OUTPUT`` timestamps.
-
-.. note::
-
-   The backing memory of ``CAPTURE`` buffers that are used as reference frames
-   by the stream may be read by the hardware even after they are dequeued.
-   Consequently, the client should avoid writing into this memory while the
-   ``CAPTURE`` queue is streaming. Failure to observe this may result in
-   corruption of decoded frames.
-
-   Similarly, when using a memory type other than ``V4L2_MEMORY_MMAP``, the
-   client should make sure that each ``CAPTURE`` buffer is always queued with
-   the same backing memory for as long as the ``CAPTURE`` queue is streaming.
-   The reason for this is that V4L2 buffer indices can be used by drivers to
-   identify frames. Thus, if the backing memory of a reference frame is
-   submitted under a different buffer ID, the driver may misidentify it and
-   decode a new frame into it while it is still in use, resulting in corruption
-   of the following frames.
 
 During the decoding, the decoder may initiate one of the special sequences, as
 listed below. The sequences will result in the decoder returning all the

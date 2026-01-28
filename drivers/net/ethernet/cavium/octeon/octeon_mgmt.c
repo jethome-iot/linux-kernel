@@ -548,7 +548,7 @@ struct octeon_mgmt_cam_state {
 };
 
 static void octeon_mgmt_cam_state_add(struct octeon_mgmt_cam_state *cs,
-				      const unsigned char *addr)
+				      unsigned char *addr)
 {
 	int i;
 
@@ -701,6 +701,9 @@ static int octeon_mgmt_ioctl_hwtstamp(struct net_device *netdev,
 
 	if (copy_from_user(&config, rq->ifr_data, sizeof(config)))
 		return -EFAULT;
+
+	if (config.flags) /* reserved for future extensions */
+		return -EINVAL;
 
 	/* Check the status of hardware for tiemstamps */
 	if (OCTEON_IS_MODEL(OCTEON_CN6XXX)) {
@@ -1342,7 +1345,7 @@ static void octeon_mgmt_poll_controller(struct net_device *netdev)
 static void octeon_mgmt_get_drvinfo(struct net_device *netdev,
 				    struct ethtool_drvinfo *info)
 {
-	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
 }
 
 static int octeon_mgmt_nway_reset(struct net_device *dev)
@@ -1396,8 +1399,8 @@ static int octeon_mgmt_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, netdev);
 	p = netdev_priv(netdev);
-	netif_napi_add_weight(netdev, &p->napi, octeon_mgmt_napi_poll,
-			      OCTEON_MGMT_NAPI_WEIGHT);
+	netif_napi_add(netdev, &p->napi, octeon_mgmt_napi_poll,
+		       OCTEON_MGMT_NAPI_WEIGHT);
 
 	p->netdev = netdev;
 	p->dev = &pdev->dev;
@@ -1521,7 +1524,7 @@ err:
 	return result;
 }
 
-static void octeon_mgmt_remove(struct platform_device *pdev)
+static int octeon_mgmt_remove(struct platform_device *pdev)
 {
 	struct net_device *netdev = platform_get_drvdata(pdev);
 	struct octeon_mgmt *p = netdev_priv(netdev);
@@ -1529,6 +1532,7 @@ static void octeon_mgmt_remove(struct platform_device *pdev)
 	unregister_netdev(netdev);
 	of_node_put(p->phy_np);
 	free_netdev(netdev);
+	return 0;
 }
 
 static const struct of_device_id octeon_mgmt_match[] = {
@@ -1545,7 +1549,7 @@ static struct platform_driver octeon_mgmt_driver = {
 		.of_match_table = octeon_mgmt_match,
 	},
 	.probe		= octeon_mgmt_probe,
-	.remove_new	= octeon_mgmt_remove,
+	.remove		= octeon_mgmt_remove,
 };
 
 module_platform_driver(octeon_mgmt_driver);

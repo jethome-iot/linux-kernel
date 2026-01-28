@@ -47,7 +47,6 @@ void mlx5e_mod_hdr_tbl_init(struct mod_hdr_tbl *tbl)
 
 void mlx5e_mod_hdr_tbl_destroy(struct mod_hdr_tbl *tbl)
 {
-	WARN_ON(!hash_empty(tbl->hlist));
 	mutex_destroy(&tbl->lock);
 }
 
@@ -177,20 +176,11 @@ mlx5e_mod_hdr_alloc(struct mlx5_core_dev *mdev, int namespace,
 	new_sz = MLX5_MH_ACT_SZ * new_num_actions;
 	old_sz = mod_hdr_acts->max_actions * MLX5_MH_ACT_SZ;
 
-	if (mod_hdr_acts->is_static) {
-		ret = kzalloc(new_sz, GFP_KERNEL);
-		if (ret) {
-			memcpy(ret, mod_hdr_acts->actions, old_sz);
-			mod_hdr_acts->is_static = false;
-		}
-	} else {
-		ret = krealloc(mod_hdr_acts->actions, new_sz, GFP_KERNEL);
-		if (ret)
-			memset(ret + old_sz, 0, new_sz - old_sz);
-	}
+	ret = krealloc(mod_hdr_acts->actions, new_sz, GFP_KERNEL);
 	if (!ret)
 		return ERR_PTR(-ENOMEM);
 
+	memset(ret + old_sz, 0, new_sz - old_sz);
 	mod_hdr_acts->actions = ret;
 	mod_hdr_acts->max_actions = new_num_actions;
 
@@ -201,9 +191,7 @@ out:
 void
 mlx5e_mod_hdr_dealloc(struct mlx5e_tc_mod_hdr_acts *mod_hdr_acts)
 {
-	if (!mod_hdr_acts->is_static)
-		kfree(mod_hdr_acts->actions);
-
+	kfree(mod_hdr_acts->actions);
 	mod_hdr_acts->actions = NULL;
 	mod_hdr_acts->num_actions = 0;
 	mod_hdr_acts->max_actions = 0;

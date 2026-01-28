@@ -62,7 +62,7 @@ struct snd_soc_dobj {
 	enum snd_soc_dobj_type type;
 	unsigned int index;	/* objects can belong in different groups */
 	struct list_head list;
-	int (*unload)(struct snd_soc_component *comp, struct snd_soc_dobj *dobj);
+	struct snd_soc_tplg_ops *ops;
 	union {
 		struct snd_soc_dobj_control control;
 		struct snd_soc_dobj_widget widget;
@@ -151,7 +151,7 @@ struct snd_soc_tplg_ops {
 		struct snd_soc_tplg_hdr *);
 
 	/* completion - called at completion of firmware loading */
-	int (*complete)(struct snd_soc_component *comp);
+	void (*complete)(struct snd_soc_component *);
 
 	/* manifest - optional to inform component of manifest */
 	int (*manifest)(struct snd_soc_component *, int index,

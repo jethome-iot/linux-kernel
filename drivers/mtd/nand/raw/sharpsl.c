@@ -6,10 +6,12 @@
  *  Based on Sharp's NAND driver sharp_sl.c
  */
 
+#include <linux/genhd.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/mtd/mtd.h>
+#include <linux/mtd/nand-ecc-sw-hamming.h>
 #include <linux/mtd/rawnand.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/sharpsl.h>
@@ -95,6 +97,15 @@ static int sharpsl_nand_calculate_ecc(struct nand_chip *chip,
 	return readb(sharpsl->io + ECCCNTR) != 0;
 }
 
+static int sharpsl_nand_correct_ecc(struct nand_chip *chip,
+				    unsigned char *buf,
+				    unsigned char *read_ecc,
+				    unsigned char *calc_ecc)
+{
+	return ecc_sw_hamming_correct(buf, read_ecc, calc_ecc,
+				      chip->ecc.size, false);
+}
+
 static int sharpsl_attach_chip(struct nand_chip *chip)
 {
 	if (chip->ecc.engine_type != NAND_ECC_ENGINE_TYPE_ON_HOST)
@@ -105,7 +116,7 @@ static int sharpsl_attach_chip(struct nand_chip *chip)
 	chip->ecc.strength = 1;
 	chip->ecc.hwctl = sharpsl_nand_enable_hwecc;
 	chip->ecc.calculate = sharpsl_nand_calculate_ecc;
-	chip->ecc.correct = rawnand_sw_hamming_correct;
+	chip->ecc.correct = sharpsl_nand_correct_ecc;
 
 	return 0;
 }
@@ -210,7 +221,7 @@ err_get_res:
 /*
  * Clean up routine
  */
-static void sharpsl_nand_remove(struct platform_device *pdev)
+static int sharpsl_nand_remove(struct platform_device *pdev)
 {
 	struct sharpsl_nand *sharpsl = platform_get_drvdata(pdev);
 	struct nand_chip *chip = &sharpsl->chip;
@@ -227,6 +238,8 @@ static void sharpsl_nand_remove(struct platform_device *pdev)
 
 	/* Free the driver's structure */
 	kfree(sharpsl);
+
+	return 0;
 }
 
 static struct platform_driver sharpsl_nand_driver = {
@@ -234,7 +247,7 @@ static struct platform_driver sharpsl_nand_driver = {
 		.name	= "sharpsl-nand",
 	},
 	.probe		= sharpsl_nand_probe,
-	.remove_new	= sharpsl_nand_remove,
+	.remove		= sharpsl_nand_remove,
 };
 
 module_platform_driver(sharpsl_nand_driver);

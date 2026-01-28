@@ -1,0 +1,1099 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * ad82128.c  --  ad82128 ALSA SoC Audio driver
+ *
+ * Copyright 1998 Elite Semiconductor Memory Technology
+ *
+ * Author: ESMT Audio/Power Product BU Team
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+#include <linux/errno.h>
+#include <linux/device.h>
+#include <linux/pm_runtime.h>
+#include <linux/regulator/consumer.h>
+#include <linux/gpio.h>
+
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/init.h>
+#include <linux/clk-provider.h>
+#include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/pm.h>
+#include <linux/i2c.h>
+#include <linux/device.h>
+
+#include <sound/core.h>
+#include <sound/pcm.h>
+#include <sound/pcm_params.h>
+#include <sound/soc.h>
+#include <sound/soc-dapm.h>
+#include <sound/tlv.h>
+#include <sound/initval.h>
+#include <linux/regmap.h>
+#include <linux/of_gpio.h>
+#include "ad82128.h"
+
+// Define how often to check (and clear) the fault status register (in ms)
+#define AD82128_FAULT_CHECK_INTERVAL 500
+#define AD82128_VOLUME_MAX  (230)
+#define AD82128_VOLUME_MIN  (0)
+#define MAX_RESET_PIN_COUNT	4
+
+enum ad82128_type {
+	AD82128,
+};
+
+/* count the number of codec */
+static int g_codec_count;
+/* Stores the reset pin pointer obtained during parse dts */
+static struct gpio_desc *g_reset_pin_desc[MAX_RESET_PIN_COUNT];
+
+static const char * const ad82128_supply_names[] = {
+	"dvdd", /* Digital power supply. Connect to 3.3-V supply. */
+	"pvdd", /* Class-D amp and analog power supply (connected). */
+};
+
+#define AD82128_NUM_SUPPLIES ARRAY_SIZE(ad82128_supply_names)
+
+struct ad82128_data {
+	struct snd_soc_component *component;
+	struct regmap *regmap;
+	struct i2c_client *ad82128_client;
+	enum ad82128_type devtype;
+	struct regulator_bulk_data supplies[AD82128_NUM_SUPPLIES];
+	struct delayed_work fault_check_work;
+	struct work_struct work;
+	struct device *dev;
+	unsigned int last_fault;
+	int mute;
+	int init_done;
+	int vol;
+	int subwoofer_enable;
+	int no_device;
+	bool power_down;
+};
+
+static void print_i2c_client_info(struct i2c_client *client, const char *msg)
+{
+	dev_info(&client->dev, "%s\n", msg);
+}
+
+static int ad82128_hw_params(struct snd_pcm_substream *substream,
+	struct snd_pcm_hw_params *params,
+	struct snd_soc_dai *dai)
+{
+	struct snd_soc_component *component = dai->component;
+	unsigned int rate = params_rate(params);
+	bool ssz_ds;
+	int ret;
+
+	switch (rate) {
+	case 44100:
+	case 48000:
+		ssz_ds = false;
+		break;
+	case 88200:
+	case 96000:
+	case 176400:
+	case 192000:
+		ssz_ds = true;
+		break;
+	default:
+		dev_err(component->dev, "unsupported sample rate: %u\n", rate);
+		return -EINVAL;
+	}
+
+	ret = snd_soc_component_update_bits(component, AD82128_STATE_CTRL2_REG,
+		AD82128_SSZ_DS, ssz_ds);
+	if (ret < 0) {
+		dev_err(component->dev, "error setting sample rate: %d\n", ret);
+		//return ret;
+		return 0;
+	}
+
+	return 0;
+}
+
+static int ad82128_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+{
+	struct snd_soc_component *component = dai->component;
+	u8 serial_format;
+	int ret;
+
+	if ((fmt & SND_SOC_DAIFMT_MASTER_MASK) != SND_SOC_DAIFMT_CBS_CFS) {
+		dev_vdbg(component->dev, "DAI Format master is not found\n");
+		return -EINVAL;
+	}
+
+	switch (fmt & (SND_SOC_DAIFMT_FORMAT_MASK | SND_SOC_DAIFMT_INV_MASK)) {
+	case (SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF):
+		/* 1st data bit occur one BCLK cycle after the frame sync */
+		serial_format = AD82128_SAIF_I2S;
+		break;
+	case (SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_NB_NF):
+		/*
+		 * Note that although the AD82128 does not have a dedicated DSP
+		 * mode it doesn't care about the LRCLK duty cycle during TDM
+		 * operation. Therefore we can use the device's I2S mode with
+		 * its delaying of the 1st data bit to receive DSP_A formatted
+		 * data. See device datasheet for additional details.
+		 */
+		serial_format = AD82128_SAIF_I2S;
+		break;
+	case (SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_NB_NF):
+		/*
+		 * Similar to DSP_A, we can use the fact that the AD82128 does
+		 * not care about the LRCLK duty cycle during TDM to receive
+		 * DSP_B formatted data in LEFTJ mode (no delaying of the 1st
+		 * data bit).
+		 */
+		serial_format = AD82128_SAIF_LEFTJ;
+		break;
+	case (SND_SOC_DAIFMT_LEFT_J | SND_SOC_DAIFMT_NB_NF):
+		/* No delay after the frame sync */
+		serial_format = AD82128_SAIF_LEFTJ;
+		break;
+	default:
+		dev_vdbg(component->dev, "DAI Format is not found\n");
+		return -EINVAL;
+	}
+
+	ret = snd_soc_component_update_bits(component, AD82128_STATE_CTRL1_REG,
+		AD82128_SAIF_FORMAT_MASK,
+		serial_format);
+	if (ret < 0) {
+		dev_err(component->dev, "error setting SAIF format: %d\n", ret);
+		//return ret;
+		return 0;
+	}
+
+	return 0;
+}
+
+static int ad82128_vol_info(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->access =
+	    (SNDRV_CTL_ELEM_ACCESS_TLV_READ | SNDRV_CTL_ELEM_ACCESS_READWRITE);
+	uinfo->count = 1;
+
+	uinfo->value.integer.min = AD82128_VOLUME_MIN;
+	uinfo->value.integer.max = AD82128_VOLUME_MAX;
+	uinfo->value.integer.step = 1;
+
+	return 0;
+}
+
+static int ad82128_mute_info(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->access =
+	    (SNDRV_CTL_ELEM_ACCESS_TLV_READ | SNDRV_CTL_ELEM_ACCESS_READWRITE);
+	uinfo->count = 1;
+
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 1;
+	uinfo->value.integer.step = 1;
+
+	return 0;
+}
+
+static int ad82128_Subwoofer_info(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->access =
+	    (SNDRV_CTL_ELEM_ACCESS_TLV_READ | SNDRV_CTL_ELEM_ACCESS_READWRITE);
+	uinfo->count = 1;
+
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 1;
+	uinfo->value.integer.step = 1;
+
+	return 0;
+}
+
+static int ad82128_vol_locked_get(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = ad82128->vol;
+
+	return 0;
+}
+
+static inline int get_volume_index(int vol)
+{
+	int index;
+
+	index = vol;
+
+	if (index < AD82128_VOLUME_MIN)
+		index = AD82128_VOLUME_MIN;
+
+	if (index > AD82128_VOLUME_MAX)
+		index = AD82128_VOLUME_MAX;
+
+	return index;
+}
+
+static void ad82128_set_volume(struct snd_soc_component *component, int vol)
+{
+	unsigned int index;
+	u32 volume_hex;
+	u8 byte;
+
+	index = get_volume_index(vol);
+	volume_hex = ad82128_volume[index];
+
+	byte = (volume_hex & 0xFF);
+
+	snd_soc_component_write(component, AD82128_VOLUME_CTRL_REG, byte);
+}
+
+static int ad82128_mute(struct snd_soc_component *component, int mute)
+{
+	int ret;
+
+	if (mute) {
+		//mute master volume
+		ret = snd_soc_component_update_bits(component, AD82128_STATE_CTRL3_REG,
+			AD82128_MUTE, AD82128_MUTE);
+		if (ret < 0)
+			dev_err(component->dev, "failed to write MUTE register: %d\n", ret);
+	} else {
+		//unmute
+		ret = snd_soc_component_update_bits(component, AD82128_STATE_CTRL3_REG,
+			AD82128_MUTE, 0);
+		if (ret < 0)
+			dev_err(component->dev, "failed to write MUTE register: %d\n", ret);
+	}
+
+	return 0;
+}
+
+static int ad82128_vol_locked_put(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ad82128->vol = ucontrol->value.integer.value[0];
+	ad82128_set_volume(component, ad82128->vol);
+
+	return 0;
+}
+
+static int ad82128_mute_locked_put(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ad82128->mute = ucontrol->value.integer.value[0];
+	ad82128_mute(component, ad82128->mute);
+
+	return 0;
+}
+
+static int ad82128_mute_locked_get(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = ad82128->mute;
+
+	return 0;
+}
+
+static void subwoofer_enable(struct snd_soc_component *component, int enable)
+{
+	if (enable) {
+		snd_soc_component_update_bits(component, AD82128_STATE_CTRL5_REG,
+			0x1 << 6, 0x1 << 6);
+		snd_soc_component_write(component, AD82128_MONO_KEY_HIGH, 0x30);
+		snd_soc_component_write(component, AD82128_MONO_KEY_LOW, 0x06);
+	} else {
+		snd_soc_component_update_bits(component, AD82128_STATE_CTRL5_REG,
+			AD82128_Subwoofer, 0);
+		snd_soc_component_write(component, AD82128_MONO_KEY_HIGH, 0);
+		snd_soc_component_write(component, AD82128_MONO_KEY_LOW, 0);
+	}
+}
+
+static int ad82128_Subwoofer_locked_put(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ad82128->subwoofer_enable = ucontrol->value.integer.value[0];
+	subwoofer_enable(component, ad82128->subwoofer_enable);
+	return 0;
+}
+
+static int ad82128_Subwoofer_locked_get(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = ad82128->subwoofer_enable;
+
+	return 0;
+}
+#ifdef DEBUG_AD82128_SDZ
+static void ad82128_fault_check_work(struct work_struct *work)
+{
+	struct ad82128_data *ad82128 = container_of(work, struct ad82128_data,
+		fault_check_work.work);
+	struct device *dev = ad82128->component->dev;
+	unsigned int curr_fault;
+	int ret;
+
+	ret = regmap_read(ad82128->regmap, AD82128_FAULT_REG, &curr_fault);
+	if (ret < 0) {
+		dev_err(dev, "failed to read FAULT register: %d\n", ret);
+		goto out;
+	}
+
+	/* Check/handle all errors except SAIF clock errors */
+	curr_fault &= AD82128_OCE | AD82128_DCE | AD82128_OTE;
+
+	/*
+	 * Only flag errors once for a given occurrence. This is needed as
+	 * the AD82128 will take time clearing the fault condition internally
+	 * during which we don't want to bombard the system with the same
+	 * error message over and over.
+	 */
+	if (!(curr_fault & AD82128_OCE) && (ad82128->last_fault & AD82128_OCE))
+		dev_crit(dev, "experienced an over current hardware fault\n");
+
+	if (!(curr_fault & AD82128_DCE) && (ad82128->last_fault & AD82128_DCE))
+		dev_crit(dev, "experienced a DC detection fault\n");
+
+	if (!(curr_fault & AD82128_OTE) && (ad82128->last_fault & AD82128_OTE))
+		dev_crit(dev, "experienced an over temperature fault\n");
+
+	/* Store current fault value so we can detect any changes next time */
+	ad82128->last_fault = curr_fault;
+
+	if (curr_fault)
+		goto out;
+
+	/*
+	 * Periodically toggle SDZ (shutdown bit) H->L->H to clear any latching
+	 * faults as long as a fault condition persists. Always going through
+	 * the full sequence no matter the first return value to minimizes
+	 * chances for the device to end up in shutdown mode.
+	 */
+	for (int i = 0; i < g_codec_count; i++) {
+		if (!IS_ERR(g_reset_pin_desc[i])) {
+			gpiod_direction_output(g_reset_pin_desc[g_codec_count],
+					GPIOF_OUT_INIT_HIGH);
+			pr_info("%s, av out status: %s\n",
+				__func__,
+				gpiod_get_value(g_reset_pin_desc[g_codec_count]) ?
+				"high" : "low");
+			msleep(20);
+		}
+	}
+out:
+	/* Schedule the next fault check at the specified interval */
+	schedule_delayed_work(&ad82128->fault_check_work,
+		msecs_to_jiffies(AD82128_FAULT_CHECK_INTERVAL));
+}
+#endif
+
+static void ad82128_init_func(struct work_struct *p_work)
+{
+	struct ad82128_data *ad82128;
+	struct snd_soc_component *component;
+
+	int ret;
+	int i;
+	int reg_data;
+
+	ad82128 = container_of(p_work, struct ad82128_data, work);
+
+	component = ad82128->component;
+
+	dev_err(component->dev, "ad82128 i2c address = %p,  %s!\n",
+		component, __func__);
+	ret = regulator_bulk_enable(ARRAY_SIZE(ad82128->supplies),
+		ad82128->supplies);
+	if (ret != 0) {
+		dev_err(component->dev, "failed to enable supplies: %d\n", ret);
+		return;
+	}
+
+	/* Set device to mute */
+	ad82128_mute(component, 1);
+
+	// Write register table
+	for (i = 0; i < AD82128_REGISTER_COUNT; i++) {
+		reg_data = m_reg_tab[i][1];
+
+		if (m_reg_tab[i][0] == 0x02)
+			continue;
+
+		if (m_reg_tab[i][0] >= 0x71 && m_reg_tab[i][0] <= 0x7C)
+			continue;
+
+		// set stereo
+		if (m_reg_tab[i][0] == 0x1A)
+			reg_data &= (~0x40);
+
+		if (m_reg_tab[i][0] == 0x5B)
+			reg_data = 0x00;
+
+		if (m_reg_tab[i][0] == 0x5C)
+			reg_data = 0x00;
+
+		// set stereo end
+		ret = regmap_write(ad82128->regmap, m_reg_tab[i][0], reg_data);
+		if (ret < 0)
+			goto error_snd_soc_component_update_bits;
+	}
+
+	// Write ram1
+	for (i = 0; i < AD82128_RAM_TABLE_COUNT; i++) {
+		regmap_write(ad82128->regmap, CFADDR, m_ram1_tab[i][0]);
+		regmap_write(ad82128->regmap, A1CF1, m_ram1_tab[i][1]);
+		regmap_write(ad82128->regmap, A1CF2, m_ram1_tab[i][2]);
+		regmap_write(ad82128->regmap, A1CF3, m_ram1_tab[i][3]);
+		regmap_write(ad82128->regmap, A1CF4, m_ram1_tab[i][4]);
+		regmap_write(ad82128->regmap, CFUD, 0x01);
+	}
+	// Write ram2
+	for (i = 0; i < AD82128_RAM_TABLE_COUNT; i++) {
+		regmap_write(ad82128->regmap, CFADDR, m_ram2_tab[i][0]);
+		regmap_write(ad82128->regmap, A1CF1, m_ram2_tab[i][1]);
+		regmap_write(ad82128->regmap, A1CF2, m_ram2_tab[i][2]);
+		regmap_write(ad82128->regmap, A1CF3, m_ram2_tab[i][3]);
+		regmap_write(ad82128->regmap, A1CF4, m_ram2_tab[i][4]);
+		regmap_write(ad82128->regmap, CFUD, 0x41);
+	}
+
+	usleep_range(2 * 1000, 3 * 1000);
+
+	/* Set device to unmute */
+	ad82128_mute(component, 0);
+	subwoofer_enable(component, ad82128->subwoofer_enable);
+#ifdef DEBUG_AD82128_SDZ
+	INIT_DELAYED_WORK(&ad82128->fault_check_work, ad82128_fault_check_work);
+#endif
+
+	ad82128->init_done = 1;
+	ad82128->no_device = 0;
+
+	return;
+error_snd_soc_component_update_bits:
+	dev_err(component->dev, "error configuring device registers: %d\n", ret);
+}
+
+static int ad82128_codec_probe(struct snd_soc_component *component)
+{
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ad82128->component = component;
+	ad82128->mute = 0;
+
+	// software reset amp
+	snd_soc_component_update_bits(component, AD82128_STATE_CTRL5_REG,
+		AD82128_SW_RESET, 0);
+	usleep_range(5 * 1000, 6 * 1000);
+	snd_soc_component_update_bits(component, AD82128_STATE_CTRL5_REG,
+		AD82128_SW_RESET, AD82128_SW_RESET);
+	msleep(20);
+	INIT_WORK(&ad82128->work, ad82128_init_func);
+	schedule_work(&ad82128->work);
+
+	return 0;
+}
+
+static void ad82128_codec_remove(struct snd_soc_component *component)
+{
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+#ifdef DEBUG_AD82128_SDZ
+	cancel_delayed_work_sync(&ad82128->fault_check_work);
+#endif
+
+	ret = regulator_bulk_disable(ARRAY_SIZE(ad82128->supplies),
+		ad82128->supplies);
+	if (ret < 0)
+		dev_err(component->dev, "failed to disable supplies: %d\n", ret);
+};
+
+static int ad82128_dac_event(struct snd_soc_dapm_widget *w,
+	struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	if (ad82128->no_device) {
+		dev_err(component->dev, "no device connect for ad82128\n");
+		return 0;
+	}
+
+	// wait until codec ready
+	while (!ad82128->init_done) {
+		dev_dbg(component->dev, "wait for ad82128 init done\n");
+		msleep(20);
+	}
+	if (event & SND_SOC_DAPM_POST_PMU) {
+		/*
+		 * Observe codec shutdown-to-active time. The datasheet only
+		 * lists a nominal value however just use-it as-is without
+		 * additional padding to minimize the delay introduced in
+		 * starting to play audio (actually there is other setup done
+		 * by the ASoC framework that will provide additional delays,
+		 * so we should always be safe).
+		 */
+		msleep(25);
+
+		if (!ad82128->mute)
+			ad82128_mute(component, 0);
+		/* Turn on AD82128 periodic fault checking/handling */
+		ad82128->last_fault = 0xFE;
+
+#ifdef DEBUG_AD82128_SDZ
+		schedule_delayed_work(&ad82128->fault_check_work,
+			msecs_to_jiffies(AD82128_FAULT_CHECK_INTERVAL));
+#endif
+	} else if (event & SND_SOC_DAPM_PRE_PMD) {
+		/* Disable AD82128 periodic fault checking/handling */
+
+#ifdef DEBUG_AD82128_SDZ
+		cancel_delayed_work_sync(&ad82128->fault_check_work);
+#endif
+		/* Place AD82128 in shutdown mode to minimize current draw */
+		if (!ad82128->mute)
+			ad82128_mute(component, 1);
+
+		msleep(20);
+	}
+
+	return 0;
+}
+
+#ifdef CONFIG_PM
+static int ad82128_suspend(struct snd_soc_component *component)
+{
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	if (ad82128->power_down)
+		return 0;
+
+	regcache_cache_only(ad82128->regmap, true);
+	regcache_mark_dirty(ad82128->regmap);
+
+	ret = regulator_bulk_disable(ARRAY_SIZE(ad82128->supplies),
+		ad82128->supplies);
+	if (ret < 0)
+		dev_err(component->dev, "failed to disable supplies: %d\n", ret);
+
+	g_codec_count--;
+	if (!IS_ERR(g_reset_pin_desc[g_codec_count])) {
+		print_i2c_client_info(ad82128->ad82128_client,
+			"ad82128 suspend, It will operate the gpio to power off");
+		ret = gpiod_direction_output(g_reset_pin_desc[g_codec_count],
+				GPIOF_OUT_INIT_LOW);
+		pr_info("%s, ret:%d av out status: %s\n",
+			__func__, ret,
+			gpiod_get_value(g_reset_pin_desc[g_codec_count]) ?
+			"high" : "low");
+		msleep(20);
+	} else {
+		print_i2c_client_info(ad82128->ad82128_client,
+			"ad82128 suspend, just ad82128 count--");
+	}
+	pr_info("ad82128 suspend, count: %d\n", g_codec_count);
+	ad82128->power_down = true;
+
+	return ret;
+}
+
+static int ad82128_resume(struct snd_soc_component *component)
+{
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	if (!ad82128->power_down)
+		return 0;
+
+	ret = regulator_bulk_enable(ARRAY_SIZE(ad82128->supplies),
+		ad82128->supplies);
+	if (ret < 0) {
+		dev_err(component->dev, "failed to enable supplies: %d\n", ret);
+		return ret;
+	}
+
+	if (!IS_ERR(g_reset_pin_desc[g_codec_count])) {
+		print_i2c_client_info(ad82128->ad82128_client,
+			"ad82128 resume, It will operate the gpio to power on");
+		ret = gpiod_direction_output(g_reset_pin_desc[g_codec_count],
+				GPIOF_OUT_INIT_HIGH);
+		pr_info("%s, ret:%d av out status: %s\n",
+			__func__, ret,
+			gpiod_get_value(g_reset_pin_desc[g_codec_count]) ?
+			"high" : "low");
+		/* need delay before regcache for spec request */
+		msleep(20);
+	} else {
+		print_i2c_client_info(ad82128->ad82128_client,
+			"ad82128 resume, just codec count++");
+	}
+	pr_info("ad82128 resume, count: %d\n", g_codec_count);
+	g_codec_count++;
+
+	// software reset amp
+	snd_soc_component_update_bits(component, AD82128_STATE_CTRL5_REG,
+		AD82128_SW_RESET, 0);
+	usleep_range(5 * 1000, 6 * 1000);
+	snd_soc_component_update_bits(component, AD82128_STATE_CTRL5_REG,
+		AD82128_SW_RESET, AD82128_SW_RESET);
+	msleep(20);
+
+	regcache_cache_only(ad82128->regmap, false);
+
+	ret = regcache_sync(ad82128->regmap);
+	if (ret < 0) {
+		dev_err(component->dev, "failed to sync regcache: %d\n", ret);
+		return ret;
+	}
+	ad82128_mute(component, ad82128->mute);
+	pr_info("ad82128_resume mute %d\n", ad82128->mute);
+	subwoofer_enable(component, ad82128->subwoofer_enable);
+	ad82128->power_down = false;
+	return 0;
+}
+#else
+#define ad82128_suspend NULL
+#define ad82128_resume NULL
+#endif
+
+static int ad82128_get_power_down(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = ad82128->power_down;
+
+	return 0;
+}
+
+static int ad82128_set_power_down(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	bool pdn = ucontrol->value.integer.value[0];
+
+	if (pdn)
+		ad82128_suspend(component);
+	else
+		ad82128_resume(component);
+
+	return 0;
+}
+
+static bool ad82128_is_volatile_reg(struct device *dev, unsigned int reg)
+{
+#ifdef AD82128_REG_RAM_CHECK
+	if (reg < AD82128_MAX_REG)
+		return true;
+	else
+		return false;
+#else
+	switch (reg) {
+	case AD82128_FAULT_REG:
+	case AD82128_STATE_CTRL1_REG:
+	case AD82128_STATE_CTRL2_REG:
+	case AD82128_STATE_CTRL3_REG:
+	case AD82128_STATE_CTRL5_REG:
+		return true;
+	default:
+		return false;
+	}
+#endif
+}
+
+static const struct regmap_config ad82128_regmap_config = {
+	.reg_bits = 8,
+	.val_bits = 8,
+	.max_register = AD82128_MAX_REG,
+	.cache_type = REGCACHE_RBTREE,
+	.volatile_reg = ad82128_is_volatile_reg,
+};
+
+/*
+ * DAC analog gain. There are four discrete values to select from, ranging
+ * from 19.2 dB to 26.3dB.
+ */
+static const DECLARE_TLV_DB_RANGE(dac_analog_tlv,
+	0x0, 0x0, TLV_DB_SCALE_ITEM(1920, 0, 0),
+	0x1, 0x1, TLV_DB_SCALE_ITEM(2070, 0, 0),
+	0x2, 0x2, TLV_DB_SCALE_ITEM(2350, 0, 0),
+	0x3, 0x3, TLV_DB_SCALE_ITEM(2630, 0, 0),
+);
+
+/*
+ * DAC digital volumes. From -103.5 to 24 dB in 0.5 dB steps. Note that
+ * setting the gain below -100 dB (register value <0x7) is effectively a MUTE
+ * as per device datasheet.
+ */
+static const DECLARE_TLV_DB_SCALE(chvol_tlv, -10300, 50, 1);
+
+static const struct snd_kcontrol_new ad82128_snd_controls[] = {
+	{
+	 .iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+	 .name = "Master Volume",
+	 .info = ad82128_vol_info,
+	 .get = ad82128_vol_locked_get,
+	 .put = ad82128_vol_locked_put,
+	 },
+	SOC_SINGLE_TLV("Ch1 Volume", AD82128_VOLUME_CTRL_REG_CH1,
+		0, 0xff, 1, chvol_tlv),
+	SOC_SINGLE_TLV("Ch2 Volume", AD82128_VOLUME_CTRL_REG_CH2,
+		0, 0xff, 1, chvol_tlv),
+	SOC_SINGLE_TLV("Speaker Driver Analog Gain", AD82128_ANALOG_CTRL_REG,
+		AD82128_ANALOG_GAIN_SHIFT, 3, 0, dac_analog_tlv),
+	{
+	 .iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+	 .name = "Master Mute",
+	 .info = ad82128_mute_info,
+	 .get = ad82128_mute_locked_get,
+	 .put = ad82128_mute_locked_put,
+	},
+	{
+	 .iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+	 .name = "Subwoofer Enable",
+	 .info = ad82128_Subwoofer_info,
+	 .get = ad82128_Subwoofer_locked_get,
+	 .put = ad82128_Subwoofer_locked_put,
+	},
+
+	SOC_SINGLE_BOOL_EXT("Power Down", 0,
+		ad82128_get_power_down, ad82128_set_power_down),
+};
+
+static int ad82128_trigger(struct snd_pcm_substream *substream, int cmd,
+			       struct snd_soc_dai *codec_dai)
+{
+	struct ad82128_data *ad82128 = snd_soc_dai_get_drvdata(codec_dai);
+	struct snd_soc_component *component = ad82128->component;
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		switch (cmd) {
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
+		case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+			if (!ad82128->mute)
+				ad82128_mute(component, 0);
+			break;
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
+		case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+			if (!ad82128->mute)
+				ad82128_mute(component, 1);
+			break;
+		}
+	}
+	return 0;
+}
+
+static const struct snd_soc_dapm_widget ad82128_dapm_widgets[] = {
+	SND_SOC_DAPM_AIF_IN("DAC IN", "Playback", 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_DAC_E("DAC", NULL, SND_SOC_NOPM, 0, 0, ad82128_dac_event,
+		SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_OUTPUT("OUT")
+};
+
+static const struct snd_soc_dapm_route ad82128_audio_map[] = {
+	{ "DAC", NULL, "DAC IN" },
+	{ "OUT", NULL, "DAC" },
+};
+
+static const struct snd_soc_component_driver soc_component_dev_ad82128 = {
+	.probe = ad82128_codec_probe,
+	.remove = ad82128_codec_remove,
+	.suspend = ad82128_suspend,
+	.resume = ad82128_resume,
+	.controls = ad82128_snd_controls,
+	.num_controls = ARRAY_SIZE(ad82128_snd_controls),
+	.dapm_widgets = ad82128_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(ad82128_dapm_widgets),
+	.dapm_routes = ad82128_audio_map,
+	.num_dapm_routes = ARRAY_SIZE(ad82128_audio_map),
+	.idle_bias_on = 1,
+	.use_pmdown_time = 1,
+	.endianness = 1,
+	.non_legacy_dai_naming = 1,
+};
+
+/* PCM rates supported by the AD82128 driver */
+#define AD82128_RATES (SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 | \
+	SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000)
+
+/* Formats supported by AD82128 driver */
+#define AD82128_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | \
+	SNDRV_PCM_FMTBIT_S20_LE | \
+	SNDRV_PCM_FMTBIT_S24_LE | \
+	SNDRV_PCM_FMTBIT_S32_LE)
+
+static int ad82128_mute_stream
+		(struct snd_soc_dai *dai, int mute,
+		int stream)
+{
+	struct snd_soc_component *component = dai->component;
+	struct ad82128_data *ad82128 = snd_soc_component_get_drvdata(component);
+
+	if (stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		if (mute)
+			ad82128_mute(component, 1);
+		else if (!mute && !ad82128->mute)
+			ad82128_mute(component, 0);
+	}
+
+	return 0;
+}
+
+static const struct snd_soc_dai_ops ad82128_speaker_dai_ops = {
+	.hw_params = ad82128_hw_params,
+	.set_fmt = ad82128_set_dai_fmt,
+	.mute_stream = ad82128_mute_stream,
+	.trigger = ad82128_trigger,
+};
+
+/*
+ * AD82128 DAI structure
+ *
+ * Note that were are advertising .playback.channels_max = 2 despite this being
+ * a mono amplifier. The reason for that is that some serial ports such as ESMT's
+ * McASP module have a minimum number of channels (2) that they can output.
+ * Advertising more channels than we have will allow us to interface with such
+ * a serial port without really any negative side effects as the AD82128 will
+ * simply ignore any extra channel(s) asides from the one channel that is
+ * configured to be played back.
+ */
+static struct snd_soc_dai_driver ad82128_dai[] = {
+	{
+		.name = "ad82128",
+		.playback = {
+			.stream_name = "Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = AD82128_RATES,
+			.formats = AD82128_FORMATS,
+		},
+		.ops = &ad82128_speaker_dai_ops,
+	},
+};
+
+static int ad82128_parse_dt(struct ad82128_data *ad82128,
+	struct device_node *np)
+{
+	int ret = 0;
+
+	ad82128->no_device = 0;
+	if (IS_ERR_OR_NULL(g_reset_pin_desc[g_codec_count])) {
+		g_reset_pin_desc[g_codec_count] = gpiod_get(ad82128->dev,
+					"reset_pin", GPIOF_OUT_INIT_LOW);
+	}
+
+	if (!IS_ERR(g_reset_pin_desc[g_codec_count])) {
+		print_i2c_client_info(ad82128->ad82128_client,
+			"ad82128 init, It will operate the gpio to power on");
+		ret = gpiod_direction_output(g_reset_pin_desc[g_codec_count],
+			GPIOF_OUT_INIT_HIGH);
+		pr_info("%s, ret:%d av out status: %s\n",
+			__func__, ret,
+			gpiod_get_value(g_reset_pin_desc[g_codec_count]) ?
+			"high" : "low");
+	} else {
+		print_i2c_client_info(ad82128->ad82128_client,
+			"ad82128 init, just count++");
+	}
+	pr_info("ad82128 init count:%d\n", g_codec_count);
+	g_codec_count++;
+
+	if (!ret)
+		ad82128->no_device = 1;
+
+	return ret;
+}
+
+static int ad82128_probe(struct i2c_client *client,
+	const struct i2c_device_id *id)
+{
+	struct device *dev = &client->dev;
+	struct ad82128_data *data;
+	const struct regmap_config *regmap_config;
+	int ret;
+	int i;
+
+	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	data->init_done = 0;
+	data->ad82128_client = client;
+	data->devtype = id->driver_data;
+	data->dev  = dev;
+	ad82128_parse_dt(data, client->dev.of_node);
+
+	switch (id->driver_data) {
+	case AD82128:
+		regmap_config = &ad82128_regmap_config;
+		break;
+	default:
+		dev_err(dev, "unexpected private driver data\n");
+		return -EINVAL;
+	}
+	data->regmap = devm_regmap_init_i2c(client, regmap_config);
+	if (IS_ERR(data->regmap)) {
+		ret = PTR_ERR(data->regmap);
+		dev_err(dev, "failed to allocate register map: %d\n", ret);
+		return ret;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(data->supplies); i++)
+		data->supplies[i].supply = ad82128_supply_names[i];
+
+	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(data->supplies),
+		data->supplies);
+	if (ret != 0) {
+		dev_err(dev, "failed to request supplies: %d\n", ret);
+		return ret;
+	}
+	ret = of_property_read_u32(dev->of_node, "subwoofer-enable",
+				   &data->subwoofer_enable);
+	if (ret < 0)
+		data->subwoofer_enable = 0;
+
+	dev_set_drvdata(dev, data);
+
+	ret = devm_snd_soc_register_component(&client->dev,
+		&soc_component_dev_ad82128,
+		ad82128_dai, ARRAY_SIZE(ad82128_dai));
+	if (ret < 0) {
+		dev_err(dev, "failed to register component: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static void ad82128_i2c_shutdown(struct i2c_client *client)
+{
+	struct ad82128_data *data = i2c_get_clientdata(client);
+	int ret;
+
+	if (!data)
+		return;
+
+	g_codec_count--;
+	if (g_codec_count < 0)
+		return;
+	if (!IS_ERR(g_reset_pin_desc[g_codec_count])) {
+		print_i2c_client_info(client,
+		"ad82128 shutdown, It will operate the gpio to power off");
+		ret = gpiod_direction_output(g_reset_pin_desc[g_codec_count],
+				GPIOF_OUT_INIT_LOW);
+		pr_info("%s, ret:%d av out status: %s\n",
+			__func__, ret,
+			gpiod_get_value(g_reset_pin_desc[g_codec_count]) ?
+			"high" : "low");
+	} else {
+		print_i2c_client_info(client,
+			"ad82128 shutdown, just ad82128 count--");
+	}
+	pr_info("ad82128 shutdown, count:%d\n", g_codec_count);
+
+}
+
+#ifdef CONFIG_HIBERNATION
+static int aml_ad82128_platform_restore(struct device *dev)
+{
+	struct ad82128_data *data = dev_get_drvdata(dev);
+
+	if (g_codec_count == 0) {
+		g_reset_pin_desc[0] = gpiod_get(dev,
+						"reset_pin", GPIOF_OUT_INIT_LOW);
+	}
+	ad82128_resume(data->component);
+	schedule_work(&data->work);
+	pr_info("%s\n", __func__);
+
+	return 0;
+}
+
+static int aml_ad82128_platform_freeze(struct device *dev)
+{
+	struct ad82128_data *data = dev_get_drvdata(dev);
+
+	cancel_work_sync(&data->work);
+	ad82128_suspend(data->component);
+	if (g_codec_count == 0)
+		gpiod_put(g_reset_pin_desc[g_codec_count]);
+	pr_info("%s\n", __func__);
+
+	return 0;
+}
+
+static const struct dev_pm_ops meson_ad82128_pm_ops = {
+	/* use the same as suspend, because the restore
+	 * will enable the clk and default setting
+	 */
+	.restore = aml_ad82128_platform_restore,
+	.freeze = aml_ad82128_platform_freeze,
+};
+#endif
+
+static const struct i2c_device_id ad82128_id[] = {
+	{ "ad82128", AD82128 },
+	{}
+};
+
+MODULE_DEVICE_TABLE(i2c, ad82128_id);
+
+#if IS_ENABLED(CONFIG_OF)
+static const struct of_device_id ad82128_of_match[] = {
+	{
+		.compatible = "ESMT,ad82128",
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, ad82128_of_match);
+#endif
+
+static struct i2c_driver ad82128_i2c_driver = {
+	.driver = {
+		.name = "ad82128",
+		.of_match_table = of_match_ptr(ad82128_of_match),
+#ifdef CONFIG_HIBERNATION
+		.pm = &meson_ad82128_pm_ops,
+#endif
+	},
+	.probe = ad82128_probe,
+	.shutdown = ad82128_i2c_shutdown,
+	.id_table = ad82128_id,
+};
+
+module_i2c_driver(ad82128_i2c_driver);
+
+MODULE_AUTHOR("ESMT BU2");
+MODULE_DESCRIPTION("AD82128 Audio amplifier driver");
+MODULE_LICENSE("GPL");

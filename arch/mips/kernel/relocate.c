@@ -340,7 +340,7 @@ void *__init relocate_kernel(void)
 	early_init_dt_scan(fdt);
 	if (boot_command_line[0]) {
 		/* Boot command line was passed in device tree */
-		strscpy(arcs_cmdline, boot_command_line, COMMAND_LINE_SIZE);
+		strlcpy(arcs_cmdline, boot_command_line, COMMAND_LINE_SIZE);
 	}
 #endif /* CONFIG_USE_OF */
 
@@ -380,7 +380,7 @@ void *__init relocate_kernel(void)
 		}
 #endif /* CONFIG_USE_OF */
 
-		/* Copy the kernel to its new location */
+		/* Copy the kernel to it's new location */
 		memcpy(loc_new, &_text, kernel_length);
 
 		/* Perform relocations on the new kernel */

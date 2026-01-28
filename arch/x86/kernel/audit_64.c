@@ -47,22 +47,25 @@ int audit_classify_syscall(int abi, unsigned syscall)
 #endif
 	switch(syscall) {
 	case __NR_open:
-		return AUDITSC_OPEN;
+		return 2;
 	case __NR_openat:
-		return AUDITSC_OPENAT;
+		return 3;
 	case __NR_execve:
 	case __NR_execveat:
-		return AUDITSC_EXECVE;
-	case __NR_openat2:
-		return AUDITSC_OPENAT2;
+		return 5;
 	default:
-		return AUDITSC_NATIVE;
+		return 0;
 	}
 }
 
 static int __init audit_classes_init(void)
 {
 #ifdef CONFIG_IA32_EMULATION
+	extern __u32 ia32_dir_class[];
+	extern __u32 ia32_write_class[];
+	extern __u32 ia32_read_class[];
+	extern __u32 ia32_chattr_class[];
+	extern __u32 ia32_signal_class[];
 	audit_register_class(AUDIT_CLASS_WRITE_32, ia32_write_class);
 	audit_register_class(AUDIT_CLASS_READ_32, ia32_read_class);
 	audit_register_class(AUDIT_CLASS_DIR_WRITE_32, ia32_dir_class);

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+config AMLOGIC_MTD_SPI_NAND
+        tristate "AMLOGIC SPI NAND support"
+        default n
+        depends on SPI_MASTER
+        depends on AMLOGIC_BREAK_GKI
+        select MTD_NAND_CORE
+        select SPI_MEM
+        help
+          This is based on MTD_SPI_NAND, adding partition and rsv management.
+          Say Y, Will register partitions according to dts and add rsv
+          management.
+          Say N, Only register one mtd device.

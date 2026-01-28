@@ -211,7 +211,7 @@ static void fw_cfg_io_cleanup(void)
 
 /* arch-specific ctrl & data register offsets are not available in ACPI, DT */
 #if !(defined(FW_CFG_CTRL_OFF) && defined(FW_CFG_DATA_OFF))
-# if (defined(CONFIG_ARM) || defined(CONFIG_ARM64) || defined(CONFIG_RISCV))
+# if (defined(CONFIG_ARM) || defined(CONFIG_ARM64))
 #  define FW_CFG_CTRL_OFF 0x08
 #  define FW_CFG_DATA_OFF 0x00
 #  define FW_CFG_DMA_OFF 0x10
@@ -389,12 +389,11 @@ static void fw_cfg_sysfs_cache_cleanup(void)
 
 	list_for_each_entry_safe(entry, next, &fw_cfg_entry_cache, list) {
 		fw_cfg_sysfs_cache_delist(entry);
-		kobject_del(&entry->kobj);
 		kobject_put(&entry->kobj);
 	}
 }
 
-/* per-entry attributes and show methods */
+/* default_attrs: per-entry attributes and show methods */
 
 #define FW_CFG_SYSFS_ATTR(_attr) \
 struct fw_cfg_sysfs_attribute fw_cfg_sysfs_attr_##_attr = { \
@@ -427,7 +426,6 @@ static struct attribute *fw_cfg_sysfs_entry_attrs[] = {
 	&fw_cfg_sysfs_attr_name.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(fw_cfg_sysfs_entry);
 
 /* sysfs_ops: find fw_cfg_[entry, attribute] and call appropriate show method */
 static ssize_t fw_cfg_sysfs_attr_show(struct kobject *kobj, struct attribute *a,
@@ -453,7 +451,7 @@ static void fw_cfg_sysfs_release_entry(struct kobject *kobj)
 
 /* kobj_type: ties together all properties required to register an entry */
 static struct kobj_type fw_cfg_sysfs_entry_ktype = {
-	.default_groups = fw_cfg_sysfs_entry_groups,
+	.default_attrs = fw_cfg_sysfs_entry_attrs,
 	.sysfs_ops = &fw_cfg_sysfs_attr_ops,
 	.release = fw_cfg_sysfs_release_entry,
 };
@@ -731,7 +729,7 @@ err_sel:
 	return err;
 }
 
-static void fw_cfg_sysfs_remove(struct platform_device *pdev)
+static int fw_cfg_sysfs_remove(struct platform_device *pdev)
 {
 	pr_debug("fw_cfg: unloading.\n");
 	fw_cfg_sysfs_cache_cleanup();
@@ -739,6 +737,7 @@ static void fw_cfg_sysfs_remove(struct platform_device *pdev)
 	fw_cfg_io_cleanup();
 	fw_cfg_kset_unregister_recursive(fw_cfg_fname_kset);
 	fw_cfg_kobj_cleanup(fw_cfg_sel_ko);
+	return 0;
 }
 
 static const struct of_device_id fw_cfg_sysfs_mmio_match[] = {
@@ -757,7 +756,7 @@ MODULE_DEVICE_TABLE(acpi, fw_cfg_sysfs_acpi_match);
 
 static struct platform_driver fw_cfg_sysfs_driver = {
 	.probe = fw_cfg_sysfs_probe,
-	.remove_new = fw_cfg_sysfs_remove,
+	.remove = fw_cfg_sysfs_remove,
 	.driver = {
 		.name = "fw_cfg",
 		.of_match_table = fw_cfg_sysfs_mmio_match,

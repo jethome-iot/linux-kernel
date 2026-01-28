@@ -2964,6 +2964,7 @@ static int dsp_allocate_ports_format(struct hda_codec *codec,
 			const unsigned short fmt,
 			unsigned int *port_map)
 {
+	int status;
 	unsigned int num_chans;
 
 	unsigned int sample_rate_div = ((get_hdafmt_rate(fmt) >> 0) & 3) + 1;
@@ -2977,7 +2978,9 @@ static int dsp_allocate_ports_format(struct hda_codec *codec,
 
 	num_chans = get_hdafmt_chs(fmt) + 1;
 
-	return dsp_allocate_ports(codec, num_chans, rate_multi, port_map);
+	status = dsp_allocate_ports(codec, num_chans, rate_multi, port_map);
+
+	return status;
 }
 
 /*
@@ -3022,7 +3025,8 @@ static int dma_convert_to_hda_format(struct hda_codec *codec,
 {
 	unsigned int format_val;
 
-	format_val = snd_hdac_stream_format(channels, 32, sample_rate);
+	format_val = snd_hdac_calc_stream_format(sample_rate,
+				channels, SNDRV_PCM_FORMAT_S32_LE, 32, 0);
 
 	if (hda_format)
 		*hda_format = (unsigned short)format_val;

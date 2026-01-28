@@ -5,44 +5,20 @@
  * Copyright (C) 2012 ARM Ltd.
  */
 #include <linux/kernel.h>
-#include <linux/efi.h>
 #include <linux/export.h>
 #include <linux/ftrace.h>
-#include <linux/kprobes.h>
 #include <linux/sched.h>
 #include <linux/sched/debug.h>
 #include <linux/sched/task_stack.h>
 #include <linux/stacktrace.h>
 
-#include <asm/efi.h>
 #include <asm/irq.h>
 #include <asm/stack_pointer.h>
 #include <asm/stacktrace.h>
 
-/*
- * Kernel unwind state
- *
- * @common:      Common unwind state.
- * @task:        The task being unwound.
- * @kr_cur:      When KRETPROBES is selected, holds the kretprobe instance
- *               associated with the most recently encountered replacement lr
- *               value.
- */
-struct kunwind_state {
-	struct unwind_state common;
-	struct task_struct *task;
-#ifdef CONFIG_KRETPROBES
-	struct llist_node *kr_cur;
+#ifdef CONFIG_AMLOGIC_VMAP
+#include <linux/amlogic/vmap_stack.h>
 #endif
-};
-
-static __always_inline void
-kunwind_init(struct kunwind_state *state,
-	     struct task_struct *task)
-{
-	unwind_init_common(&state->common);
-	state->task = task;
-}
 
 /*
  * Start an unwind from a pt_regs.
@@ -51,14 +27,13 @@ kunwind_init(struct kunwind_state *state,
  *
  * The regs must be on a stack currently owned by the calling task.
  */
-static __always_inline void
-kunwind_init_from_regs(struct kunwind_state *state,
-		       struct pt_regs *regs)
+static inline void unwind_init_from_regs(struct unwind_state *state,
+					 struct pt_regs *regs)
 {
-	kunwind_init(state, current);
+	unwind_init_common(state, current);
 
-	state->common.fp = regs->regs[29];
-	state->common.pc = regs->pc;
+	state->fp = regs->regs[29];
+	state->pc = regs->pc;
 }
 
 /*
@@ -69,13 +44,12 @@ kunwind_init_from_regs(struct kunwind_state *state,
  *
  * The function which invokes this must be noinline.
  */
-static __always_inline void
-kunwind_init_from_caller(struct kunwind_state *state)
+static __always_inline void unwind_init_from_caller(struct unwind_state *state)
 {
-	kunwind_init(state, current);
+	unwind_init_common(state, current);
 
-	state->common.fp = (unsigned long)__builtin_frame_address(1);
-	state->common.pc = (unsigned long)__builtin_return_address(0);
+	state->fp = (unsigned long)__builtin_frame_address(1);
+	state->pc = (unsigned long)__builtin_return_address(0);
 }
 
 /*
@@ -88,43 +62,45 @@ kunwind_init_from_caller(struct kunwind_state *state)
  * duration of the unwind, or the unwind will be bogus. It is never valid to
  * call this for the current task.
  */
-static __always_inline void
-kunwind_init_from_task(struct kunwind_state *state,
-		       struct task_struct *task)
+static inline void unwind_init_from_task(struct unwind_state *state,
+					 struct task_struct *task)
 {
-	kunwind_init(state, task);
+	unwind_init_common(state, task);
 
-	state->common.fp = thread_saved_fp(task);
-	state->common.pc = thread_saved_pc(task);
+	state->fp = thread_saved_fp(task);
+	state->pc = thread_saved_pc(task);
 }
 
-static __always_inline int
-kunwind_recover_return_address(struct kunwind_state *state)
+/*
+ * We can only safely access per-cpu stacks from current in a non-preemptible
+ * context.
+ */
+static bool on_accessible_stack(const struct task_struct *tsk,
+				unsigned long sp, unsigned long size,
+				struct stack_info *info)
 {
-#ifdef CONFIG_FUNCTION_GRAPH_TRACER
-	if (state->task->ret_stack &&
-	    (state->common.pc == (unsigned long)return_to_handler)) {
-		unsigned long orig_pc;
-		orig_pc = ftrace_graph_ret_addr(state->task, NULL,
-						state->common.pc,
-						(void *)state->common.fp);
-		if (WARN_ON_ONCE(state->common.pc == orig_pc))
-			return -EINVAL;
-		state->common.pc = orig_pc;
-	}
-#endif /* CONFIG_FUNCTION_GRAPH_TRACER */
+	if (info)
+		info->type = STACK_TYPE_UNKNOWN;
 
-#ifdef CONFIG_KRETPROBES
-	if (is_kretprobe_trampoline(state->common.pc)) {
-		unsigned long orig_pc;
-		orig_pc = kretprobe_find_ret_addr(state->task,
-						  (void *)state->common.fp,
-						  &state->kr_cur);
-		state->common.pc = orig_pc;
-	}
-#endif /* CONFIG_KRETPROBES */
+	if (on_task_stack(tsk, sp, size, info))
+		return true;
+	if (tsk != current || preemptible())
+		return false;
+	if (on_irq_stack(sp, size, info))
+		return true;
+	if (on_overflow_stack(sp, size, info))
+		return true;
+	if (on_sdei_stack(sp, size, info))
+		return true;
+#ifdef CONFIG_AMLOGIC_VMAP
+	/*
+	 * keep search stack for task
+	 */
+	if (on_vmap_stack(sp, info))
+		return true;
+#endif
 
-	return 0;
+	return false;
 }
 
 /*
@@ -134,137 +110,91 @@ kunwind_recover_return_address(struct kunwind_state *state)
  * records (e.g. a cycle), determined based on the location and fp value of A
  * and the location (but not the fp value) of B.
  */
-static __always_inline int
-kunwind_next(struct kunwind_state *state)
+#ifdef CONFIG_AMLOGIC_VMAP
+int notrace unwind_next(struct unwind_state *state)
+#else
+static int notrace unwind_next(struct unwind_state *state)
+#endif
 {
 	struct task_struct *tsk = state->task;
-	unsigned long fp = state->common.fp;
+	unsigned long fp = state->fp;
+	struct stack_info info;
 	int err;
 
 	/* Final frame; nothing to unwind */
 	if (fp == (unsigned long)task_pt_regs(tsk)->stackframe)
 		return -ENOENT;
 
-	err = unwind_next_frame_record(&state->common);
+	err = unwind_next_common(state, &info, on_accessible_stack, NULL);
 	if (err)
 		return err;
 
-	state->common.pc = ptrauth_strip_kernel_insn_pac(state->common.pc);
+	state->pc = ptrauth_strip_insn_pac(state->pc);
 
-	return kunwind_recover_return_address(state);
+#ifdef CONFIG_FUNCTION_GRAPH_TRACER
+	if (tsk->ret_stack &&
+		(state->pc == (unsigned long)return_to_handler)) {
+		unsigned long orig_pc;
+		/*
+		 * This is a case where function graph tracer has
+		 * modified a return address (LR) in a stack frame
+		 * to hook a function return.
+		 * So replace it to an original value.
+		 */
+		orig_pc = ftrace_graph_ret_addr(tsk, NULL, state->pc,
+						(void *)state->fp);
+		if (WARN_ON_ONCE(state->pc == orig_pc))
+			return -EINVAL;
+		state->pc = orig_pc;
+	}
+#endif /* CONFIG_FUNCTION_GRAPH_TRACER */
+
+	return 0;
 }
+NOKPROBE_SYMBOL(unwind_next);
 
-typedef bool (*kunwind_consume_fn)(const struct kunwind_state *state, void *cookie);
-
-static __always_inline void
-do_kunwind(struct kunwind_state *state, kunwind_consume_fn consume_state,
-	   void *cookie)
+static void notrace unwind(struct unwind_state *state,
+			   stack_trace_consume_fn consume_entry, void *cookie)
 {
-	if (kunwind_recover_return_address(state))
-		return;
-
 	while (1) {
 		int ret;
 
-		if (!consume_state(state, cookie))
+		if (!consume_entry(cookie, state->pc))
 			break;
-		ret = kunwind_next(state);
+		ret = unwind_next(state);
 		if (ret < 0)
 			break;
 	}
 }
+NOKPROBE_SYMBOL(unwind);
 
-/*
- * Per-cpu stacks are only accessible when unwinding the current task in a
- * non-preemptible context.
- */
-#define STACKINFO_CPU(name)					\
-	({							\
-		((task == current) && !preemptible())		\
-			? stackinfo_get_##name()		\
-			: stackinfo_get_unknown();		\
-	})
-
-/*
- * SDEI stacks are only accessible when unwinding the current task in an NMI
- * context.
- */
-#define STACKINFO_SDEI(name)					\
-	({							\
-		((task == current) && in_nmi())			\
-			? stackinfo_get_sdei_##name()		\
-			: stackinfo_get_unknown();		\
-	})
-
-#define STACKINFO_EFI						\
-	({							\
-		((task == current) && current_in_efi())		\
-			? stackinfo_get_efi()			\
-			: stackinfo_get_unknown();		\
-	})
-
-static __always_inline void
-kunwind_stack_walk(kunwind_consume_fn consume_state,
-		   void *cookie, struct task_struct *task,
-		   struct pt_regs *regs)
+#ifdef CONFIG_AMLOGIC_VMAP
+static noinline notrace void aml_dump_backtrace_entry(void *cookie,
+			struct task_struct *task, struct pt_regs *regs)
 {
-	struct stack_info stacks[] = {
-		stackinfo_get_task(task),
-		STACKINFO_CPU(irq),
-#if defined(CONFIG_VMAP_STACK)
-		STACKINFO_CPU(overflow),
-#endif
-#if defined(CONFIG_VMAP_STACK) && defined(CONFIG_ARM_SDE_INTERFACE)
-		STACKINFO_SDEI(normal),
-		STACKINFO_SDEI(critical),
-#endif
-#ifdef CONFIG_EFI
-		STACKINFO_EFI,
-#endif
-	};
-	struct kunwind_state state = {
-		.common = {
-			.stacks = stacks,
-			.nr_stacks = ARRAY_SIZE(stacks),
-		},
-	};
+	struct unwind_state state;
 
 	if (regs) {
 		if (task != current)
 			return;
-		kunwind_init_from_regs(&state, regs);
+		unwind_init_from_regs(&state, regs);
 	} else if (task == current) {
-		kunwind_init_from_caller(&state);
+		unwind_init_from_caller(&state);
 	} else {
-		kunwind_init_from_task(&state, task);
+		unwind_init_from_task(&state, task);
 	}
 
-	do_kunwind(&state, consume_state, cookie);
+	while (1) {
+		int ret;
+
+		dump_backtrace_entry_vmap(state.pc, state.fp,
+			(unsigned long)task->stack, (char *)cookie);
+		ret = unwind_next(&state);
+		if (ret < 0)
+			break;
+	}
 }
-
-struct kunwind_consume_entry_data {
-	stack_trace_consume_fn consume_entry;
-	void *cookie;
-};
-
-static bool
-arch_kunwind_consume_entry(const struct kunwind_state *state, void *cookie)
-{
-	struct kunwind_consume_entry_data *data = cookie;
-	return data->consume_entry(data->cookie, state->common.pc);
-}
-
-noinline noinstr void arch_stack_walk(stack_trace_consume_fn consume_entry,
-			      void *cookie, struct task_struct *task,
-			      struct pt_regs *regs)
-{
-	struct kunwind_consume_entry_data data = {
-		.consume_entry = consume_entry,
-		.cookie = cookie,
-	};
-
-	kunwind_stack_walk(arch_kunwind_consume_entry, &data, task, regs);
-}
+#else
 
 static bool dump_backtrace_entry(void *arg, unsigned long where)
 {
@@ -272,6 +202,7 @@ static bool dump_backtrace_entry(void *arg, unsigned long where)
 	printk("%s %pSb\n", loglvl, (void *)where);
 	return true;
 }
+#endif
 
 void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk,
 		    const char *loglvl)
@@ -288,13 +219,37 @@ void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk,
 		return;
 
 	printk("%sCall trace:\n", loglvl);
+#ifdef CONFIG_AMLOGIC_VMAP
+	aml_dump_backtrace_entry((void *)loglvl, tsk, regs);
+#else
 	arch_stack_walk(dump_backtrace_entry, (void *)loglvl, tsk, regs);
+#endif
 
 	put_task_stack(tsk);
 }
+EXPORT_SYMBOL_GPL(dump_backtrace);
 
 void show_stack(struct task_struct *tsk, unsigned long *sp, const char *loglvl)
 {
 	dump_backtrace(NULL, tsk, loglvl);
 	barrier();
+}
+
+noinline notrace void arch_stack_walk(stack_trace_consume_fn consume_entry,
+			      void *cookie, struct task_struct *task,
+			      struct pt_regs *regs)
+{
+	struct unwind_state state;
+
+	if (regs) {
+		if (task != current)
+			return;
+		unwind_init_from_regs(&state, regs);
+	} else if (task == current) {
+		unwind_init_from_caller(&state);
+	} else {
+		unwind_init_from_task(&state, task);
+	}
+
+	unwind(&state, consume_entry, cookie);
 }

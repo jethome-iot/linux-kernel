@@ -7,7 +7,6 @@
 
 #include <linux/io.h>
 #include <linux/clk.h>
-#include <linux/platform_device.h>
 #include <linux/timer.h>
 #include <linux/module.h>
 #include <linux/irqreturn.h>
@@ -24,13 +23,13 @@
 #include <linux/of.h>
 #include <linux/of_mdio.h>
 #include <linux/of_net.h>
-#include <linux/of_platform.h>
+#include <linux/of_device.h>
 #include <linux/if_vlan.h>
 #include <linux/kmemleak.h>
 #include <linux/sys_soc.h>
 
 #include <net/switchdev.h>
-#include <net/page_pool/helpers.h>
+#include <net/page_pool.h>
 #include <net/pkt_cls.h>
 #include <net/devlink.h>
 
@@ -274,7 +273,7 @@ static void cpsw_ndo_set_rx_mode(struct net_device *ndev)
 
 static unsigned int cpsw_rxbuf_total_len(unsigned int len)
 {
-	len += CPSW_HEADROOM_NA;
+	len += CPSW_HEADROOM;
 	len += SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 
 	return SKB_DATA_ALIGN(len);
@@ -450,9 +449,11 @@ static int cpsw_ndo_vlan_rx_add_vid(struct net_device *ndev,
 	if (vid == cpsw->data.default_vlan)
 		return 0;
 
-	ret = pm_runtime_resume_and_get(cpsw->dev);
-	if (ret < 0)
+	ret = pm_runtime_get_sync(cpsw->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(cpsw->dev);
 		return ret;
+	}
 
 	/* In dual EMAC, reserved VLAN id should not be used for
 	 * creating VLAN interfaces as this can break the dual
@@ -497,8 +498,6 @@ static void cpsw_restore(struct cpsw_priv *priv)
 
 	/* restore CBS offload */
 	cpsw_cbs_resume(&cpsw->slaves[priv->emac_port - 1], priv);
-
-	cpsw_qos_clsflower_resume(priv);
 }
 
 static void cpsw_init_stp_ale_entry(struct cpsw_common *cpsw)
@@ -773,6 +772,9 @@ static void cpsw_slave_open(struct cpsw_slave *slave, struct cpsw_priv *priv)
 			slave->slave_num);
 		return;
 	}
+
+	phy->mac_managed_pm = true;
+
 	slave->phy = phy;
 
 	phy_attached_info(slave->phy);
@@ -830,9 +832,11 @@ static int cpsw_ndo_open(struct net_device *ndev)
 
 	dev_info(priv->dev, "starting ndev. mode: %s\n",
 		 cpsw_is_switch_en(cpsw) ? "switch" : "dual_mac");
-	ret = pm_runtime_resume_and_get(cpsw->dev);
-	if (ret < 0)
+	ret = pm_runtime_get_sync(cpsw->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(cpsw->dev);
 		return ret;
+	}
 
 	/* Notify the stack of the actual queue counts. */
 	ret = netif_set_real_num_tx_queues(ndev, cpsw->tx_ch_num);
@@ -984,9 +988,11 @@ static int cpsw_ndo_set_mac_address(struct net_device *ndev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	ret = pm_runtime_resume_and_get(cpsw->dev);
-	if (ret < 0)
+	ret = pm_runtime_get_sync(cpsw->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(cpsw->dev);
 		return ret;
+	}
 
 	vid = cpsw->slaves[slave_no].port_vlan;
 	flags = ALE_VLAN | ALE_SECURE;
@@ -1021,9 +1027,11 @@ static int cpsw_ndo_vlan_rx_kill_vid(struct net_device *ndev,
 	if (vid == cpsw->data.default_vlan)
 		return 0;
 
-	ret = pm_runtime_resume_and_get(cpsw->dev);
-	if (ret < 0)
+	ret = pm_runtime_get_sync(cpsw->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(cpsw->dev);
 		return ret;
+	}
 
 	/* reset the return code as pm_runtime_get_sync() can return
 	 * non zero values as well.
@@ -1147,9 +1155,9 @@ static void cpsw_get_drvinfo(struct net_device *ndev,
 	struct platform_device *pdev;
 
 	pdev = to_platform_device(cpsw->dev);
-	strscpy(info->driver, "cpsw-switch", sizeof(info->driver));
-	strscpy(info->version, "2.0", sizeof(info->version));
-	strscpy(info->bus_info, pdev->name, sizeof(info->bus_info));
+	strlcpy(info->driver, "cpsw-switch", sizeof(info->driver));
+	strlcpy(info->version, "2.0", sizeof(info->version));
+	strlcpy(info->bus_info, pdev->name, sizeof(info->bus_info));
 }
 
 static int cpsw_set_pauseparam(struct net_device *ndev,
@@ -1289,8 +1297,9 @@ static int cpsw_probe_dt(struct cpsw_common *cpsw)
 		if (of_phy_is_fixed_link(port_np)) {
 			ret = of_phy_register_fixed_link(port_np);
 			if (ret) {
-				dev_err_probe(dev, ret, "%pOF failed to register fixed-link phy\n",
-					      port_np);
+				if (ret != -EPROBE_DEFER)
+					dev_err(dev, "%pOF failed to register fixed-link phy: %d\n",
+						port_np, ret);
 				goto err_node_put;
 			}
 			slave_data->phy_node = of_node_get(port_np);
@@ -1404,11 +1413,7 @@ static int cpsw_create_ports(struct cpsw_common *cpsw)
 		cpsw->slaves[i].ndev = ndev;
 
 		ndev->features |= NETIF_F_HW_VLAN_CTAG_FILTER |
-				  NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_NETNS_LOCAL | NETIF_F_HW_TC;
-
-		ndev->xdp_features = NETDEV_XDP_ACT_BASIC |
-				     NETDEV_XDP_ACT_REDIRECT |
-				     NETDEV_XDP_ACT_NDO_XMIT;
+				  NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_NETNS_LOCAL;
 
 		ndev->netdev_ops = &cpsw_netdev_ops;
 		ndev->ethtool_ops = &cpsw_ethtool_ops;
@@ -1421,10 +1426,13 @@ static int cpsw_create_ports(struct cpsw_common *cpsw)
 			 * accordingly.
 			 */
 			netif_napi_add(ndev, &cpsw->napi_rx,
-				       cpsw->quirk_irq ? cpsw_rx_poll : cpsw_rx_mq_poll);
-			netif_napi_add_tx(ndev, &cpsw->napi_tx,
+				       cpsw->quirk_irq ?
+				       cpsw_rx_poll : cpsw_rx_mq_poll,
+				       CPSW_POLL_WEIGHT);
+			netif_tx_napi_add(ndev, &cpsw->napi_tx,
 					  cpsw->quirk_irq ?
-					  cpsw_tx_poll : cpsw_tx_mq_poll);
+					  cpsw_tx_poll : cpsw_tx_mq_poll,
+					  CPSW_POLL_WEIGHT);
 		}
 
 		napi_ndev = ndev;
@@ -1808,6 +1816,12 @@ static int cpsw_register_devlink(struct cpsw_common *cpsw)
 	dl_priv = devlink_priv(cpsw->devlink);
 	dl_priv->cpsw = cpsw;
 
+	ret = devlink_register(cpsw->devlink);
+	if (ret) {
+		dev_err(dev, "DL reg fail ret:%d\n", ret);
+		goto dl_free;
+	}
+
 	ret = devlink_params_register(cpsw->devlink, cpsw_devlink_params,
 				      ARRAY_SIZE(cpsw_devlink_params));
 	if (ret) {
@@ -1815,19 +1829,22 @@ static int cpsw_register_devlink(struct cpsw_common *cpsw)
 		goto dl_unreg;
 	}
 
-	devlink_register(cpsw->devlink);
+	devlink_params_publish(cpsw->devlink);
 	return ret;
 
 dl_unreg:
+	devlink_unregister(cpsw->devlink);
+dl_free:
 	devlink_free(cpsw->devlink);
 	return ret;
 }
 
 static void cpsw_unregister_devlink(struct cpsw_common *cpsw)
 {
-	devlink_unregister(cpsw->devlink);
+	devlink_params_unpublish(cpsw->devlink);
 	devlink_params_unregister(cpsw->devlink, cpsw_devlink_params,
 				  ARRAY_SIZE(cpsw_devlink_params));
+	devlink_unregister(cpsw->devlink);
 	devlink_free(cpsw->devlink);
 }
 
@@ -1916,8 +1933,9 @@ static int cpsw_probe(struct platform_device *pdev)
 	/* Need to enable clocks with runtime PM api to access module
 	 * registers
 	 */
-	ret = pm_runtime_resume_and_get(dev);
+	ret = pm_runtime_get_sync(dev);
 	if (ret < 0) {
+		pm_runtime_put_noidle(dev);
 		pm_runtime_disable(dev);
 		return ret;
 	}
@@ -2037,19 +2055,15 @@ clean_dt_ret:
 	return ret;
 }
 
-static void cpsw_remove(struct platform_device *pdev)
+static int cpsw_remove(struct platform_device *pdev)
 {
 	struct cpsw_common *cpsw = platform_get_drvdata(pdev);
 	int ret;
 
-	ret = pm_runtime_resume_and_get(&pdev->dev);
+	ret = pm_runtime_get_sync(&pdev->dev);
 	if (ret < 0) {
-		/* Note, if this error path is taken, we're leaking some
-		 * resources.
-		 */
-		dev_err(&pdev->dev, "Failed to resume device (%pe)\n",
-			ERR_PTR(ret));
-		return;
+		pm_runtime_put_noidle(&pdev->dev);
+		return ret;
 	}
 
 	cpsw_unregister_notifiers(cpsw);
@@ -2061,6 +2075,7 @@ static void cpsw_remove(struct platform_device *pdev)
 	cpsw_remove_dt(cpsw);
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+	return 0;
 }
 
 static int __maybe_unused cpsw_suspend(struct device *dev)
@@ -2121,7 +2136,7 @@ static struct platform_driver cpsw_driver = {
 		.of_match_table = cpsw_of_mtable,
 	},
 	.probe = cpsw_probe,
-	.remove_new = cpsw_remove,
+	.remove = cpsw_remove,
 };
 
 module_platform_driver(cpsw_driver);

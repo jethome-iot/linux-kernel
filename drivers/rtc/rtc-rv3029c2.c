@@ -17,7 +17,6 @@
 #include <linux/of.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
-#include <linux/kstrtox.h>
 #include <linux/regmap.h>
 
 /* Register map */
@@ -735,14 +734,9 @@ static int rv3029_probe(struct device *dev, struct regmap *regmap, int irq,
 		return PTR_ERR(rv3029->rtc);
 
 	if (rv3029->irq > 0) {
-		unsigned long irqflags = IRQF_TRIGGER_LOW;
-
-		if (dev_fwnode(dev))
-			irqflags = 0;
-
 		rc = devm_request_threaded_irq(dev, rv3029->irq,
 					       NULL, rv3029_handle_irq,
-					       irqflags | IRQF_ONESHOT,
+					       IRQF_TRIGGER_LOW | IRQF_ONESHOT,
 					       "rv3029", dev);
 		if (rc) {
 			dev_warn(dev, "unable to request IRQ, alarms disabled\n");
@@ -790,7 +784,8 @@ static const struct regmap_config config = {
 
 #if IS_ENABLED(CONFIG_I2C)
 
-static int rv3029_i2c_probe(struct i2c_client *client)
+static int rv3029_i2c_probe(struct i2c_client *client,
+			    const struct i2c_device_id *id)
 {
 	struct regmap *regmap;
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_I2C_BLOCK |

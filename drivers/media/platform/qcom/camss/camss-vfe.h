@@ -52,7 +52,9 @@ enum vfe_line_id {
 	VFE_LINE_RDI0 = 0,
 	VFE_LINE_RDI1 = 1,
 	VFE_LINE_RDI2 = 2,
+	VFE_LINE_NUM_GEN2 = 3,
 	VFE_LINE_PIX = 3,
+	VFE_LINE_NUM_GEN1 = 4,
 	VFE_LINE_NUM_MAX = 4
 };
 
@@ -101,7 +103,7 @@ struct vfe_device;
 struct vfe_hw_ops {
 	void (*enable_irq_common)(struct vfe_device *vfe);
 	void (*global_reset)(struct vfe_device *vfe);
-	u32 (*hw_version)(struct vfe_device *vfe);
+	void (*hw_version_read)(struct vfe_device *vfe, struct device *dev);
 	irqreturn_t (*isr)(int irq, void *dev);
 	void (*isr_read)(struct vfe_device *vfe, u32 *value0, u32 *value1);
 	void (*pm_domain_off)(struct vfe_device *vfe);
@@ -114,7 +116,6 @@ struct vfe_hw_ops {
 	int (*vfe_enable)(struct vfe_line *line);
 	int (*vfe_halt)(struct vfe_device *vfe);
 	void (*violation_read)(struct vfe_device *vfe);
-	void (*vfe_wm_stop)(struct vfe_device *vfe, u8 wm);
 };
 
 struct vfe_isr_ops {
@@ -150,21 +151,20 @@ struct vfe_device {
 	const struct vfe_hw_ops_gen1 *ops_gen1;
 	struct vfe_isr_ops isr_ops;
 	struct camss_video_ops video_ops;
-	struct device *genpd;
-	struct device_link *genpd_link;
 };
 
-struct camss_subdev_resources;
+struct resources;
 
 int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
-			const struct camss_subdev_resources *res, u8 id);
-
-void msm_vfe_genpd_cleanup(struct vfe_device *vfe);
+			const struct resources *res, u8 id);
 
 int msm_vfe_register_entities(struct vfe_device *vfe,
 			      struct v4l2_device *v4l2_dev);
 
 void msm_vfe_unregister_entities(struct vfe_device *vfe);
+
+void msm_vfe_get_vfe_id(struct media_entity *entity, u8 *id);
+void msm_vfe_get_vfe_line_id(struct media_entity *entity, enum vfe_line_id *id);
 
 /*
  * vfe_buf_add_pending - Add output buffer to list of pending
@@ -197,43 +197,9 @@ int vfe_reserve_wm(struct vfe_device *vfe, enum vfe_line_id line_id);
  */
 int vfe_reset(struct vfe_device *vfe);
 
-/*
- * vfe_disable - Disable streaming on VFE line
- * @line: VFE line
- *
- * Return 0 on success or a negative error code otherwise
- */
-int vfe_disable(struct vfe_line *line);
-
-/*
- * vfe_pm_domain_off - Disable power domains specific to this VFE.
- * @vfe: VFE Device
- */
-void vfe_pm_domain_off(struct vfe_device *vfe);
-
-/*
- * vfe_pm_domain_on - Enable power domains specific to this VFE.
- * @vfe: VFE Device
- */
-int vfe_pm_domain_on(struct vfe_device *vfe);
-
 extern const struct vfe_hw_ops vfe_ops_4_1;
 extern const struct vfe_hw_ops vfe_ops_4_7;
 extern const struct vfe_hw_ops vfe_ops_4_8;
 extern const struct vfe_hw_ops vfe_ops_170;
-extern const struct vfe_hw_ops vfe_ops_480;
-
-int vfe_get(struct vfe_device *vfe);
-void vfe_put(struct vfe_device *vfe);
-
-/*
- * vfe_is_lite - Return if VFE is VFE lite.
- * @vfe: VFE Device
- *
- * Some VFE lites have a different register layout.
- *
- * Return whether VFE is VFE lite
- */
-bool vfe_is_lite(struct vfe_device *vfe);
 
 #endif /* QC_MSM_CAMSS_VFE_H */

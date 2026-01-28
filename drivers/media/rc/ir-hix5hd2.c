@@ -9,9 +9,7 @@
 #include <linux/interrupt.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
-#include <linux/property.h>
+#include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <media/rc-core.h>
 
@@ -196,7 +194,7 @@ static irqreturn_t hix5hd2_ir_rx_interrupt(int irq, void *data)
 		 * IR_INTS availably since logic would not clear
 		 * fifo when overflow, drv do the job
 		 */
-		ir_raw_event_overflow(priv->rdev);
+		ir_raw_event_reset(priv->rdev);
 		symb_num = readl_relaxed(priv->base + IR_DATAH);
 		for (i = 0; i < symb_num; i++)
 			readl_relaxed(priv->base + IR_DATAL);
@@ -251,8 +249,10 @@ static int hix5hd2_ir_probe(struct platform_device *pdev)
 {
 	struct rc_dev *rdev;
 	struct device *dev = &pdev->dev;
+	struct resource *res;
 	struct hix5hd2_ir_priv *priv;
 	struct device_node *node = pdev->dev.of_node;
+	const struct of_device_id *of_id;
 	const char *map_name;
 	int ret;
 
@@ -260,11 +260,12 @@ static int hix5hd2_ir_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	priv->socdata = device_get_match_data(dev);
-	if (!priv->socdata) {
+	of_id = of_match_device(hix5hd2_ir_table, dev);
+	if (!of_id) {
 		dev_err(dev, "Unable to initialize IR data\n");
 		return -ENODEV;
 	}
+	priv->socdata = of_id->data;
 
 	priv->regmap = syscon_regmap_lookup_by_phandle(node,
 						       "hisilicon,power-syscon");
@@ -273,7 +274,8 @@ static int hix5hd2_ir_probe(struct platform_device *pdev)
 		priv->regmap = NULL;
 	}
 
-	priv->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	priv->base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
@@ -340,12 +342,13 @@ err:
 	return ret;
 }
 
-static void hix5hd2_ir_remove(struct platform_device *pdev)
+static int hix5hd2_ir_remove(struct platform_device *pdev)
 {
 	struct hix5hd2_ir_priv *priv = platform_get_drvdata(pdev);
 
 	clk_disable_unprepare(priv->clock);
 	rc_unregister_device(priv->rdev);
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -394,7 +397,7 @@ static struct platform_driver hix5hd2_ir_driver = {
 		.pm     = &hix5hd2_ir_pm_ops,
 	},
 	.probe = hix5hd2_ir_probe,
-	.remove_new = hix5hd2_ir_remove,
+	.remove = hix5hd2_ir_remove,
 };
 
 module_platform_driver(hix5hd2_ir_driver);

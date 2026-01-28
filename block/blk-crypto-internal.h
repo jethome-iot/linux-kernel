@@ -7,13 +7,14 @@
 #define __LINUX_BLK_CRYPTO_INTERNAL_H
 
 #include <linux/bio.h>
-#include <linux/blk-mq.h>
+#include <linux/blkdev.h>
 
 /* Represents a crypto mode supported by blk-crypto  */
 struct blk_crypto_mode {
 	const char *name; /* name of this mode, shown in sysfs */
 	const char *cipher_str; /* crypto API name (for fallback case) */
 	unsigned int keysize; /* key size in bytes */
+	unsigned int security_strength; /* security strength in bytes */
 	unsigned int ivsize; /* iv size in bytes */
 };
 
@@ -21,9 +22,9 @@ extern const struct blk_crypto_mode blk_crypto_modes[];
 
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION
 
-int blk_crypto_sysfs_register(struct gendisk *disk);
+int blk_crypto_sysfs_register(struct request_queue *q);
 
-void blk_crypto_sysfs_unregister(struct gendisk *disk);
+void blk_crypto_sysfs_unregister(struct request_queue *q);
 
 void bio_crypt_dun_increment(u64 dun[BLK_CRYPTO_DUN_ARRAY_SIZE],
 			     unsigned int inc);
@@ -84,14 +85,12 @@ bool __blk_crypto_cfg_supported(struct blk_crypto_profile *profile,
 
 #else /* CONFIG_BLK_INLINE_ENCRYPTION */
 
-static inline int blk_crypto_sysfs_register(struct gendisk *disk)
+static inline int blk_crypto_sysfs_register(struct request_queue *q)
 {
 	return 0;
 }
 
-static inline void blk_crypto_sysfs_unregister(struct gendisk *disk)
-{
-}
+static inline void blk_crypto_sysfs_unregister(struct request_queue *q) { }
 
 static inline bool bio_crypt_rq_ctx_compatible(struct request *rq,
 					       struct bio *bio)
@@ -203,6 +202,21 @@ static inline int blk_crypto_rq_bio_prep(struct request *rq, struct bio *bio,
 	if (bio_has_crypt_ctx(bio))
 		return __blk_crypto_rq_bio_prep(rq, bio, gfp_mask);
 	return 0;
+}
+
+/**
+ * blk_crypto_insert_cloned_request - Prepare a cloned request to be inserted
+ *				      into a request queue.
+ * @rq: the request being queued
+ *
+ * Return: BLK_STS_OK on success, nonzero on error.
+ */
+static inline blk_status_t blk_crypto_insert_cloned_request(struct request *rq)
+{
+
+	if (blk_crypto_rq_is_encrypted(rq))
+		return blk_crypto_rq_get_keyslot(rq);
+	return BLK_STS_OK;
 }
 
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION_FALLBACK

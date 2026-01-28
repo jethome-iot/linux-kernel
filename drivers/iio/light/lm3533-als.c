@@ -417,7 +417,7 @@ static ssize_t show_thresh_either_en(struct device *dev,
 		enable = 0;
 	}
 
-	return sysfs_emit(buf, "%u\n", enable);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", enable);
 }
 
 static ssize_t store_thresh_either_en(struct device *dev,
@@ -474,7 +474,7 @@ static ssize_t show_zone(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%u\n", zone);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", zone);
 }
 
 enum lm3533_als_attribute_type {
@@ -530,7 +530,7 @@ static ssize_t show_als_attr(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sysfs_emit(buf, "%u\n", val);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", val);
 }
 
 static ssize_t store_als_attr(struct device *dev,
@@ -895,7 +895,7 @@ err_free_irq:
 	return ret;
 }
 
-static void lm3533_als_remove(struct platform_device *pdev)
+static int lm3533_als_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct lm3533_als *als = iio_priv(indio_dev);
@@ -905,6 +905,8 @@ static void lm3533_als_remove(struct platform_device *pdev)
 	lm3533_als_disable(als);
 	if (als->irq)
 		free_irq(als->irq, indio_dev);
+
+	return 0;
 }
 
 static struct platform_driver lm3533_als_driver = {
@@ -912,7 +914,7 @@ static struct platform_driver lm3533_als_driver = {
 		.name	= "lm3533-als",
 	},
 	.probe		= lm3533_als_probe,
-	.remove_new	= lm3533_als_remove,
+	.remove		= lm3533_als_remove,
 };
 module_platform_driver(lm3533_als_driver);
 

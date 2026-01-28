@@ -25,14 +25,7 @@
 
 #include "dasd_int.h"
 
-static unsigned int queue_depth = 32;
-static unsigned int nr_hw_queues = 4;
-
-module_param(queue_depth, uint, 0444);
-MODULE_PARM_DESC(queue_depth, "Default queue depth for new DASD devices");
-
-module_param(nr_hw_queues, uint, 0444);
-MODULE_PARM_DESC(nr_hw_queues, "Default number of hardware queues for new DASD devices");
+static struct lock_class_key dasd_bio_compl_lkclass;
 
 /*
  * Allocate and register gendisk structure for device.
@@ -41,28 +34,17 @@ int dasd_gendisk_alloc(struct dasd_block *block)
 {
 	struct gendisk *gdp;
 	struct dasd_device *base;
-	int len, rc;
+	int len;
 
 	/* Make sure the minor for this device exists. */
 	base = block->base;
 	if (base->devindex >= DASD_PER_MAJOR)
 		return -EBUSY;
 
-	block->tag_set.ops = &dasd_mq_ops;
-	block->tag_set.cmd_size = sizeof(struct dasd_ccw_req);
-	block->tag_set.nr_hw_queues = nr_hw_queues;
-	block->tag_set.queue_depth = queue_depth;
-	block->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
-	block->tag_set.numa_node = NUMA_NO_NODE;
-	rc = blk_mq_alloc_tag_set(&block->tag_set);
-	if (rc)
-		return rc;
-
-	gdp = blk_mq_alloc_disk(&block->tag_set, block);
-	if (IS_ERR(gdp)) {
-		blk_mq_free_tag_set(&block->tag_set);
-		return PTR_ERR(gdp);
-	}
+	gdp = __alloc_disk_node(block->request_queue, NUMA_NO_NODE,
+				&dasd_bio_compl_lkclass);
+	if (!gdp)
+		return -ENOMEM;
 
 	/* Initialize gendisk structure. */
 	gdp->major = DASD_MAJOR;
@@ -98,13 +80,7 @@ int dasd_gendisk_alloc(struct dasd_block *block)
 	dasd_add_link_to_gendisk(gdp, base);
 	block->gdp = gdp;
 	set_capacity(block->gdp, 0);
-
-	rc = device_add_disk(&base->cdev->dev, block->gdp, NULL);
-	if (rc) {
-		dasd_gendisk_free(block);
-		return rc;
-	}
-
+	device_add_disk(&base->cdev->dev, block->gdp, NULL);
 	return 0;
 }
 
@@ -118,7 +94,6 @@ void dasd_gendisk_free(struct dasd_block *block)
 		block->gdp->private_data = NULL;
 		put_disk(block->gdp);
 		block->gdp = NULL;
-		blk_mq_free_tag_set(&block->tag_set);
 	}
 }
 
@@ -127,15 +102,14 @@ void dasd_gendisk_free(struct dasd_block *block)
  */
 int dasd_scan_partitions(struct dasd_block *block)
 {
-	struct bdev_handle *bdev_handle;
+	struct block_device *bdev;
 	int rc;
 
-	bdev_handle = bdev_open_by_dev(disk_devt(block->gdp), BLK_OPEN_READ,
-				       NULL, NULL);
-	if (IS_ERR(bdev_handle)) {
+	bdev = blkdev_get_by_dev(disk_devt(block->gdp), FMODE_READ, NULL);
+	if (IS_ERR(bdev)) {
 		DBF_DEV_EVENT(DBF_ERR, block->base,
 			      "scan partitions error, blkdev_get returned %ld",
-			      PTR_ERR(bdev_handle));
+			      PTR_ERR(bdev));
 		return -ENODEV;
 	}
 
@@ -147,15 +121,16 @@ int dasd_scan_partitions(struct dasd_block *block)
 				"scan partitions error, rc %d", rc);
 
 	/*
-	 * Since the matching bdev_release() call to the
-	 * bdev_open_by_path() in this function is not called before
-	 * dasd_destroy_partitions the offline open_count limit needs to be
-	 * increased from 0 to 1. This is done by setting device->bdev_handle
-	 * (see dasd_generic_set_offline). As long as the partition detection
-	 * is running no offline should be allowed. That is why the assignment
-	 * to block->bdev_handle is done AFTER the BLKRRPART ioctl.
+	 * Since the matching blkdev_put call to the blkdev_get in
+	 * this function is not called before dasd_destroy_partitions
+	 * the offline open_count limit needs to be increased from
+	 * 0 to 1. This is done by setting device->bdev (see
+	 * dasd_generic_set_offline). As long as the partition
+	 * detection is running no offline should be allowed. That
+	 * is why the assignment to device->bdev is done AFTER
+	 * the BLKRRPART ioctl.
 	 */
-	block->bdev_handle = bdev_handle;
+	block->bdev = bdev;
 	return 0;
 }
 
@@ -165,21 +140,21 @@ int dasd_scan_partitions(struct dasd_block *block)
  */
 void dasd_destroy_partitions(struct dasd_block *block)
 {
-	struct bdev_handle *bdev_handle;
+	struct block_device *bdev;
 
 	/*
-	 * Get the bdev_handle pointer from the device structure and clear
-	 * device->bdev_handle to lower the offline open_count limit again.
+	 * Get the bdev pointer from the device structure and clear
+	 * device->bdev to lower the offline open_count limit again.
 	 */
-	bdev_handle = block->bdev_handle;
-	block->bdev_handle = NULL;
+	bdev = block->bdev;
+	block->bdev = NULL;
 
-	mutex_lock(&bdev_handle->bdev->bd_disk->open_mutex);
-	bdev_disk_changed(bdev_handle->bdev->bd_disk, true);
-	mutex_unlock(&bdev_handle->bdev->bd_disk->open_mutex);
+	mutex_lock(&bdev->bd_disk->open_mutex);
+	bdev_disk_changed(bdev->bd_disk, true);
+	mutex_unlock(&bdev->bd_disk->open_mutex);
 
 	/* Matching blkdev_put to the blkdev_get in dasd_scan_partitions. */
-	bdev_release(bdev_handle);
+	blkdev_put(bdev, FMODE_READ);
 }
 
 int dasd_gendisk_init(void)

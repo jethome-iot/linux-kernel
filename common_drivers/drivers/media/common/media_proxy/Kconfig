@@ -1,0 +1,13 @@
+#
+# media proxy driver configuration
+#
+
+menu "MediaProxy driver"
+
+config AMLOGIC_MEDIA_PROXY
+	tristate "MediaProxy driver"
+	default n
+	help
+		Select to enable AMLOGIC PROXY driver to
+		manage error event
+endmenu

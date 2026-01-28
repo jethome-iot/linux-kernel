@@ -26,7 +26,7 @@
 #include <asm/cp15.h>
 #include <asm/mach-types.h>
 #include <asm/memblock.h>
-#include <asm/page.h>
+#include <asm/memory.h>
 #include <asm/prom.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
@@ -40,6 +40,10 @@
 #include <asm/mach/map.h>
 
 #include "mm.h"
+
+#ifdef CONFIG_AMLOGIC_MEM_DEBUG
+#include <linux/amlogic/mem_debug.h>
+#endif
 
 #ifdef CONFIG_CPU_CP15_MMU
 unsigned long __init __clear_cr(unsigned long mask)
@@ -143,6 +147,19 @@ int pfn_valid(unsigned long pfn)
 	return 0;
 }
 EXPORT_SYMBOL(pfn_valid);
+
+#if IS_ENABLED(CONFIG_AMLOGIC_DMC_MONITOR_BREAK_GKI)
+int pfn_is_map_memory(unsigned long pfn)
+{
+	phys_addr_t addr = __pfn_to_phys(pfn);
+
+	if (pfn_valid(pfn))
+		return memblock_is_map_memory(addr);
+
+	return 0;
+}
+EXPORT_SYMBOL(pfn_is_map_memory);
+#endif
 #endif
 
 static bool arm_memblock_steal_permitted = true;
@@ -158,10 +175,51 @@ phys_addr_t __init arm_memblock_steal(phys_addr_t size, phys_addr_t align)
 		panic("Failed to steal %pa bytes at %pS\n",
 		      &size, (void *)_RET_IP_);
 
-	memblock_phys_free(phys, size);
+	memblock_free(phys, size);
 	memblock_remove(phys, size);
 
 	return phys;
+}
+
+static void __init arm_initrd_init(void)
+{
+#ifdef CONFIG_BLK_DEV_INITRD
+	phys_addr_t start;
+	unsigned long size;
+
+	initrd_start = initrd_end = 0;
+
+	if (!phys_initrd_size)
+		return;
+
+	/*
+	 * Round the memory region to page boundaries as per free_initrd_mem()
+	 * This allows us to detect whether the pages overlapping the initrd
+	 * are in use, but more importantly, reserves the entire set of pages
+	 * as we don't want these pages allocated for other purposes.
+	 */
+	start = round_down(phys_initrd_start, PAGE_SIZE);
+	size = phys_initrd_size + (phys_initrd_start - start);
+	size = round_up(size, PAGE_SIZE);
+
+	if (!memblock_is_region_memory(start, size)) {
+		pr_err("INITRD: 0x%08llx+0x%08lx is not a memory region - disabling initrd\n",
+		       (u64)start, size);
+		return;
+	}
+
+	if (memblock_is_region_reserved(start, size)) {
+		pr_err("INITRD: 0x%08llx+0x%08lx overlaps in-use memory region - disabling initrd\n",
+		       (u64)start, size);
+		return;
+	}
+
+	memblock_reserve(start, size);
+
+	/* Now convert initrd to virtual addresses */
+	initrd_start = __phys_to_virt(phys_initrd_start);
+	initrd_end = initrd_start + phys_initrd_size;
+#endif
 }
 
 #ifdef CONFIG_CPU_ICACHE_MISMATCH_WORKAROUND
@@ -185,7 +243,7 @@ void __init arm_memblock_init(const struct machine_desc *mdesc)
 	/* Register the kernel text, kernel data and initrd with memblock. */
 	memblock_reserve(__pa(KERNEL_START), KERNEL_END - KERNEL_START);
 
-	reserve_initrd_mem();
+	arm_initrd_init();
 
 	arm_mm_memblock_reserve();
 
@@ -271,7 +329,11 @@ static void __init free_highpages(void)
 void __init mem_init(void)
 {
 #ifdef CONFIG_ARM_LPAE
-	swiotlb_init(max_pfn > arm_dma_pfn_limit, SWIOTLB_VERBOSE);
+	if (swiotlb_force == SWIOTLB_FORCE ||
+	    max_pfn > arm_dma_pfn_limit)
+		swiotlb_init(1);
+	else
+		swiotlb_force = SWIOTLB_NO_FORCE;
 #endif
 
 	set_max_mapnr(pfn_to_page(max_pfn) - mem_map);
@@ -286,6 +348,9 @@ void __init mem_init(void)
 
 	free_highpages();
 
+#ifdef CONFIG_AMLOGIC_MEM_DEBUG
+	dump_mem_layout_boot_phase();
+#endif
 	/*
 	 * Check boundaries twice: Some fundamental inconsistencies can
 	 * be detected at build time already.

@@ -68,7 +68,7 @@ static int smp_request_block(struct mdp5_smp *smp,
 	uint8_t reserved;
 
 	/* we shouldn't be requesting blocks for an in-use client: */
-	WARN_ON(!bitmap_empty(cs, cnt));
+	WARN_ON(bitmap_weight(cs, cnt) > 0);
 
 	reserved = smp->reserved[cid];
 
@@ -370,17 +370,23 @@ void mdp5_smp_dump(struct mdp5_smp *smp, struct drm_printer *p)
 		drm_modeset_unlock(&mdp5_kms->glob_state_lock);
 }
 
+void mdp5_smp_destroy(struct mdp5_smp *smp)
+{
+	kfree(smp);
+}
 
 struct mdp5_smp *mdp5_smp_init(struct mdp5_kms *mdp5_kms, const struct mdp5_smp_block *cfg)
 {
-	struct drm_device *dev = mdp5_kms->dev;
 	struct mdp5_smp_state *state;
 	struct mdp5_global_state *global_state;
-	struct mdp5_smp *smp;
+	struct mdp5_smp *smp = NULL;
+	int ret;
 
-	smp = devm_kzalloc(dev->dev, sizeof(*smp), GFP_KERNEL);
-	if (unlikely(!smp))
-		return ERR_PTR(-ENOMEM);
+	smp = kzalloc(sizeof(*smp), GFP_KERNEL);
+	if (unlikely(!smp)) {
+		ret = -ENOMEM;
+		goto fail;
+	}
 
 	smp->dev = mdp5_kms->dev;
 	smp->blk_cnt = cfg->mmb_count;
@@ -394,4 +400,9 @@ struct mdp5_smp *mdp5_smp_init(struct mdp5_kms *mdp5_kms, const struct mdp5_smp_
 	memcpy(smp->reserved, cfg->reserved, sizeof(smp->reserved));
 
 	return smp;
+fail:
+	if (smp)
+		mdp5_smp_destroy(smp);
+
+	return ERR_PTR(ret);
 }

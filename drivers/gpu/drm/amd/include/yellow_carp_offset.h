@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 #ifndef YELLOW_CARP_OFFSET_H
 #define YELLOW_CARP_OFFSET_H
 
@@ -7,13 +6,15 @@
 #define MAX_SEGMENT                                         6
 
 
-struct IP_BASE_INSTANCE {
+struct IP_BASE_INSTANCE
+{
     unsigned int segment[MAX_SEGMENT];
-} __maybe_unused;
+};
 
-struct IP_BASE {
+struct IP_BASE
+{
     struct IP_BASE_INSTANCE instance[MAX_INSTANCE];
-} __maybe_unused;
+};
 
 
 static const struct IP_BASE ACP_BASE = { { { { 0x02403800, 0x00480000, 0, 0, 0, 0 } },

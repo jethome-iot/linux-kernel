@@ -1,0 +1,190 @@
+/* SPDX-License-Identifier: (GPL-2.0+ OR MIT) */
+/*
+ * Copyright (c) 2019 Amlogic, Inc. All rights reserved.
+ */
+
+#ifndef __MESON_UVM_ALLOCATOR_H
+#define __MESON_UVM_ALLOCATOR_H
+
+#include <linux/device.h>
+#include <linux/dma-direction.h>
+#include <linux/miscdevice.h>
+#include <linux/kref.h>
+#include <linux/mm_types.h>
+#include <linux/mutex.h>
+#include <linux/rbtree.h>
+#include <linux/sched.h>
+#include <linux/ioctl.h>
+#include <linux/types.h>
+
+#include <linux/amlogic/meson_uvm_core.h>
+#include <linux/amlogic/media/vfm/vframe.h>
+#include <linux/amlogic/media/video_sink/v4lvideo_ext.h>
+
+#define MUA_IMM_ALLOC        BIT(UVM_IMM_ALLOC)
+#define MUA_DELAY_ALLOC      BIT(UVM_DELAY_ALLOC)
+#define MUA_FAKE_ALLOC       BIT(UVM_FAKE_ALLOC)
+#define MUA_USAGE_PROTECTED  BIT(UVM_SECURE_ALLOC)
+#define MUA_SKIP_REALLOC     BIT(UVM_SKIP_REALLOC)
+#define MUA_BUFFER_CACHED    BIT(UVM_USAGE_CACHED)
+#define MUA_DETACH           BIT(UVM_DETACH_FLAG)
+/* don't calc uvm size, use size sync form gralloc directly */
+#define MUA_SIZE_SKIP        BIT(UVM_SIZE_SKIP)
+#define ION_FLAG_PROTECTED   BIT(31)
+#define META_DATA_SIZE       (512)
+
+struct mua_device;
+struct mua_buffer;
+
+enum mua_debug_mask {
+	MUA_DEBUG_LEVEL_ERROR,
+	MUA_DEBUG_LEVEL_INFO,
+	MUA_DEBUG_LEVEL_DBG
+};
+
+#define MUA_ERROR       BIT(MUA_DEBUG_LEVEL_ERROR)
+#define MUA_INFO        BIT(MUA_DEBUG_LEVEL_INFO)
+#define MUA_DBG         BIT(MUA_DEBUG_LEVEL_DBG)
+#define MAX_PIPE_LINE	10
+
+struct mua_buffer {
+	struct uvm_buf_obj base;
+	struct mua_device *dev;
+	size_t size;
+	size_t origin_size;
+	struct ion_buffer *ibuffer[2];
+	struct dma_buf *idmabuf[2];
+	struct sg_table *sg_table;
+
+	int byte_stride;
+	u32 width;
+	u32 height;
+	phys_addr_t paddr;
+	int commit_display;
+	u32 index;
+	u32 ion_flags;
+	u32 align;
+};
+
+struct mua_device {
+	struct miscdevice dev;
+	struct rb_root root;
+	struct dma_buf *dummy_dmabuf[MAX_PIPE_LINE];
+	u32 dummy_dmabuf_w[MAX_PIPE_LINE];
+	u32 dummy_dmabuf_h[MAX_PIPE_LINE];
+	struct kref dummy_dmabuf_ref[MAX_PIPE_LINE];
+
+	struct mutex buffer_lock; /* dev mutex */
+	int pid;
+};
+
+struct uvm_alloc_data {
+	int size;
+	int align;
+	unsigned int flags;
+	int v4l2_fd;
+	int fd;
+	int byte_stride;
+	u32 width;
+	u32 height;
+	int scalar;
+	int scaled_buf_size;
+};
+
+struct uvm_pid_data {
+	int pid;
+};
+
+/*get video info from uvm vframe */
+struct uvm_fd_info {
+	int fd;
+	int type;
+	u64 timestamp;
+};
+
+struct uvm_fd_data {
+	int fd;
+	int data;
+};
+
+struct uvm_usage_data {
+	int fd;
+	int uvm_data_usage;
+};
+
+struct uvm_meta_data {
+	int fd;
+	int type;
+	int size;
+	u8 data[META_DATA_SIZE];
+};
+
+struct uvm_hook_data {
+	int mode_type;
+	int shared_fd;
+	char data_buf[META_DATA_SIZE + 1];
+};
+
+struct uvm_sync_info {
+	int src_fd;
+	int dst_fd;
+};
+
+struct uvm_decoder_para {
+	u32 slot_id;
+	u32 width;
+	u32 height;
+	u32 w_align;
+	u32 h_align;
+	u32 size;
+};
+
+union uvm_ioctl_arg {
+	struct uvm_alloc_data alloc_data;
+	struct uvm_pid_data pid_data;
+	struct uvm_fd_data fd_data;
+	struct uvm_fd_info fd_info;
+	struct uvm_usage_data usage_data;
+	struct uvm_meta_data meta_data;
+	struct uvm_hook_data hook_data;
+	struct uvm_decoder_para decode_para;
+	struct uvm_sync_info sync_info;
+};
+
+#define UVM_IOC_MAGIC 'U'
+#define UVM_IOC_ALLOC _IOWR(UVM_IOC_MAGIC, 0, \
+				struct uvm_alloc_data)
+#define UVM_IOC_FREE _IOWR(UVM_IOC_MAGIC, 1, \
+				struct uvm_alloc_data)
+#define UVM_IOC_SET_PID _IOWR(UVM_IOC_MAGIC, 2, \
+				struct uvm_pid_data)
+#define UVM_IOC_SET_FD _IOWR(UVM_IOC_MAGIC, 3, \
+				struct uvm_fd_data)
+#define UVM_IOC_GET_METADATA _IOWR(UVM_IOC_MAGIC, 4, \
+				struct uvm_meta_data)
+#define UVM_IOC_ATTACH _IOWR(UVM_IOC_MAGIC, 5, \
+				struct uvm_hook_data)
+#define UVM_IOC_GET_INFO _IOWR(UVM_IOC_MAGIC, 6, \
+				struct uvm_hook_data)
+#define UVM_IOC_SET_INFO _IOWR(UVM_IOC_MAGIC, 7, \
+				struct uvm_hook_data)
+#define UVM_IOC_DETACH _IOWR(UVM_IOC_MAGIC, 8, \
+				struct uvm_hook_data)
+#define UVM_IOC_SET_USAGE _IOWR(UVM_IOC_MAGIC, 9, \
+				struct uvm_usage_data)
+#define UVM_IOC_GET_USAGE _IOWR(UVM_IOC_MAGIC, 10, \
+				struct uvm_usage_data)
+#define UVM_IOC_GET_VIDEO_INFO _IOWR(UVM_IOC_MAGIC, 11, \
+				struct uvm_fd_info)
+#define UVM_IOC_SET_DECODER_PARA _IOWR(UVM_IOC_MAGIC, 12, \
+				struct uvm_decoder_para)
+#define UVM_IOC_GET_DECODER_PARA _IOWR(UVM_IOC_MAGIC, 13, \
+				struct uvm_decoder_para)
+#define UVM_IOC_SYNC_INFO _IOWR(UVM_IOC_MAGIC, 14, \
+				struct uvm_sync_info)
+
+size_t mua_calc_real_dmabuf_size(struct mua_buffer *buffer);
+int meson_uvm_fill_pattern(struct mua_buffer *buffer, struct dma_buf *dmabuf, void *vaddr);
+
+#endif
+

@@ -103,9 +103,9 @@ int apei_smca_report_x86_error(struct cper_ia_proc_ctx *ctx_info, u64 lapic_id)
 	m.socketid = -1;
 
 	for_each_possible_cpu(cpu) {
-		if (cpu_data(cpu).topo.initial_apicid == lapic_id) {
+		if (cpu_data(cpu).initial_apicid == lapic_id) {
 			m.extcpu = cpu;
-			m.socketid = cpu_data(m.extcpu).topo.pkg_id;
+			m.socketid = cpu_data(m.extcpu).phys_proc_id;
 			break;
 		}
 	}
@@ -188,14 +188,16 @@ retry:
 	/* no more record */
 	if (*record_id == APEI_ERST_INVALID_RECORD_ID)
 		goto out;
-	rc = erst_read_record(*record_id, &rcd.hdr, sizeof(rcd), sizeof(rcd),
-			&CPER_CREATOR_MCE);
+	rc = erst_read(*record_id, &rcd.hdr, sizeof(rcd));
 	/* someone else has cleared the record, try next one */
 	if (rc == -ENOENT)
 		goto retry;
 	else if (rc < 0)
 		goto out;
-
+	/* try to skip other type records in storage */
+	else if (rc != sizeof(rcd) ||
+		 !guid_equal(&rcd.hdr.creator_id, &CPER_CREATOR_MCE))
+		goto retry;
 	memcpy(m, &rcd.mce, sizeof(*m));
 	rc = sizeof(*m);
 out:

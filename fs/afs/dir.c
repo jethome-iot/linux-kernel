@@ -24,29 +24,28 @@ static int afs_readdir(struct file *file, struct dir_context *ctx);
 static int afs_d_revalidate(struct dentry *dentry, unsigned int flags);
 static int afs_d_delete(const struct dentry *dentry);
 static void afs_d_iput(struct dentry *dentry, struct inode *inode);
-static bool afs_lookup_one_filldir(struct dir_context *ctx, const char *name, int nlen,
+static int afs_lookup_one_filldir(struct dir_context *ctx, const char *name, int nlen,
 				  loff_t fpos, u64 ino, unsigned dtype);
-static bool afs_lookup_filldir(struct dir_context *ctx, const char *name, int nlen,
+static int afs_lookup_filldir(struct dir_context *ctx, const char *name, int nlen,
 			      loff_t fpos, u64 ino, unsigned dtype);
-static int afs_create(struct mnt_idmap *idmap, struct inode *dir,
+static int afs_create(struct user_namespace *mnt_userns, struct inode *dir,
 		      struct dentry *dentry, umode_t mode, bool excl);
-static int afs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static int afs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
 		     struct dentry *dentry, umode_t mode);
 static int afs_rmdir(struct inode *dir, struct dentry *dentry);
 static int afs_unlink(struct inode *dir, struct dentry *dentry);
 static int afs_link(struct dentry *from, struct inode *dir,
 		    struct dentry *dentry);
-static int afs_symlink(struct mnt_idmap *idmap, struct inode *dir,
+static int afs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
 		       struct dentry *dentry, const char *content);
-static int afs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+static int afs_rename(struct user_namespace *mnt_userns, struct inode *old_dir,
 		      struct dentry *old_dentry, struct inode *new_dir,
 		      struct dentry *new_dentry, unsigned int flags);
-static bool afs_dir_release_folio(struct folio *folio, gfp_t gfp_flags);
-static void afs_dir_invalidate_folio(struct folio *folio, size_t offset,
-				   size_t length);
+static int afs_dir_releasepage(struct page *page, gfp_t gfp_flags);
+static void afs_dir_invalidatepage(struct page *page, unsigned int offset,
+				   unsigned int length);
 
-static bool afs_dir_dirty_folio(struct address_space *mapping,
-		struct folio *folio)
+static int afs_dir_set_page_dirty(struct page *page)
 {
 	BUG(); /* This should never happen. */
 }
@@ -74,10 +73,9 @@ const struct inode_operations afs_dir_inode_operations = {
 };
 
 const struct address_space_operations afs_dir_aops = {
-	.dirty_folio	= afs_dir_dirty_folio,
-	.release_folio	= afs_dir_release_folio,
-	.invalidate_folio = afs_dir_invalidate_folio,
-	.migrate_folio	= filemap_migrate_folio,
+	.set_page_dirty	= afs_dir_set_page_dirty,
+	.releasepage	= afs_dir_releasepage,
+	.invalidatepage	= afs_dir_invalidatepage,
 };
 
 const struct dentry_operations afs_fs_dentry_operations = {
@@ -105,13 +103,13 @@ struct afs_lookup_cookie {
 };
 
 /*
- * Drop the refs that we're holding on the folios we were reading into.  We've
+ * Drop the refs that we're holding on the pages we were reading into.  We've
  * got refs on the first nr_pages pages.
  */
 static void afs_dir_read_cleanup(struct afs_read *req)
 {
-	struct address_space *mapping = req->vnode->netfs.inode.i_mapping;
-	struct folio *folio;
+	struct address_space *mapping = req->vnode->vfs_inode.i_mapping;
+	struct page *page;
 	pgoff_t last = req->nr_pages - 1;
 
 	XA_STATE(xas, &mapping->i_pages, 0);
@@ -120,56 +118,65 @@ static void afs_dir_read_cleanup(struct afs_read *req)
 		return;
 
 	rcu_read_lock();
-	xas_for_each(&xas, folio, last) {
-		if (xas_retry(&xas, folio))
+	xas_for_each(&xas, page, last) {
+		if (xas_retry(&xas, page))
 			continue;
-		BUG_ON(xa_is_value(folio));
-		ASSERTCMP(folio->mapping, ==, mapping);
+		BUG_ON(xa_is_value(page));
+		BUG_ON(PageCompound(page));
+		ASSERTCMP(page->mapping, ==, mapping);
 
-		folio_put(folio);
+		put_page(page);
 	}
 
 	rcu_read_unlock();
 }
 
 /*
- * check that a directory folio is valid
+ * check that a directory page is valid
  */
-static bool afs_dir_check_folio(struct afs_vnode *dvnode, struct folio *folio,
-				loff_t i_size)
+static bool afs_dir_check_page(struct afs_vnode *dvnode, struct page *page,
+			       loff_t i_size)
 {
-	union afs_xdr_dir_block *block;
-	size_t offset, size;
-	loff_t pos;
+	struct afs_xdr_dir_page *dbuf;
+	loff_t latter, off;
+	int tmp, qty;
 
-	/* Determine how many magic numbers there should be in this folio, but
+	/* Determine how many magic numbers there should be in this page, but
 	 * we must take care because the directory may change size under us.
 	 */
-	pos = folio_pos(folio);
-	if (i_size <= pos)
+	off = page_offset(page);
+	if (i_size <= off)
 		goto checked;
 
-	size = min_t(loff_t, folio_size(folio), i_size - pos);
-	for (offset = 0; offset < size; offset += sizeof(*block)) {
-		block = kmap_local_folio(folio, offset);
-		if (block->hdr.magic != AFS_DIR_MAGIC) {
-			printk("kAFS: %s(%lx): [%llx] bad magic %zx/%zx is %04hx\n",
-			       __func__, dvnode->netfs.inode.i_ino,
-			       pos, offset, size, ntohs(block->hdr.magic));
-			trace_afs_dir_check_failed(dvnode, pos + offset, i_size);
-			kunmap_local(block);
+	latter = i_size - off;
+	if (latter >= PAGE_SIZE)
+		qty = PAGE_SIZE;
+	else
+		qty = latter;
+	qty /= sizeof(union afs_xdr_dir_block);
+
+	/* check them */
+	dbuf = kmap_atomic(page);
+	for (tmp = 0; tmp < qty; tmp++) {
+		if (dbuf->blocks[tmp].hdr.magic != AFS_DIR_MAGIC) {
+			printk("kAFS: %s(%lx): bad magic %d/%d is %04hx\n",
+			       __func__, dvnode->vfs_inode.i_ino, tmp, qty,
+			       ntohs(dbuf->blocks[tmp].hdr.magic));
+			trace_afs_dir_check_failed(dvnode, off, i_size);
+			kunmap(page);
 			trace_afs_file_error(dvnode, -EIO, afs_file_error_dir_bad_magic);
 			goto error;
 		}
 
 		/* Make sure each block is NUL terminated so we can reasonably
-		 * use string functions on it.  The filenames in the folio
+		 * use string functions on it.  The filenames in the page
 		 * *should* be NUL-terminated anyway.
 		 */
-		((u8 *)block)[AFS_DIR_BLOCK_SIZE - 1] = 0;
-
-		kunmap_local(block);
+		((u8 *)&dbuf->blocks[tmp])[AFS_DIR_BLOCK_SIZE - 1] = 0;
 	}
+
+	kunmap_atomic(dbuf);
+
 checked:
 	afs_stat_v(dvnode, n_read_dir);
 	return true;
@@ -183,11 +190,11 @@ error:
  */
 static void afs_dir_dump(struct afs_vnode *dvnode, struct afs_read *req)
 {
-	union afs_xdr_dir_block *block;
-	struct address_space *mapping = dvnode->netfs.inode.i_mapping;
-	struct folio *folio;
+	struct afs_xdr_dir_page *dbuf;
+	struct address_space *mapping = dvnode->vfs_inode.i_mapping;
+	struct page *page;
+	unsigned int i, qty = PAGE_SIZE / sizeof(union afs_xdr_dir_block);
 	pgoff_t last = req->nr_pages - 1;
-	size_t offset, size;
 
 	XA_STATE(xas, &mapping->i_pages, 0);
 
@@ -198,28 +205,30 @@ static void afs_dir_dump(struct afs_vnode *dvnode, struct afs_read *req)
 		req->pos, req->nr_pages,
 		req->iter->iov_offset,  iov_iter_count(req->iter));
 
-	xas_for_each(&xas, folio, last) {
-		if (xas_retry(&xas, folio))
+	xas_for_each(&xas, page, last) {
+		if (xas_retry(&xas, page))
 			continue;
 
-		BUG_ON(folio->mapping != mapping);
+		BUG_ON(PageCompound(page));
+		BUG_ON(page->mapping != mapping);
 
-		size = min_t(loff_t, folio_size(folio), req->actual_len - folio_pos(folio));
-		for (offset = 0; offset < size; offset += sizeof(*block)) {
-			block = kmap_local_folio(folio, offset);
-			pr_warn("[%02lx] %32phN\n", folio->index + offset, block);
-			kunmap_local(block);
+		dbuf = kmap_atomic(page);
+		for (i = 0; i < qty; i++) {
+			union afs_xdr_dir_block *block = &dbuf->blocks[i];
+
+			pr_warn("[%02lx] %32phN\n", page->index * qty + i, block);
 		}
+		kunmap_atomic(dbuf);
 	}
 }
 
 /*
- * Check all the blocks in a directory.  All the folios are held pinned.
+ * Check all the pages in a directory.  All the pages are held pinned.
  */
 static int afs_dir_check(struct afs_vnode *dvnode, struct afs_read *req)
 {
-	struct address_space *mapping = dvnode->netfs.inode.i_mapping;
-	struct folio *folio;
+	struct address_space *mapping = dvnode->vfs_inode.i_mapping;
+	struct page *page;
 	pgoff_t last = req->nr_pages - 1;
 	int ret = 0;
 
@@ -229,13 +238,14 @@ static int afs_dir_check(struct afs_vnode *dvnode, struct afs_read *req)
 		return 0;
 
 	rcu_read_lock();
-	xas_for_each(&xas, folio, last) {
-		if (xas_retry(&xas, folio))
+	xas_for_each(&xas, page, last) {
+		if (xas_retry(&xas, page))
 			continue;
 
-		BUG_ON(folio->mapping != mapping);
+		BUG_ON(PageCompound(page));
+		BUG_ON(page->mapping != mapping);
 
-		if (!afs_dir_check_folio(dvnode, folio, req->actual_len)) {
+		if (!afs_dir_check_page(dvnode, page, req->file_size)) {
 			afs_dir_dump(dvnode, req);
 			ret = -EIO;
 			break;
@@ -264,18 +274,16 @@ static int afs_dir_open(struct inode *inode, struct file *file)
 
 /*
  * Read the directory into the pagecache in one go, scrubbing the previous
- * contents.  The list of folios is returned, pinning them so that they don't
+ * contents.  The list of pages is returned, pinning them so that they don't
  * get reclaimed during the iteration.
  */
 static struct afs_read *afs_read_dir(struct afs_vnode *dvnode, struct key *key)
 	__acquires(&dvnode->validate_lock)
 {
-	struct address_space *mapping = dvnode->netfs.inode.i_mapping;
 	struct afs_read *req;
 	loff_t i_size;
-	int nr_pages, i;
+	int nr_pages, i, n;
 	int ret;
-	loff_t remote_size = 0;
 
 	_enter("");
 
@@ -289,9 +297,7 @@ static struct afs_read *afs_read_dir(struct afs_vnode *dvnode, struct key *key)
 	req->cleanup = afs_dir_read_cleanup;
 
 expand:
-	i_size = i_size_read(&dvnode->netfs.inode);
-	if (i_size < remote_size)
-	    i_size = remote_size;
+	i_size = i_size_read(&dvnode->vfs_inode);
 	if (i_size < 2048) {
 		ret = afs_bad(dvnode, afs_file_error_dir_small);
 		goto error;
@@ -309,35 +315,48 @@ expand:
 	req->actual_len = i_size; /* May change */
 	req->len = nr_pages * PAGE_SIZE; /* We can ask for more than there is */
 	req->data_version = dvnode->status.data_version; /* May change */
-	iov_iter_xarray(&req->def_iter, ITER_DEST, &dvnode->netfs.inode.i_mapping->i_pages,
+	iov_iter_xarray(&req->def_iter, READ, &dvnode->vfs_inode.i_mapping->i_pages,
 			0, i_size);
 	req->iter = &req->def_iter;
 
 	/* Fill in any gaps that we might find where the memory reclaimer has
-	 * been at work and pin all the folios.  If there are any gaps, we will
+	 * been at work and pin all the pages.  If there are any gaps, we will
 	 * need to reread the entire directory contents.
 	 */
 	i = req->nr_pages;
 	while (i < nr_pages) {
-		struct folio *folio;
+		struct page *pages[8], *page;
 
-		folio = filemap_get_folio(mapping, i);
-		if (IS_ERR(folio)) {
+		n = find_get_pages_contig(dvnode->vfs_inode.i_mapping, i,
+					  min_t(unsigned int, nr_pages - i,
+						ARRAY_SIZE(pages)),
+					  pages);
+		_debug("find %u at %u/%u", n, i, nr_pages);
+
+		if (n == 0) {
+			gfp_t gfp = dvnode->vfs_inode.i_mapping->gfp_mask;
+
 			if (test_and_clear_bit(AFS_VNODE_DIR_VALID, &dvnode->flags))
 				afs_stat_v(dvnode, n_inval);
-			folio = __filemap_get_folio(mapping,
-						    i, FGP_LOCK | FGP_CREAT,
-						    mapping->gfp_mask);
-			if (IS_ERR(folio)) {
-				ret = PTR_ERR(folio);
-				goto error;
-			}
-			folio_attach_private(folio, (void *)1);
-			folio_unlock(folio);
-		}
 
-		req->nr_pages += folio_nr_pages(folio);
-		i += folio_nr_pages(folio);
+			ret = -ENOMEM;
+			page = __page_cache_alloc(gfp);
+			if (!page)
+				goto error;
+			ret = add_to_page_cache_lru(page,
+						    dvnode->vfs_inode.i_mapping,
+						    i, gfp);
+			if (ret < 0)
+				goto error;
+
+			attach_page_private(page, (void *)1);
+			unlock_page(page);
+			req->nr_pages++;
+			i++;
+		} else {
+			req->nr_pages += n;
+			i += n;
+		}
 	}
 
 	/* If we're going to reload, we need to lock all the pages to prevent
@@ -367,7 +386,6 @@ expand:
 			 * buffer.
 			 */
 			up_write(&dvnode->validate_lock);
-			remote_size = req->file_size;
 			goto expand;
 		}
 
@@ -406,7 +424,7 @@ static int afs_dir_iterate_block(struct afs_vnode *dvnode,
 	size_t nlen;
 	int tmp;
 
-	_enter("%llx,%x", ctx->pos, blkoff);
+	_enter("%u,%x,%p,,",(unsigned)ctx->pos,blkoff,block);
 
 	curr = (ctx->pos - blkoff) / sizeof(union afs_xdr_dirent);
 
@@ -474,14 +492,6 @@ static int afs_dir_iterate_block(struct afs_vnode *dvnode,
 			continue;
 		}
 
-		/* Don't expose silly rename entries to userspace. */
-		if (nlen > 6 &&
-		    dire->u.name[0] == '.' &&
-		    ctx->actor != afs_lookup_filldir &&
-		    ctx->actor != afs_lookup_one_filldir &&
-		    memcmp(dire->u.name, ".__afs", 6) == 0)
-			continue;
-
 		/* found the next entry */
 		if (!dir_emit(ctx, dire->u.name, nlen,
 			      ntohl(dire->u.vnode),
@@ -506,10 +516,12 @@ static int afs_dir_iterate(struct inode *dir, struct dir_context *ctx,
 			   struct key *key, afs_dataversion_t *_dir_version)
 {
 	struct afs_vnode *dvnode = AFS_FS_I(dir);
+	struct afs_xdr_dir_page *dbuf;
 	union afs_xdr_dir_block *dblock;
 	struct afs_read *req;
-	struct folio *folio;
-	unsigned offset, size;
+	struct page *page;
+	unsigned blkoff, limit;
+	void __rcu **slot;
 	int ret;
 
 	_enter("{%lu},%u,,", dir->i_ino, (unsigned)ctx->pos);
@@ -531,30 +543,43 @@ static int afs_dir_iterate(struct inode *dir, struct dir_context *ctx,
 	/* walk through the blocks in sequence */
 	ret = 0;
 	while (ctx->pos < req->actual_len) {
-		/* Fetch the appropriate folio from the directory and re-add it
+		blkoff = ctx->pos & ~(sizeof(union afs_xdr_dir_block) - 1);
+
+		/* Fetch the appropriate page from the directory and re-add it
 		 * to the LRU.  We have all the pages pinned with an extra ref.
 		 */
-		folio = __filemap_get_folio(dir->i_mapping, ctx->pos / PAGE_SIZE,
-					    FGP_ACCESSED, 0);
-		if (IS_ERR(folio)) {
+		rcu_read_lock();
+		page = NULL;
+		slot = radix_tree_lookup_slot(&dvnode->vfs_inode.i_mapping->i_pages,
+					      blkoff / PAGE_SIZE);
+		if (slot)
+			page = radix_tree_deref_slot(slot);
+		rcu_read_unlock();
+		if (!page) {
 			ret = afs_bad(dvnode, afs_file_error_dir_missing_page);
 			break;
 		}
+		mark_page_accessed(page);
 
-		offset = round_down(ctx->pos, sizeof(*dblock)) - folio_file_pos(folio);
-		size = min_t(loff_t, folio_size(folio),
-			     req->actual_len - folio_file_pos(folio));
+		limit = blkoff & ~(PAGE_SIZE - 1);
 
+		dbuf = kmap(page);
+
+		/* deal with the individual blocks stashed on this page */
 		do {
-			dblock = kmap_local_folio(folio, offset);
-			ret = afs_dir_iterate_block(dvnode, ctx, dblock,
-						    folio_file_pos(folio) + offset);
-			kunmap_local(dblock);
-			if (ret != 1)
+			dblock = &dbuf->blocks[(blkoff % PAGE_SIZE) /
+					       sizeof(union afs_xdr_dir_block)];
+			ret = afs_dir_iterate_block(dvnode, ctx, dblock, blkoff);
+			if (ret != 1) {
+				kunmap(page);
 				goto out;
+			}
 
-		} while (offset += sizeof(*dblock), offset < size);
+			blkoff += sizeof(union afs_xdr_dir_block);
 
+		} while (ctx->pos < dir->i_size && blkoff < limit);
+
+		kunmap(page);
 		ret = 0;
 	}
 
@@ -581,7 +606,7 @@ static int afs_readdir(struct file *file, struct dir_context *ctx)
  * - if afs_dir_iterate_block() spots this function, it'll pass the FID
  *   uniquifier through dtype
  */
-static bool afs_lookup_one_filldir(struct dir_context *ctx, const char *name,
+static int afs_lookup_one_filldir(struct dir_context *ctx, const char *name,
 				  int nlen, loff_t fpos, u64 ino, unsigned dtype)
 {
 	struct afs_lookup_one_cookie *cookie =
@@ -597,16 +622,16 @@ static bool afs_lookup_one_filldir(struct dir_context *ctx, const char *name,
 
 	if (cookie->name.len != nlen ||
 	    memcmp(cookie->name.name, name, nlen) != 0) {
-		_leave(" = true [keep looking]");
-		return true;
+		_leave(" = 0 [no]");
+		return 0;
 	}
 
 	cookie->fid.vnode = ino;
 	cookie->fid.unique = dtype;
 	cookie->found = 1;
 
-	_leave(" = false [found]");
-	return false;
+	_leave(" = -1 [found]");
+	return -1;
 }
 
 /*
@@ -649,11 +674,12 @@ static int afs_do_lookup_one(struct inode *dir, struct dentry *dentry,
  * - if afs_dir_iterate_block() spots this function, it'll pass the FID
  *   uniquifier through dtype
  */
-static bool afs_lookup_filldir(struct dir_context *ctx, const char *name,
+static int afs_lookup_filldir(struct dir_context *ctx, const char *name,
 			      int nlen, loff_t fpos, u64 ino, unsigned dtype)
 {
 	struct afs_lookup_cookie *cookie =
 		container_of(ctx, struct afs_lookup_cookie, ctx);
+	int ret;
 
 	_enter("{%s,%u},%s,%u,,%llu,%u",
 	       cookie->name.name, cookie->name.len, name, nlen,
@@ -675,10 +701,12 @@ static bool afs_lookup_filldir(struct dir_context *ctx, const char *name,
 		cookie->fids[1].unique	= dtype;
 		cookie->found = 1;
 		if (cookie->one_only)
-			return false;
+			return -1;
 	}
 
-	return cookie->nr_fids < 50;
+	ret = cookie->nr_fids >= 50 ? -1 : 0;
+	_leave(" = %d", ret);
+	return ret;
 }
 
 /*
@@ -701,9 +729,8 @@ static void afs_do_lookup_success(struct afs_operation *op)
 			vp = &op->file[0];
 			abort_code = vp->scb.status.abort_code;
 			if (abort_code != 0) {
-				op->call_abort_code = abort_code;
-				afs_op_set_error(op, afs_abort_to_error(abort_code));
-				op->cumul_error.abort_code = abort_code;
+				op->ac.abort_code = abort_code;
+				op->error = afs_abort_to_error(abort_code);
 			}
 			break;
 
@@ -716,8 +743,6 @@ static void afs_do_lookup_success(struct afs_operation *op)
 			break;
 		}
 
-		if (vp->scb.status.abort_code)
-			trace_afs_bulkstat_error(op, &vp->fid, i, vp->scb.status.abort_code);
 		if (!vp->scb.have_status && !vp->scb.have_error)
 			continue;
 
@@ -817,8 +842,8 @@ static struct inode *afs_do_lookup(struct inode *dir, struct dentry *dentry,
 		cookie->fids[i].vid = dvnode->fid.vid;
 	cookie->ctx.actor = afs_lookup_filldir;
 	cookie->name = dentry->d_name;
-	cookie->nr_fids = 2; /* slot 1 is saved for the fid we actually want
-			      * and slot 0 for the directory */
+	cookie->nr_fids = 2; /* slot 0 is saved for the fid we actually want
+			      * and slot 1 for the directory */
 
 	if (!afs_server_supports_ibulk(dvnode))
 		cookie->one_only = true;
@@ -857,14 +882,13 @@ static struct inode *afs_do_lookup(struct inode *dir, struct dentry *dentry,
 	_debug("nr_files %u", op->nr_files);
 
 	/* Need space for examining all the selected files */
+	op->error = -ENOMEM;
 	if (op->nr_files > 2) {
 		op->more_files = kvcalloc(op->nr_files - 2,
 					  sizeof(struct afs_vnode_param),
 					  GFP_KERNEL);
-		if (!op->more_files) {
-			afs_op_nomem(op);
+		if (!op->more_files)
 			goto out_op;
-		}
 
 		for (i = 2; i < op->nr_files; i++) {
 			vp = &op->more_files[i - 2];
@@ -890,14 +914,14 @@ static struct inode *afs_do_lookup(struct inode *dir, struct dentry *dentry,
 	 * lookups contained therein are stored in the reply without aborting
 	 * the whole operation.
 	 */
-	afs_op_set_error(op, -ENOTSUPP);
+	op->error = -ENOTSUPP;
 	if (!cookie->one_only) {
 		op->ops = &afs_inline_bulk_status_operation;
 		afs_begin_vnode_operation(op);
 		afs_wait_for_operation(op);
 	}
 
-	if (afs_op_error(op) == -ENOTSUPP) {
+	if (op->error == -ENOTSUPP) {
 		/* We could try FS.BulkStatus next, but this aborts the entire
 		 * op if any of the lookups fails - so, for the moment, revert
 		 * to FS.FetchStatus for op->file[1].
@@ -907,16 +931,12 @@ static struct inode *afs_do_lookup(struct inode *dir, struct dentry *dentry,
 		afs_begin_vnode_operation(op);
 		afs_wait_for_operation(op);
 	}
+	inode = ERR_PTR(op->error);
 
 out_op:
-	if (!afs_op_error(op)) {
-		if (op->file[1].scb.status.abort_code) {
-			afs_op_accumulate_error(op, -ECONNABORTED,
-						op->file[1].scb.status.abort_code);
-		} else {
-			inode = &op->file[1].vnode->netfs.inode;
-			op->file[1].vnode = NULL;
-		}
+	if (op->error == 0) {
+		inode = &op->file[1].vnode->vfs_inode;
+		op->file[1].vnode = NULL;
 	}
 
 	if (op->file[0].scb.have_status)
@@ -1132,12 +1152,7 @@ static int afs_d_revalidate(struct dentry *dentry, unsigned int flags)
 	dir = AFS_FS_I(d_inode(parent));
 
 	/* validate the parent directory */
-	ret = afs_validate(dir, key);
-	if (ret == -ERESTARTSYS) {
-		dput(parent);
-		key_put(key);
-		return ret;
-	}
+	afs_validate(dir, key);
 
 	if (test_bit(AFS_VNODE_DELETED, &dir->flags)) {
 		_debug("%pd: parent dir deleted", dentry);
@@ -1162,7 +1177,7 @@ static int afs_d_revalidate(struct dentry *dentry, unsigned int flags)
 	afs_stat_v(dir, n_reval);
 
 	/* search the directory for this vnode */
-	ret = afs_do_lookup_one(&dir->netfs.inode, dentry, &fid, key, &dir_version);
+	ret = afs_do_lookup_one(&dir->vfs_inode, dentry, &fid, key, &dir_version);
 	switch (ret) {
 	case 0:
 		/* the filename maps to something */
@@ -1193,7 +1208,7 @@ static int afs_d_revalidate(struct dentry *dentry, unsigned int flags)
 			_debug("%pd: file deleted (uq %u -> %u I:%u)",
 			       dentry, fid.unique,
 			       vnode->fid.unique,
-			       vnode->netfs.inode.i_generation);
+			       vnode->vfs_inode.i_generation);
 			goto not_found;
 		}
 		goto out_valid;
@@ -1276,10 +1291,9 @@ void afs_check_for_remote_deletion(struct afs_operation *op)
 {
 	struct afs_vnode *vnode = op->file[0].vnode;
 
-	switch (afs_op_abort_code(op)) {
+	switch (op->ac.abort_code) {
 	case VNOVNODE:
 		set_bit(AFS_VNODE_DELETED, &vnode->flags);
-		clear_nlink(&vnode->netfs.inode);
 		afs_break_callback(vnode, afs_cb_break_for_deleted);
 	}
 }
@@ -1295,20 +1309,20 @@ static void afs_vnode_new_inode(struct afs_operation *op)
 
 	_enter("");
 
-	ASSERTCMP(afs_op_error(op), ==, 0);
+	ASSERTCMP(op->error, ==, 0);
 
 	inode = afs_iget(op, vp);
 	if (IS_ERR(inode)) {
 		/* ENOMEM or EINTR at a really inconvenient time - just abandon
 		 * the new directory on the server.
 		 */
-		afs_op_accumulate_error(op, PTR_ERR(inode), 0);
+		op->error = PTR_ERR(inode);
 		return;
 	}
 
 	vnode = AFS_FS_I(inode);
 	set_bit(AFS_VNODE_NEW_CONTENT, &vnode->flags);
-	if (!afs_op_error(op))
+	if (!op->error)
 		afs_cache_permit(vnode, op->key, vnode->cb_break, &vp->scb);
 	d_instantiate(op->dentry, inode);
 }
@@ -1342,7 +1356,7 @@ static void afs_create_put(struct afs_operation *op)
 {
 	_enter("op=%08x", op->debug_id);
 
-	if (afs_op_error(op))
+	if (op->error)
 		d_drop(op->dentry);
 }
 
@@ -1358,7 +1372,7 @@ static const struct afs_operation_ops afs_mkdir_operation = {
 /*
  * create a directory on an AFS filesystem
  */
-static int afs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static int afs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
 		     struct dentry *dentry, umode_t mode)
 {
 	struct afs_operation *op;
@@ -1393,9 +1407,9 @@ static void afs_dir_remove_subdir(struct dentry *dentry)
 	if (d_really_is_positive(dentry)) {
 		struct afs_vnode *vnode = AFS_FS_I(d_inode(dentry));
 
-		clear_nlink(&vnode->netfs.inode);
+		clear_nlink(&vnode->vfs_inode);
 		set_bit(AFS_VNODE_DELETED, &vnode->flags);
-		atomic64_set(&vnode->cb_expires_at, AFS_NO_CB_PROMISE);
+		clear_bit(AFS_VNODE_CB_PROMISED, &vnode->flags);
 		clear_bit(AFS_VNODE_DIR_VALID, &vnode->flags);
 	}
 }
@@ -1502,7 +1516,7 @@ static void afs_dir_remove_link(struct afs_operation *op)
 	struct dentry *dentry = op->dentry;
 	int ret;
 
-	if (afs_op_error(op) ||
+	if (op->error != 0 ||
 	    (op->file[1].scb.have_status && op->file[1].scb.have_error))
 		return;
 	if (d_really_is_positive(dentry))
@@ -1512,8 +1526,8 @@ static void afs_dir_remove_link(struct afs_operation *op)
 		/* Already done */
 	} else if (test_bit(AFS_VNODE_DIR_VALID, &dvnode->flags)) {
 		write_seqlock(&vnode->cb_lock);
-		drop_nlink(&vnode->netfs.inode);
-		if (vnode->netfs.inode.i_nlink == 0) {
+		drop_nlink(&vnode->vfs_inode);
+		if (vnode->vfs_inode.i_nlink == 0) {
 			set_bit(AFS_VNODE_DELETED, &vnode->flags);
 			__afs_break_callback(vnode, afs_cb_break_for_unlink);
 		}
@@ -1526,10 +1540,10 @@ static void afs_dir_remove_link(struct afs_operation *op)
 
 		ret = afs_validate(vnode, op->key);
 		if (ret != -ESTALE)
-			afs_op_set_error(op, ret);
+			op->error = ret;
 	}
 
-	_debug("nlink %d [val %d]", vnode->netfs.inode.i_nlink, afs_op_error(op));
+	_debug("nlink %d [val %d]", vnode->vfs_inode.i_nlink, op->error);
 }
 
 static void afs_unlink_success(struct afs_operation *op)
@@ -1560,7 +1574,7 @@ static void afs_unlink_edit_dir(struct afs_operation *op)
 static void afs_unlink_put(struct afs_operation *op)
 {
 	_enter("op=%08x", op->debug_id);
-	if (op->unlink.need_rehash && afs_op_error(op) < 0 && afs_op_error(op) != -ENOENT)
+	if (op->unlink.need_rehash && op->error < 0 && op->error != -ENOENT)
 		d_rehash(op->dentry);
 }
 
@@ -1601,7 +1615,7 @@ static int afs_unlink(struct inode *dir, struct dentry *dentry)
 	/* Try to make sure we have a callback promise on the victim. */
 	ret = afs_validate(vnode, op->key);
 	if (ret < 0) {
-		afs_op_set_error(op, ret);
+		op->error = ret;
 		goto error;
 	}
 
@@ -1610,7 +1624,7 @@ static int afs_unlink(struct inode *dir, struct dentry *dentry)
 		spin_unlock(&dentry->d_lock);
 		/* Start asynchronous writeout of the inode */
 		write_inode_now(d_inode(dentry), 0);
-		afs_op_set_error(op, afs_sillyrename(dvnode, vnode, dentry, op->key));
+		op->error = afs_sillyrename(dvnode, vnode, dentry, op->key);
 		goto error;
 	}
 	if (!d_unhashed(dentry)) {
@@ -1631,7 +1645,7 @@ static int afs_unlink(struct inode *dir, struct dentry *dentry)
 	/* If there was a conflict with a third party, check the status of the
 	 * unlinked vnode.
 	 */
-	if (afs_op_error(op) == 0 && (op->flags & AFS_OPERATION_DIR_CONFLICT)) {
+	if (op->error == 0 && (op->flags & AFS_OPERATION_DIR_CONFLICT)) {
 		op->file[1].update_ctime = false;
 		op->fetch_status.which = 1;
 		op->ops = &afs_fetch_status_operation;
@@ -1657,7 +1671,7 @@ static const struct afs_operation_ops afs_create_operation = {
 /*
  * create a regular file on an AFS filesystem
  */
-static int afs_create(struct mnt_idmap *idmap, struct inode *dir,
+static int afs_create(struct user_namespace *mnt_userns, struct inode *dir,
 		      struct dentry *dentry, umode_t mode, bool excl)
 {
 	struct afs_operation *op;
@@ -1706,14 +1720,14 @@ static void afs_link_success(struct afs_operation *op)
 	afs_update_dentry_version(op, dvp, op->dentry);
 	if (op->dentry_2->d_parent == op->dentry->d_parent)
 		afs_update_dentry_version(op, dvp, op->dentry_2);
-	ihold(&vp->vnode->netfs.inode);
-	d_instantiate(op->dentry, &vp->vnode->netfs.inode);
+	ihold(&vp->vnode->vfs_inode);
+	d_instantiate(op->dentry, &vp->vnode->vfs_inode);
 }
 
 static void afs_link_put(struct afs_operation *op)
 {
 	_enter("op=%08x", op->debug_id);
-	if (afs_op_error(op))
+	if (op->error)
 		d_drop(op->dentry);
 }
 
@@ -1788,7 +1802,7 @@ static const struct afs_operation_ops afs_symlink_operation = {
 /*
  * create a symlink in an AFS filesystem
  */
-static int afs_symlink(struct mnt_idmap *idmap, struct inode *dir,
+static int afs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
 		       struct dentry *dentry, const char *content)
 {
 	struct afs_operation *op;
@@ -1911,7 +1925,7 @@ static void afs_rename_put(struct afs_operation *op)
 	if (op->rename.rehash)
 		d_rehash(op->rename.rehash);
 	dput(op->rename.tmp);
-	if (afs_op_error(op))
+	if (op->error)
 		d_rehash(op->dentry);
 }
 
@@ -1926,7 +1940,7 @@ static const struct afs_operation_ops afs_rename_operation = {
 /*
  * rename a file in an AFS filesystem and/or move it between directories
  */
-static int afs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+static int afs_rename(struct user_namespace *mnt_userns, struct inode *old_dir,
 		      struct dentry *old_dentry, struct inode *new_dir,
 		      struct dentry *new_dentry, unsigned int flags)
 {
@@ -1956,7 +1970,7 @@ static int afs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		return PTR_ERR(op);
 
 	ret = afs_validate(vnode, op->key);
-	afs_op_set_error(op, ret);
+	op->error = ret;
 	if (ret < 0)
 		goto error;
 
@@ -1993,7 +2007,7 @@ static int afs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 			op->rename.tmp = d_alloc(new_dentry->d_parent,
 						 &new_dentry->d_name);
 			if (!op->rename.tmp) {
-				afs_op_nomem(op);
+				op->error = -ENOMEM;
 				goto error;
 			}
 
@@ -2001,7 +2015,7 @@ static int afs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 					      AFS_FS_I(d_inode(new_dentry)),
 					      new_dentry, op->key);
 			if (ret) {
-				afs_op_set_error(op, ret);
+				op->error = ret;
 				goto error;
 			}
 
@@ -2029,40 +2043,42 @@ error:
 }
 
 /*
- * Release a directory folio and clean up its private state if it's not busy
- * - return true if the folio can now be released, false if not
+ * Release a directory page and clean up its private state if it's not busy
+ * - return true if the page can now be released, false if not
  */
-static bool afs_dir_release_folio(struct folio *folio, gfp_t gfp_flags)
+static int afs_dir_releasepage(struct page *page, gfp_t gfp_flags)
 {
-	struct afs_vnode *dvnode = AFS_FS_I(folio_inode(folio));
+	struct afs_vnode *dvnode = AFS_FS_I(page->mapping->host);
 
-	_enter("{{%llx:%llu}[%lu]}", dvnode->fid.vid, dvnode->fid.vnode, folio->index);
+	_enter("{{%llx:%llu}[%lu]}", dvnode->fid.vid, dvnode->fid.vnode, page->index);
 
-	folio_detach_private(folio);
+	detach_page_private(page);
 
 	/* The directory will need reloading. */
 	if (test_and_clear_bit(AFS_VNODE_DIR_VALID, &dvnode->flags))
 		afs_stat_v(dvnode, n_relpg);
-	return true;
+	return 1;
 }
 
 /*
- * Invalidate part or all of a folio.
+ * invalidate part or all of a page
+ * - release a page and clean up its private data if offset is 0 (indicating
+ *   the entire page)
  */
-static void afs_dir_invalidate_folio(struct folio *folio, size_t offset,
-				   size_t length)
+static void afs_dir_invalidatepage(struct page *page, unsigned int offset,
+				   unsigned int length)
 {
-	struct afs_vnode *dvnode = AFS_FS_I(folio_inode(folio));
+	struct afs_vnode *dvnode = AFS_FS_I(page->mapping->host);
 
-	_enter("{%lu},%zu,%zu", folio->index, offset, length);
+	_enter("{%lu},%u,%u", page->index, offset, length);
 
-	BUG_ON(!folio_test_locked(folio));
+	BUG_ON(!PageLocked(page));
 
 	/* The directory will need reloading. */
 	if (test_and_clear_bit(AFS_VNODE_DIR_VALID, &dvnode->flags))
 		afs_stat_v(dvnode, n_inval);
 
-	/* we clean up only if the entire folio is being invalidated */
-	if (offset == 0 && length == folio_size(folio))
-		folio_detach_private(folio);
+	/* we clean up only if the entire page is being invalidated */
+	if (offset == 0 && length == thp_size(page))
+		detach_page_private(page);
 }

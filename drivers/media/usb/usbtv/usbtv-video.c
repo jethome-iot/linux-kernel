@@ -136,8 +136,6 @@ static uint16_t usbtv_norm_to_16f_reg(v4l2_std_id norm)
 		return 0x00a8;
 	if (norm & (V4L2_STD_PAL_M | V4L2_STD_PAL_60))
 		return 0x00bc;
-	if (norm & V4L2_STD_PAL_Nc)
-		return 0x00fe;
 	/* Fallback to automatic detection for other standards */
 	return 0x0000;
 }
@@ -243,8 +241,7 @@ static int usbtv_select_norm(struct usbtv *usbtv, v4l2_std_id norm)
 		static const v4l2_std_id ntsc_mask =
 			V4L2_STD_NTSC | V4L2_STD_NTSC_443;
 		static const v4l2_std_id pal_mask =
-			V4L2_STD_PAL | V4L2_STD_PAL_60 | V4L2_STD_PAL_M |
-			V4L2_STD_PAL_Nc;
+			V4L2_STD_PAL | V4L2_STD_PAL_60 | V4L2_STD_PAL_M;
 
 		if (norm & ntsc_mask)
 			ret = usbtv_set_regs(usbtv, ntsc, ARRAY_SIZE(ntsc));
@@ -726,10 +723,9 @@ static int usbtv_queue_setup(struct vb2_queue *vq,
 {
 	struct usbtv *usbtv = vb2_get_drv_priv(vq);
 	unsigned size = USBTV_CHUNK * usbtv->n_chunks * 2 * sizeof(u32);
-	unsigned int q_num_bufs = vb2_get_num_buffers(vq);
 
-	if (q_num_bufs + *nbuffers < 2)
-		*nbuffers = 2 - q_num_bufs;
+	if (vq->num_buffers + *nbuffers < 2)
+		*nbuffers = 2 - vq->num_buffers;
 	if (*nplanes)
 		return sizes[0] < size ? -EINVAL : 0;
 	*nplanes = 1;

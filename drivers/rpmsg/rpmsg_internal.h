@@ -2,6 +2,7 @@
 /*
  * remote processor messaging bus internals
  *
+ * Copyright (c) 2020 The Linux Foundation.
  * Copyright (C) 2011 Texas Instruments, Inc.
  * Copyright (C) 2011 Google, Inc.
  *
@@ -41,8 +42,8 @@ struct rpmsg_device_ops {
 					    rpmsg_rx_cb_t cb, void *priv,
 					    struct rpmsg_channel_info chinfo);
 
-	int (*announce_create)(struct rpmsg_device *rpdev);
-	int (*announce_destroy)(struct rpmsg_device *rpdev);
+	int (*announce_create)(struct rpmsg_device *ept);
+	int (*announce_destroy)(struct rpmsg_device *ept);
 };
 
 /**
@@ -55,8 +56,8 @@ struct rpmsg_device_ops {
  * @trysendto:		see @rpmsg_trysendto(), optional
  * @trysend_offchannel:	see @rpmsg_trysend_offchannel(), optional
  * @poll:		see @rpmsg_poll(), optional
- * @set_flow_control:	see @rpmsg_set_flow_control(), optional
- * @get_mtu:		see @rpmsg_get_mtu(), optional
+ * @get_signals:	see @rpmsg_get_signals(), optional
+ * @set_signals:	see @rpmsg_set_signals(), optional
  *
  * Indirection table for the operations that a rpmsg backend should implement.
  * In addition to @destroy_ept, the backend must at least implement @send and
@@ -76,8 +77,9 @@ struct rpmsg_endpoint_ops {
 			     void *data, int len);
 	__poll_t (*poll)(struct rpmsg_endpoint *ept, struct file *filp,
 			     poll_table *wait);
-	int (*set_flow_control)(struct rpmsg_endpoint *ept, bool pause, u32 dst);
-	ssize_t (*get_mtu)(struct rpmsg_endpoint *ept);
+	int (*rx_done)(struct rpmsg_endpoint *ept, void *data);
+	int (*get_signals)(struct rpmsg_endpoint *ept);
+	int (*set_signals)(struct rpmsg_endpoint *ept, u32 set, u32 clear);
 };
 
 struct device *rpmsg_find_device(struct device *parent,

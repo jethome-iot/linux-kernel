@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  arch/m68k/mvme147/config.c
  *
@@ -8,6 +7,10 @@
  * Based on:
  *
  *  Copyright (C) 1993 Hamish Macdonald
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file README.legal in the main directory of this archive
+ * for more details.
  */
 
 #include <linux/types.h>
@@ -19,6 +22,7 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <linux/major.h>
+#include <linux/genhd.h>
 #include <linux/rtc.h>
 #include <linux/interrupt.h>
 
@@ -30,7 +34,6 @@
 #include <asm/traps.h>
 #include <asm/machdep.h>
 #include <asm/mvme147hw.h>
-#include <asm/config.h>
 
 
 static void mvme147_get_model(char *model);
@@ -70,7 +73,7 @@ static void mvme147_get_model(char *model)
  * the mvme147 IRQ handling routines.
  */
 
-static void __init mvme147_init_IRQ(void)
+void __init mvme147_init_IRQ(void)
 {
 	m68k_setup_user_interrupt(VEC_USER, 192);
 }

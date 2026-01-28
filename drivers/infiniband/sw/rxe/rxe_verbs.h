@@ -9,6 +9,7 @@
 
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
+#include <rdma/rdma_user_rxe.h>
 #include "rxe_pool.h"
 #include "rxe_task.h"
 #include "rxe_hw_counters.h"
@@ -34,20 +35,19 @@ static inline int psn_compare(u32 psn_a, u32 psn_b)
 
 struct rxe_ucontext {
 	struct ib_ucontext ibuc;
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
 };
 
 struct rxe_pd {
 	struct ib_pd            ibpd;
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
 };
 
 struct rxe_ah {
 	struct ib_ah		ibah;
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
+	struct rxe_pd		*pd;
 	struct rxe_av		av;
-	bool			is_user;
-	int			ah_num;
 };
 
 struct rxe_cqe {
@@ -59,12 +59,13 @@ struct rxe_cqe {
 
 struct rxe_cq {
 	struct ib_cq		ibcq;
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
 	struct rxe_queue	*queue;
 	spinlock_t		cq_lock;
 	u8			notify;
-	bool			is_user;
-	atomic_t		num_wq;
+	bool			is_dying;
+	int			is_user;
+	struct tasklet_struct	comp_task;
 };
 
 enum wqe_state {
@@ -93,7 +94,7 @@ struct rxe_rq {
 
 struct rxe_srq {
 	struct ib_srq		ibsrq;
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
 	struct rxe_pd		*pd;
 	struct rxe_rq		rq;
 	u32			srq_num;
@@ -102,7 +103,17 @@ struct rxe_srq {
 	int			error;
 };
 
+enum rxe_qp_state {
+	QP_STATE_RESET,
+	QP_STATE_INIT,
+	QP_STATE_READY,
+	QP_STATE_DRAIN,		/* req only */
+	QP_STATE_DRAINED,	/* req only */
+	QP_STATE_ERROR
+};
+
 struct rxe_req_info {
+	enum rxe_qp_state	state;
 	int			wqe_index;
 	u32			psn;
 	int			opcode;
@@ -111,7 +122,6 @@ struct rxe_req_info {
 	int			need_rd_atomic;
 	int			wait_psn;
 	int			need_retry;
-	int			wait_for_rnr_timer;
 	int			noack_pkts;
 	struct rxe_task		task;
 };
@@ -143,25 +153,21 @@ struct resp_res {
 
 	union {
 		struct {
-			u64		orig_val;
+			struct sk_buff	*skb;
 		} atomic;
 		struct {
+			struct rxe_mr	*mr;
 			u64		va_org;
 			u32		rkey;
 			u32		length;
 			u64		va;
 			u32		resid;
 		} read;
-		struct {
-			u32		length;
-			u64		va;
-			u8		type;
-			u8		level;
-		} flush;
 	};
 };
 
 struct rxe_resp_info {
+	enum rxe_qp_state	state;
 	u32			msn;
 	u32			psn;
 	u32			ack_psn;
@@ -182,6 +188,7 @@ struct rxe_resp_info {
 	u32			resid;
 	u32			rkey;
 	u32			length;
+	u64			atomic_orig;
 
 	/* SRQ only */
 	struct {
@@ -201,7 +208,7 @@ struct rxe_resp_info {
 
 struct rxe_qp {
 	struct ib_qp		ibqp;
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
 	struct ib_qp_attr	attr;
 	unsigned int		valid;
 	unsigned int		mtu;
@@ -224,10 +231,13 @@ struct rxe_qp {
 	struct rxe_av		pri_av;
 	struct rxe_av		alt_av;
 
-	atomic_t		mcg_num;
+	/* list of mcast groups qp has joined (for cleanup) */
+	struct list_head	grp_list;
+	spinlock_t		grp_lock; /* guard grp_list */
 
 	struct sk_buff_head	req_pkts;
 	struct sk_buff_head	resp_pkts;
+	struct sk_buff_head	send_pkts;
 
 	struct rxe_req_info	req;
 	struct rxe_comp_info	comp;
@@ -253,26 +263,17 @@ struct rxe_qp {
 	struct execute_work	cleanup_work;
 };
 
-enum {
-	RXE_ACCESS_REMOTE	= IB_ACCESS_REMOTE_READ
-				| IB_ACCESS_REMOTE_WRITE
-				| IB_ACCESS_REMOTE_ATOMIC,
-	RXE_ACCESS_SUPPORTED_MR	= RXE_ACCESS_REMOTE
-				| IB_ACCESS_LOCAL_WRITE
-				| IB_ACCESS_MW_BIND
-				| IB_ACCESS_ON_DEMAND
-				| IB_ACCESS_FLUSH_GLOBAL
-				| IB_ACCESS_FLUSH_PERSISTENT
-				| IB_ACCESS_OPTIONAL,
-	RXE_ACCESS_SUPPORTED_QP	= RXE_ACCESS_SUPPORTED_MR,
-	RXE_ACCESS_SUPPORTED_MW	= RXE_ACCESS_SUPPORTED_MR
-				| IB_ZERO_BASED,
-};
-
 enum rxe_mr_state {
+	RXE_MR_STATE_ZOMBIE,
 	RXE_MR_STATE_INVALID,
 	RXE_MR_STATE_FREE,
 	RXE_MR_STATE_VALID,
+};
+
+enum rxe_mr_type {
+	RXE_MR_TYPE_NONE,
+	RXE_MR_TYPE_DMA,
+	RXE_MR_TYPE_MR,
 };
 
 enum rxe_mr_copy_dir {
@@ -285,9 +286,15 @@ enum rxe_mr_lookup_type {
 	RXE_LOOKUP_REMOTE,
 };
 
-enum rxe_rereg {
-	RXE_MR_REREG_SUPPORTED	= IB_MR_REREG_PD
-				| IB_MR_REREG_ACCESS,
+#define RXE_BUF_PER_MAP		(PAGE_SIZE / sizeof(struct rxe_phys_buf))
+
+struct rxe_phys_buf {
+	u64      addr;
+	u64      size;
+};
+
+struct rxe_map {
+	struct rxe_phys_buf	buf[RXE_BUF_PER_MAP];
 };
 
 static inline int rkey_is_mw(u32 rkey)
@@ -298,7 +305,7 @@ static inline int rkey_is_mw(u32 rkey)
 }
 
 struct rxe_mr {
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
 	struct ib_mr		ibmr;
 
 	struct ib_umem		*umem;
@@ -306,23 +313,28 @@ struct rxe_mr {
 	u32			lkey;
 	u32			rkey;
 	enum rxe_mr_state	state;
+	enum rxe_mr_type	type;
+	u64			va;
+	u64			iova;
+	size_t			length;
+	u32			offset;
 	int			access;
-	atomic_t		num_mw;
 
-	unsigned int		page_offset;
-	unsigned int		page_shift;
-	u64			page_mask;
+	int			page_shift;
+	int			page_mask;
+	int			map_shift;
+	int			map_mask;
 
 	u32			num_buf;
 	u32			nbuf;
 
-	struct xarray		page_list;
-};
+	u32			max_buf;
+	u32			num_map;
 
-static inline unsigned int mr_page_size(struct rxe_mr *mr)
-{
-	return mr ? mr->ibmr.page_size : PAGE_SIZE;
-}
+	atomic_t		num_mw;
+
+	struct rxe_map		**map;
+};
 
 enum rxe_mw_state {
 	RXE_MW_STATE_INVALID	= RXE_MR_STATE_INVALID,
@@ -332,7 +344,7 @@ enum rxe_mw_state {
 
 struct rxe_mw {
 	struct ib_mw		ibmw;
-	struct rxe_pool_elem	elem;
+	struct rxe_pool_entry	pelem;
 	spinlock_t		lock;
 	enum rxe_mw_state	state;
 	struct rxe_qp		*qp; /* Type 2 only */
@@ -343,20 +355,23 @@ struct rxe_mw {
 	u64			length;
 };
 
-struct rxe_mcg {
-	struct rb_node		node;
-	struct kref		ref_cnt;
+struct rxe_mc_grp {
+	struct rxe_pool_entry	pelem;
+	spinlock_t		mcg_lock; /* guard group */
 	struct rxe_dev		*rxe;
 	struct list_head	qp_list;
 	union ib_gid		mgid;
-	atomic_t		qp_num;
+	int			num_qp;
 	u32			qkey;
 	u16			pkey;
 };
 
-struct rxe_mca {
+struct rxe_mc_elem {
+	struct rxe_pool_entry	pelem;
 	struct list_head	qp_list;
+	struct list_head	grp_list;
 	struct rxe_qp		*qp;
+	struct rxe_mc_grp	*grp;
 };
 
 struct rxe_port {
@@ -366,6 +381,7 @@ struct rxe_port {
 	spinlock_t		port_lock; /* guard port */
 	unsigned int		mtu_cap;
 	/* special QPs */
+	u32			qp_smi_index;
 	u32			qp_gsi_index;
 };
 
@@ -378,6 +394,8 @@ struct rxe_dev {
 
 	struct net_device	*ndev;
 
+	int			xmit_errors;
+
 	struct rxe_pool		uc_pool;
 	struct rxe_pool		pd_pool;
 	struct rxe_pool		ah_pool;
@@ -386,12 +404,8 @@ struct rxe_dev {
 	struct rxe_pool		cq_pool;
 	struct rxe_pool		mr_pool;
 	struct rxe_pool		mw_pool;
-
-	/* multicast support */
-	spinlock_t		mcg_lock;
-	struct rb_root		mcg_tree;
-	atomic_t		mcg_num;
-	atomic_t		mcg_attach;
+	struct rxe_pool		mc_grp_pool;
+	struct rxe_pool		mc_elem_pool;
 
 	spinlock_t		pending_lock; /* guard pending_mmaps */
 	struct list_head	pending_mmaps;
@@ -455,11 +469,6 @@ static inline struct rxe_mw *to_rmw(struct ib_mw *mw)
 	return mw ? container_of(mw, struct rxe_mw, ibmw) : NULL;
 }
 
-static inline struct rxe_pd *rxe_ah_pd(struct rxe_ah *ah)
-{
-	return to_rpd(ah->ibah.pd);
-}
-
 static inline struct rxe_pd *mr_pd(struct rxe_mr *mr)
 {
 	return to_rpd(mr->ibmr.pd);
@@ -471,5 +480,7 @@ static inline struct rxe_pd *rxe_mw_pd(struct rxe_mw *mw)
 }
 
 int rxe_register_device(struct rxe_dev *rxe, const char *ibdev_name);
+
+void rxe_mc_cleanup(struct rxe_pool_entry *arg);
 
 #endif /* RXE_VERBS_H */

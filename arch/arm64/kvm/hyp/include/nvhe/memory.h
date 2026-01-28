@@ -7,9 +7,16 @@
 
 #include <linux/types.h>
 
+/*
+ * Accesses to struct hyp_page flags are serialized by the host stage-2
+ * page-table lock.
+ */
+#define MODULE_OWNED_PAGE		BIT(0)
+
 struct hyp_page {
 	unsigned short refcount;
-	unsigned short order;
+	u8 order;
+	u8 flags;
 };
 
 extern u64 __hyp_vmemmap;

@@ -11,7 +11,6 @@
 #include <linux/io.h>
 #include <linux/mailbox_controller.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_wakeirq.h>
 
@@ -206,6 +205,7 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct stm32_ipcc *ipcc;
+	struct resource *res;
 	unsigned long i;
 	int ret;
 	u32 ip_ver;
@@ -235,7 +235,8 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 	}
 
 	/* regs */
-	ipcc->reg_base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	ipcc->reg_base = devm_ioremap_resource(dev, res);
 	if (IS_ERR(ipcc->reg_base))
 		return PTR_ERR(ipcc->reg_base);
 
@@ -331,7 +332,7 @@ err_clk:
 	return ret;
 }
 
-static void stm32_ipcc_remove(struct platform_device *pdev)
+static int stm32_ipcc_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 
@@ -339,6 +340,8 @@ static void stm32_ipcc_remove(struct platform_device *pdev)
 		dev_pm_clear_wake_irq(&pdev->dev);
 
 	device_set_wakeup_capable(dev, false);
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -379,7 +382,7 @@ static struct platform_driver stm32_ipcc_driver = {
 		.of_match_table = stm32_ipcc_of_match,
 	},
 	.probe		= stm32_ipcc_probe,
-	.remove_new	= stm32_ipcc_remove,
+	.remove		= stm32_ipcc_remove,
 };
 
 module_platform_driver(stm32_ipcc_driver);

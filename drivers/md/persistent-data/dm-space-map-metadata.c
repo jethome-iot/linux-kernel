@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011 Red Hat, Inc.
  *
@@ -95,8 +94,8 @@ struct block_op {
 };
 
 struct bop_ring_buffer {
-	unsigned int begin;
-	unsigned int end;
+	unsigned begin;
+	unsigned end;
 	struct block_op bops[MAX_RECURSIVE_ALLOCATIONS + 1];
 };
 
@@ -111,10 +110,9 @@ static bool brb_empty(struct bop_ring_buffer *brb)
 	return brb->begin == brb->end;
 }
 
-static unsigned int brb_next(struct bop_ring_buffer *brb, unsigned int old)
+static unsigned brb_next(struct bop_ring_buffer *brb, unsigned old)
 {
-	unsigned int r = old + 1;
-
+	unsigned r = old + 1;
 	return r >= ARRAY_SIZE(brb->bops) ? 0 : r;
 }
 
@@ -122,7 +120,7 @@ static int brb_push(struct bop_ring_buffer *brb,
 		    enum block_op_type type, dm_block_t b, dm_block_t e)
 {
 	struct block_op *bop;
-	unsigned int next = brb_next(brb, brb->end);
+	unsigned next = brb_next(brb, brb->end);
 
 	/*
 	 * We don't allow the last bop to be filled, this way we can
@@ -173,8 +171,8 @@ struct sm_metadata {
 
 	dm_block_t begin;
 
-	unsigned int recursion_count;
-	unsigned int allocated_this_transaction;
+	unsigned recursion_count;
+	unsigned allocated_this_transaction;
 	struct bop_ring_buffer uncommitted;
 
 	struct threshold threshold;
@@ -183,7 +181,6 @@ struct sm_metadata {
 static int add_bop(struct sm_metadata *smm, enum block_op_type type, dm_block_t b, dm_block_t e)
 {
 	int r = brb_push(&smm->uncommitted, type, b, e);
-
 	if (r) {
 		DMERR("too many recursive allocations");
 		return -ENOMEM;
@@ -303,9 +300,9 @@ static int sm_metadata_get_count(struct dm_space_map *sm, dm_block_t b,
 				 uint32_t *result)
 {
 	int r;
-	unsigned int i;
+	unsigned i;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
-	unsigned int adjustment = 0;
+	unsigned adjustment = 0;
 
 	/*
 	 * We may have some uncommitted adjustments to add.  This list
@@ -343,7 +340,7 @@ static int sm_metadata_count_is_more_than_one(struct dm_space_map *sm,
 					      dm_block_t b, int *result)
 {
 	int r, adjustment = 0;
-	unsigned int i;
+	unsigned i;
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 	uint32_t rc;
 
@@ -489,7 +486,6 @@ static int sm_metadata_new_block(struct dm_space_map *sm, dm_block_t *b)
 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
 
 	int r = sm_metadata_new_block_(sm, b);
-
 	if (r) {
 		DMERR_LIMIT("unable to allocate new metadata block");
 		return r;

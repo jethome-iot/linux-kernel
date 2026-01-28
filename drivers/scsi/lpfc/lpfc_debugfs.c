@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2023 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2021 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  *
  * Copyright (C) 2007-2015 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -2259,15 +2259,11 @@ lpfc_debugfs_ras_log_open(struct inode *inode, struct file *file)
 		goto out;
 	}
 	spin_unlock_irq(&phba->hbalock);
-
-	if (check_mul_overflow(LPFC_RAS_MIN_BUFF_POST_SIZE,
-			       phba->cfg_ras_fwlog_buffsize, &size))
-		goto out;
-
-	debug = kzalloc(sizeof(*debug), GFP_KERNEL);
+	debug = kmalloc(sizeof(*debug), GFP_KERNEL);
 	if (!debug)
 		goto out;
 
+	size = LPFC_RAS_MIN_BUFF_POST_SIZE * phba->cfg_ras_fwlog_buffsize;
 	debug->buffer = vmalloc(size);
 	if (!debug->buffer)
 		goto free_debug;
@@ -5163,7 +5159,7 @@ error_out:
 static int
 lpfc_idiag_extacc_avail_get(struct lpfc_hba *phba, char *pbuffer, int len)
 {
-	uint16_t ext_cnt = 0, ext_size = 0;
+	uint16_t ext_cnt, ext_size;
 
 	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
 			"\nAvailable Extents Information:\n");
@@ -5491,7 +5487,7 @@ lpfc_cgn_buffer_read(struct file *file, char __user *buf, size_t nbytes,
 		if (len > (LPFC_CGN_BUF_SIZE - LPFC_DEBUG_OUT_LINE_SZ)) {
 			len += scnprintf(buffer + len, LPFC_CGN_BUF_SIZE - len,
 					 "Truncated . . .\n");
-			goto out;
+			break;
 		}
 		len += scnprintf(buffer + len, LPFC_CGN_BUF_SIZE - len,
 				 "%03x: %08x %08x %08x %08x "
@@ -5502,17 +5498,6 @@ lpfc_cgn_buffer_read(struct file *file, char __user *buf, size_t nbytes,
 		cnt += 32;
 		ptr += 8;
 	}
-	if (len > (LPFC_CGN_BUF_SIZE - LPFC_DEBUG_OUT_LINE_SZ)) {
-		len += scnprintf(buffer + len, LPFC_CGN_BUF_SIZE - len,
-				 "Truncated . . .\n");
-		goto out;
-	}
-	len += scnprintf(buffer + len, LPFC_CGN_BUF_SIZE - len,
-			 "Parameter Data\n");
-	ptr = (uint32_t *)&phba->cgn_p;
-	len += scnprintf(buffer + len, LPFC_CGN_BUF_SIZE - len,
-			 "%08x %08x %08x %08x\n",
-			 *ptr, *(ptr + 1), *(ptr + 2), *(ptr + 3));
 out:
 	return simple_read_from_buffer(buf, nbytes, ppos, buffer, len);
 }
@@ -6240,9 +6225,9 @@ lpfc_debugfs_initialize(struct lpfc_vport *vport)
 				 phba->hba_debugfs_root,
 				 phba, &lpfc_debugfs_op_slow_ring_trc);
 		if (!phba->slow_ring_trc) {
-			phba->slow_ring_trc = kcalloc(
-				lpfc_debugfs_max_slow_ring_trc,
-				sizeof(struct lpfc_debugfs_trc),
+			phba->slow_ring_trc = kmalloc(
+				(sizeof(struct lpfc_debugfs_trc) *
+				lpfc_debugfs_max_slow_ring_trc),
 				GFP_KERNEL);
 			if (!phba->slow_ring_trc) {
 				lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
@@ -6251,6 +6236,9 @@ lpfc_debugfs_initialize(struct lpfc_vport *vport)
 				goto debug_failed;
 			}
 			atomic_set(&phba->slow_ring_trc_cnt, 0);
+			memset(phba->slow_ring_trc, 0,
+				(sizeof(struct lpfc_debugfs_trc) *
+				lpfc_debugfs_max_slow_ring_trc));
 		}
 
 		snprintf(name, sizeof(name), "nvmeio_trc");

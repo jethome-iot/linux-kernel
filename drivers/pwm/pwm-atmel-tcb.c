@@ -19,7 +19,8 @@
 #include <linux/mfd/syscon.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <soc/at91/atmel_tcb.h>
@@ -33,6 +34,7 @@
 				 ATMEL_TC_BEEVT | ATMEL_TC_BSWTRG)
 
 struct atmel_tcb_pwm_device {
+	enum pwm_polarity polarity;	/* PWM polarity */
 	unsigned div;			/* PWM clock divider */
 	unsigned duty;			/* PWM duty expressed in clk cycles */
 	unsigned period;		/* PWM period expressed in clk cycles */
@@ -55,29 +57,48 @@ struct atmel_tcb_pwm_chip {
 	struct clk *clk;
 	struct clk *gclk;
 	struct clk *slow_clk;
-	struct atmel_tcb_pwm_device pwms[NPWM];
+	struct atmel_tcb_pwm_device *pwms[NPWM];
 	struct atmel_tcb_channel bkup;
 };
 
-static const u8 atmel_tcb_divisors[] = { 2, 8, 32, 128, 0, };
+const u8 atmel_tcb_divisors[] = { 2, 8, 32, 128, 0, };
 
 static inline struct atmel_tcb_pwm_chip *to_tcb_chip(struct pwm_chip *chip)
 {
 	return container_of(chip, struct atmel_tcb_pwm_chip, chip);
 }
 
+static int atmel_tcb_pwm_set_polarity(struct pwm_chip *chip,
+				      struct pwm_device *pwm,
+				      enum pwm_polarity polarity)
+{
+	struct atmel_tcb_pwm_device *tcbpwm = pwm_get_chip_data(pwm);
+
+	tcbpwm->polarity = polarity;
+
+	return 0;
+}
+
 static int atmel_tcb_pwm_request(struct pwm_chip *chip,
 				 struct pwm_device *pwm)
 {
 	struct atmel_tcb_pwm_chip *tcbpwmc = to_tcb_chip(chip);
-	struct atmel_tcb_pwm_device *tcbpwm = &tcbpwmc->pwms[pwm->hwpwm];
+	struct atmel_tcb_pwm_device *tcbpwm;
 	unsigned cmr;
 	int ret;
 
-	ret = clk_prepare_enable(tcbpwmc->clk);
-	if (ret)
-		return ret;
+	tcbpwm = devm_kzalloc(chip->dev, sizeof(*tcbpwm), GFP_KERNEL);
+	if (!tcbpwm)
+		return -ENOMEM;
 
+	ret = clk_prepare_enable(tcbpwmc->clk);
+	if (ret) {
+		devm_kfree(chip->dev, tcbpwm);
+		return ret;
+	}
+
+	pwm_set_chip_data(pwm, tcbpwm);
+	tcbpwm->polarity = PWM_POLARITY_NORMAL;
 	tcbpwm->duty = 0;
 	tcbpwm->period = 0;
 	tcbpwm->div = 0;
@@ -110,22 +131,27 @@ static int atmel_tcb_pwm_request(struct pwm_chip *chip,
 	regmap_write(tcbpwmc->regmap, ATMEL_TC_REG(tcbpwmc->channel, CMR), cmr);
 	spin_unlock(&tcbpwmc->lock);
 
+	tcbpwmc->pwms[pwm->hwpwm] = tcbpwm;
+
 	return 0;
 }
 
 static void atmel_tcb_pwm_free(struct pwm_chip *chip, struct pwm_device *pwm)
 {
 	struct atmel_tcb_pwm_chip *tcbpwmc = to_tcb_chip(chip);
+	struct atmel_tcb_pwm_device *tcbpwm = pwm_get_chip_data(pwm);
 
 	clk_disable_unprepare(tcbpwmc->clk);
+	tcbpwmc->pwms[pwm->hwpwm] = NULL;
+	devm_kfree(chip->dev, tcbpwm);
 }
 
-static void atmel_tcb_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm,
-				  enum pwm_polarity polarity)
+static void atmel_tcb_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 {
 	struct atmel_tcb_pwm_chip *tcbpwmc = to_tcb_chip(chip);
-	struct atmel_tcb_pwm_device *tcbpwm = &tcbpwmc->pwms[pwm->hwpwm];
+	struct atmel_tcb_pwm_device *tcbpwm = pwm_get_chip_data(pwm);
 	unsigned cmr;
+	enum pwm_polarity polarity = tcbpwm->polarity;
 
 	/*
 	 * If duty is 0 the timer will be stopped and we have to
@@ -177,12 +203,12 @@ static void atmel_tcb_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm,
 	spin_unlock(&tcbpwmc->lock);
 }
 
-static int atmel_tcb_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm,
-				enum pwm_polarity polarity)
+static int atmel_tcb_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 {
 	struct atmel_tcb_pwm_chip *tcbpwmc = to_tcb_chip(chip);
-	struct atmel_tcb_pwm_device *tcbpwm = &tcbpwmc->pwms[pwm->hwpwm];
+	struct atmel_tcb_pwm_device *tcbpwm = pwm_get_chip_data(pwm);
 	u32 cmr;
+	enum pwm_polarity polarity = tcbpwm->polarity;
 
 	/*
 	 * If duty is 0 the timer will be stopped and we have to
@@ -265,7 +291,7 @@ static int atmel_tcb_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 				int duty_ns, int period_ns)
 {
 	struct atmel_tcb_pwm_chip *tcbpwmc = to_tcb_chip(chip);
-	struct atmel_tcb_pwm_device *tcbpwm = &tcbpwmc->pwms[pwm->hwpwm];
+	struct atmel_tcb_pwm_device *tcbpwm = pwm_get_chip_data(pwm);
 	struct atmel_tcb_pwm_device *atcbpwm = NULL;
 	int i = 0;
 	int slowclk = 0;
@@ -278,7 +304,7 @@ static int atmel_tcb_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	/*
 	 * Find best clk divisor:
 	 * the smallest divisor which can fulfill the period_ns requirements.
-	 * If there is a gclk, the first divisor is actually the gclk selector
+	 * If there is a gclk, the first divisor is actuallly the gclk selector
 	 */
 	if (tcbpwmc->gclk)
 		i = 1;
@@ -312,9 +338,9 @@ static int atmel_tcb_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	period = div_u64(period_ns, min);
 
 	if (pwm->hwpwm == 0)
-		atcbpwm = &tcbpwmc->pwms[1];
+		atcbpwm = tcbpwmc->pwms[1];
 	else
-		atcbpwm = &tcbpwmc->pwms[0];
+		atcbpwm = tcbpwmc->pwms[0];
 
 	/*
 	 * PWM devices provided by the TCB driver are grouped by 2.
@@ -345,8 +371,11 @@ static int atmel_tcb_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	int duty_cycle, period;
 	int ret;
 
+	/* This function only sets a flag in driver data */
+	atmel_tcb_pwm_set_polarity(chip, pwm, state->polarity);
+
 	if (!state->enabled) {
-		atmel_tcb_pwm_disable(chip, pwm, state->polarity);
+		atmel_tcb_pwm_disable(chip, pwm);
 		return 0;
 	}
 
@@ -357,13 +386,14 @@ static int atmel_tcb_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (ret)
 		return ret;
 
-	return atmel_tcb_pwm_enable(chip, pwm, state->polarity);
+	return atmel_tcb_pwm_enable(chip, pwm);
 }
 
 static const struct pwm_ops atmel_tcb_pwm_ops = {
 	.request = atmel_tcb_pwm_request,
 	.free = atmel_tcb_pwm_free,
 	.apply = atmel_tcb_pwm_apply,
+	.owner = THIS_MODULE,
 };
 
 static struct atmel_tcb_config tcb_rm9200_config = {
@@ -489,6 +519,7 @@ static const struct of_device_id atmel_tcb_pwm_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, atmel_tcb_pwm_dt_ids);
 
+#ifdef CONFIG_PM_SLEEP
 static int atmel_tcb_pwm_suspend(struct device *dev)
 {
 	struct atmel_tcb_pwm_chip *tcbpwm = dev_get_drvdata(dev);
@@ -521,15 +552,16 @@ static int atmel_tcb_pwm_resume(struct device *dev)
 
 	return 0;
 }
+#endif
 
-static DEFINE_SIMPLE_DEV_PM_OPS(atmel_tcb_pwm_pm_ops, atmel_tcb_pwm_suspend,
-				atmel_tcb_pwm_resume);
+static SIMPLE_DEV_PM_OPS(atmel_tcb_pwm_pm_ops, atmel_tcb_pwm_suspend,
+			 atmel_tcb_pwm_resume);
 
 static struct platform_driver atmel_tcb_pwm_driver = {
 	.driver = {
 		.name = "atmel-tcb-pwm",
 		.of_match_table = atmel_tcb_pwm_dt_ids,
-		.pm = pm_ptr(&atmel_tcb_pwm_pm_ops),
+		.pm = &atmel_tcb_pwm_pm_ops,
 	},
 	.probe = atmel_tcb_pwm_probe,
 	.remove_new = atmel_tcb_pwm_remove,

@@ -1,0 +1,32 @@
+/ {
+	hk_ir_maps: hk_ir_maps {
+		map_num = <1>;
+		map0 = <&map_hk_rc>;
+
+		map_hk_rc: map_hk_rc{
+			mapname = "map_hk_rc";
+			customcode = <0x4DB2>;
+			release_delay = <80>;
+			size  = <12>;   /*keymap size*/
+			keymap = <REMOTE_KEY(0xDC, KEY_POWER)
+					REMOTE_KEY(0x88, KEY_MUTE)
+					REMOTE_KEY(0x82, KEY_HOME)
+					REMOTE_KEY(0xCE, KEY_ENTER)
+					REMOTE_KEY(0xCA, KEY_UP)
+					REMOTE_KEY(0x99, KEY_LEFT)
+					REMOTE_KEY(0xC1, KEY_RIGHT)
+					REMOTE_KEY(0xD2, KEY_DOWN)
+					REMOTE_KEY(0xC5, KEY_MENU)
+					REMOTE_KEY(0x9A, KEY_BACK)
+					REMOTE_KEY(0x81, KEY_VOLUMEDOWN)
+					REMOTE_KEY(0x80, KEY_VOLUMEUP)>;
+		};
+	};
+
+	hk_ir_wakeup_key: hk_ir_wakeup_key {
+		key_num = <1>;
+		/*framecode  wakeup_reason  report_event*/
+		wakeup_key = <0x23dc4db2 IR_NORMAL KEY_POWER
+					  >;
+	};
+};

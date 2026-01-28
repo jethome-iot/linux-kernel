@@ -921,26 +921,20 @@ extern unsigned long xcall_flush_dcache_page_cheetah;
 #endif
 extern unsigned long xcall_flush_dcache_page_spitfire;
 
-static inline void __local_flush_dcache_folio(struct folio *folio)
+static inline void __local_flush_dcache_page(struct page *page)
 {
-	unsigned int i, nr = folio_nr_pages(folio);
-
 #ifdef DCACHE_ALIASING_POSSIBLE
-	for (i = 0; i < nr; i++)
-		__flush_dcache_page(folio_address(folio) + i * PAGE_SIZE,
+	__flush_dcache_page(page_address(page),
 			    ((tlb_type == spitfire) &&
-			     folio_flush_mapping(folio) != NULL));
+			     page_mapping_file(page) != NULL));
 #else
-	if (folio_flush_mapping(folio) != NULL &&
-	    tlb_type == spitfire) {
-		unsigned long pfn = folio_pfn(folio)
-		for (i = 0; i < nr; i++)
-			__flush_icache_page((pfn + i) * PAGE_SIZE);
-	}
+	if (page_mapping_file(page) != NULL &&
+	    tlb_type == spitfire)
+		__flush_icache_page(__pa(page_address(page)));
 #endif
 }
 
-void smp_flush_dcache_folio_impl(struct folio *folio, int cpu)
+void smp_flush_dcache_page_impl(struct page *page, int cpu)
 {
 	int this_cpu;
 
@@ -954,14 +948,14 @@ void smp_flush_dcache_folio_impl(struct folio *folio, int cpu)
 	this_cpu = get_cpu();
 
 	if (cpu == this_cpu) {
-		__local_flush_dcache_folio(folio);
+		__local_flush_dcache_page(page);
 	} else if (cpu_online(cpu)) {
-		void *pg_addr = folio_address(folio);
+		void *pg_addr = page_address(page);
 		u64 data0 = 0;
 
 		if (tlb_type == spitfire) {
 			data0 = ((u64)&xcall_flush_dcache_page_spitfire);
-			if (folio_flush_mapping(folio) != NULL)
+			if (page_mapping_file(page) != NULL)
 				data0 |= ((u64)1 << 32);
 		} else if (tlb_type == cheetah || tlb_type == cheetah_plus) {
 #ifdef DCACHE_ALIASING_POSSIBLE
@@ -969,23 +963,18 @@ void smp_flush_dcache_folio_impl(struct folio *folio, int cpu)
 #endif
 		}
 		if (data0) {
-			unsigned int i, nr = folio_nr_pages(folio);
-
-			for (i = 0; i < nr; i++) {
-				xcall_deliver(data0, __pa(pg_addr),
-					      (u64) pg_addr, cpumask_of(cpu));
+			xcall_deliver(data0, __pa(pg_addr),
+				      (u64) pg_addr, cpumask_of(cpu));
 #ifdef CONFIG_DEBUG_DCFLUSH
-				atomic_inc(&dcpage_flushes_xcall);
+			atomic_inc(&dcpage_flushes_xcall);
 #endif
-				pg_addr += PAGE_SIZE;
-			}
 		}
 	}
 
 	put_cpu();
 }
 
-void flush_dcache_folio_all(struct mm_struct *mm, struct folio *folio)
+void flush_dcache_page_all(struct mm_struct *mm, struct page *page)
 {
 	void *pg_addr;
 	u64 data0;
@@ -999,10 +988,10 @@ void flush_dcache_folio_all(struct mm_struct *mm, struct folio *folio)
 	atomic_inc(&dcpage_flushes);
 #endif
 	data0 = 0;
-	pg_addr = folio_address(folio);
+	pg_addr = page_address(page);
 	if (tlb_type == spitfire) {
 		data0 = ((u64)&xcall_flush_dcache_page_spitfire);
-		if (folio_flush_mapping(folio) != NULL)
+		if (page_mapping_file(page) != NULL)
 			data0 |= ((u64)1 << 32);
 	} else if (tlb_type == cheetah || tlb_type == cheetah_plus) {
 #ifdef DCACHE_ALIASING_POSSIBLE
@@ -1010,18 +999,13 @@ void flush_dcache_folio_all(struct mm_struct *mm, struct folio *folio)
 #endif
 	}
 	if (data0) {
-		unsigned int i, nr = folio_nr_pages(folio);
-
-		for (i = 0; i < nr; i++) {
-			xcall_deliver(data0, __pa(pg_addr),
-				      (u64) pg_addr, cpu_online_mask);
+		xcall_deliver(data0, __pa(pg_addr),
+			      (u64) pg_addr, cpu_online_mask);
 #ifdef CONFIG_DEBUG_DCFLUSH
-			atomic_inc(&dcpage_flushes_xcall);
+		atomic_inc(&dcpage_flushes_xcall);
 #endif
-			pg_addr += PAGE_SIZE;
-		}
 	}
-	__local_flush_dcache_folio(folio);
+	__local_flush_dcache_page(page);
 
 	preempt_enable();
 }
@@ -1200,6 +1184,12 @@ void __irq_entry smp_penguin_jailcell(int irq, struct pt_regs *regs)
 	prom_world(0);
 
 	preempt_enable();
+}
+
+/* /proc/profile writes can call this, don't __init it please. */
+int setup_profiling_timer(unsigned int multiplier)
+{
+	return -EINVAL;
 }
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
@@ -1446,7 +1436,7 @@ static unsigned long send_cpu_poke(int cpu)
 	return hv_err;
 }
 
-void arch_smp_send_reschedule(int cpu)
+void smp_send_reschedule(int cpu)
 {
 	if (cpu == smp_processor_id()) {
 		WARN_ON_ONCE(preemptible());
@@ -1536,6 +1526,50 @@ void smp_send_stop(void)
 		smp_call_function(stop_this_cpu, NULL, 0);
 }
 
+/**
+ * pcpu_alloc_bootmem - NUMA friendly alloc_bootmem wrapper for percpu
+ * @cpu: cpu to allocate for
+ * @size: size allocation in bytes
+ * @align: alignment
+ *
+ * Allocate @size bytes aligned at @align for cpu @cpu.  This wrapper
+ * does the right thing for NUMA regardless of the current
+ * configuration.
+ *
+ * RETURNS:
+ * Pointer to the allocated area on success, NULL on failure.
+ */
+static void * __init pcpu_alloc_bootmem(unsigned int cpu, size_t size,
+					size_t align)
+{
+	const unsigned long goal = __pa(MAX_DMA_ADDRESS);
+#ifdef CONFIG_NUMA
+	int node = cpu_to_node(cpu);
+	void *ptr;
+
+	if (!node_online(node) || !NODE_DATA(node)) {
+		ptr = memblock_alloc_from(size, align, goal);
+		pr_info("cpu %d has no node %d or node-local memory\n",
+			cpu, node);
+		pr_debug("per cpu data for cpu%d %lu bytes at %016lx\n",
+			 cpu, size, __pa(ptr));
+	} else {
+		ptr = memblock_alloc_try_nid(size, align, goal,
+					     MEMBLOCK_ALLOC_ACCESSIBLE, node);
+		pr_debug("per cpu data for cpu%d %lu bytes on node%d at "
+			 "%016lx\n", cpu, size, node, __pa(ptr));
+	}
+	return ptr;
+#else
+	return memblock_alloc_from(size, align, goal);
+#endif
+}
+
+static void __init pcpu_free_bootmem(void *ptr, size_t size)
+{
+	memblock_free(__pa(ptr), size);
+}
+
 static int __init pcpu_cpu_distance(unsigned int from, unsigned int to)
 {
 	if (cpu_to_node(from) == cpu_to_node(to))
@@ -1544,9 +1578,57 @@ static int __init pcpu_cpu_distance(unsigned int from, unsigned int to)
 		return REMOTE_DISTANCE;
 }
 
-static int __init pcpu_cpu_to_node(int cpu)
+static void __init pcpu_populate_pte(unsigned long addr)
 {
-	return cpu_to_node(cpu);
+	pgd_t *pgd = pgd_offset_k(addr);
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+
+	if (pgd_none(*pgd)) {
+		pud_t *new;
+
+		new = memblock_alloc_from(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE);
+		if (!new)
+			goto err_alloc;
+		pgd_populate(&init_mm, pgd, new);
+	}
+
+	p4d = p4d_offset(pgd, addr);
+	if (p4d_none(*p4d)) {
+		pud_t *new;
+
+		new = memblock_alloc_from(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE);
+		if (!new)
+			goto err_alloc;
+		p4d_populate(&init_mm, p4d, new);
+	}
+
+	pud = pud_offset(p4d, addr);
+	if (pud_none(*pud)) {
+		pmd_t *new;
+
+		new = memblock_alloc_from(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE);
+		if (!new)
+			goto err_alloc;
+		pud_populate(&init_mm, pud, new);
+	}
+
+	pmd = pmd_offset(pud, addr);
+	if (!pmd_present(*pmd)) {
+		pte_t *new;
+
+		new = memblock_alloc_from(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE);
+		if (!new)
+			goto err_alloc;
+		pmd_populate_kernel(&init_mm, pmd, new);
+	}
+
+	return;
+
+err_alloc:
+	panic("%s: Failed to allocate %lu bytes align=%lx from=%lx\n",
+	      __func__, PAGE_SIZE, PAGE_SIZE, PAGE_SIZE);
 }
 
 void __init setup_per_cpu_areas(void)
@@ -1559,7 +1641,8 @@ void __init setup_per_cpu_areas(void)
 		rc = pcpu_embed_first_chunk(PERCPU_MODULE_RESERVE,
 					    PERCPU_DYNAMIC_RESERVE, 4 << 20,
 					    pcpu_cpu_distance,
-					    pcpu_cpu_to_node);
+					    pcpu_alloc_bootmem,
+					    pcpu_free_bootmem);
 		if (rc)
 			pr_warn("PERCPU: %s allocator failed (%d), "
 				"falling back to page size\n",
@@ -1567,7 +1650,9 @@ void __init setup_per_cpu_areas(void)
 	}
 	if (rc < 0)
 		rc = pcpu_page_first_chunk(PERCPU_MODULE_RESERVE,
-					   pcpu_cpu_to_node);
+					   pcpu_alloc_bootmem,
+					   pcpu_free_bootmem,
+					   pcpu_populate_pte);
 	if (rc < 0)
 		panic("cannot initialize percpu area (err=%d)", rc);
 

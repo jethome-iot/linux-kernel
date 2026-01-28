@@ -831,9 +831,9 @@ static int sst_get_ssp_mode(struct snd_soc_dai *dai, unsigned int fmt)
 	dev_dbg(dai->dev, "Enter:%s, format=%x\n", __func__, format);
 
 	switch (format) {
-	case SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		return SSP_MODE_PROVIDER;
-	case SND_SOC_DAIFMT_BC_FC:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		return SSP_MODE_CONSUMER;
 	default:
 		dev_err(dai->dev, "Invalid ssp protocol: %d\n", format);
@@ -1327,13 +1327,15 @@ static bool is_sst_dapm_widget(struct snd_soc_dapm_widget *w)
 int sst_send_pipe_gains(struct snd_soc_dai *dai, int stream, int mute)
 {
 	struct sst_data *drv = snd_soc_dai_get_drvdata(dai);
-	struct snd_soc_dapm_widget *w = snd_soc_dai_get_widget(dai, stream);
-	struct snd_soc_dapm_path *p;
+	struct snd_soc_dapm_widget *w;
+	struct snd_soc_dapm_path *p = NULL;
 
 	dev_dbg(dai->dev, "enter, dai-name=%s dir=%d\n", dai->name, stream);
-	dev_dbg(dai->dev, "Stream name=%s\n", w->name);
 
 	if (stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		dev_dbg(dai->dev, "Stream name=%s\n",
+				dai->playback_widget->name);
+		w = dai->playback_widget;
 		snd_soc_dapm_widget_for_each_sink_path(w, p) {
 			if (p->connected && !p->connected(w, p->sink))
 				continue;
@@ -1350,6 +1352,9 @@ int sst_send_pipe_gains(struct snd_soc_dai *dai, int stream, int mute)
 			}
 		}
 	} else {
+		dev_dbg(dai->dev, "Stream name=%s\n",
+				dai->capture_widget->name);
+		w = dai->capture_widget;
 		snd_soc_dapm_widget_for_each_source_path(w, p) {
 			if (p->connected && !p->connected(w, p->source))
 				continue;
@@ -1387,7 +1392,7 @@ int sst_send_pipe_gains(struct snd_soc_dai *dai, int stream, int mute)
 static int sst_fill_module_list(struct snd_kcontrol *kctl,
 	 struct snd_soc_dapm_widget *w, int type)
 {
-	struct sst_module *module;
+	struct sst_module *module = NULL;
 	struct snd_soc_component *c = snd_soc_dapm_to_component(w->dapm);
 	struct sst_ids *ids = w->priv;
 	int ret = 0;

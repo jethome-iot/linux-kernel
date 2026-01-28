@@ -12,9 +12,10 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/irqchip.h>
+#include <linux/platform_device.h>
 #include <linux/memblock.h>
-#include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/of_platform.h>
 #include <linux/export.h>
 #include <linux/irqchip/arm-gic.h>
 #include <linux/of_address.h>
@@ -138,8 +139,7 @@ static int __init omap4_sram_init(void)
 		pr_warn("%s:Unable to get sram pool needed to handle errata I688\n",
 			__func__);
 	else
-		sram_sync = (void __iomem *)gen_pool_alloc(sram_pool, PAGE_SIZE);
-	of_node_put(np);
+		sram_sync = (void *)gen_pool_alloc(sram_pool, PAGE_SIZE);
 
 	return 0;
 }

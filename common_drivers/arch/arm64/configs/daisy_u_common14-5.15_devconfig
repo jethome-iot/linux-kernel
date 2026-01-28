@@ -1,0 +1,3 @@
+# amlogic-soc-amfc.ko
+CONFIG_AMFC_T6D=y
+CONFIG_AMFC_BASE=0xFE092000

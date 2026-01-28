@@ -12,6 +12,7 @@
 #include <linux/of.h>
 
 #include <asm/machdep.h>
+#include <asm/prom.h>
 #include <asm/cell-regs.h>
 
 #include "ppc_cbe_cpufreq.h"

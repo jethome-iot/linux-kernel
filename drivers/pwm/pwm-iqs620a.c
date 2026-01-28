@@ -47,16 +47,16 @@ static int iqs620_pwm_init(struct iqs620_pwm_private *iqs620_pwm,
 	int ret;
 
 	if (!duty_scale)
-		return regmap_clear_bits(iqs62x->regmap, IQS620_PWR_SETTINGS,
-					 IQS620_PWR_SETTINGS_PWM_OUT);
+		return regmap_update_bits(iqs62x->regmap, IQS620_PWR_SETTINGS,
+					  IQS620_PWR_SETTINGS_PWM_OUT, 0);
 
 	ret = regmap_write(iqs62x->regmap, IQS620_PWM_DUTY_CYCLE,
 			   duty_scale - 1);
 	if (ret)
 		return ret;
 
-	return regmap_set_bits(iqs62x->regmap, IQS620_PWR_SETTINGS,
-			       IQS620_PWR_SETTINGS_PWM_OUT);
+	return regmap_update_bits(iqs62x->regmap, IQS620_PWR_SETTINGS,
+				  IQS620_PWR_SETTINGS_PWM_OUT, 0xff);
 }
 
 static int iqs620_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
@@ -104,8 +104,8 @@ static int iqs620_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	return ret;
 }
 
-static int iqs620_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
-				struct pwm_state *state)
+static void iqs620_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
+				 struct pwm_state *state)
 {
 	struct iqs620_pwm_private *iqs620_pwm;
 
@@ -127,8 +127,6 @@ static int iqs620_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	state->period = IQS620_PWM_PERIOD_NS;
 	state->polarity = PWM_POLARITY_NORMAL;
-
-	return 0;
 }
 
 static int iqs620_pwm_notifier(struct notifier_block *notifier,
@@ -166,6 +164,7 @@ static int iqs620_pwm_notifier(struct notifier_block *notifier,
 static const struct pwm_ops iqs620_pwm_ops = {
 	.apply = iqs620_pwm_apply,
 	.get_state = iqs620_pwm_get_state,
+	.owner = THIS_MODULE,
 };
 
 static void iqs620_pwm_notifier_unregister(void *context)

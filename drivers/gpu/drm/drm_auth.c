@@ -37,12 +37,13 @@
 #include <drm/drm_print.h>
 
 #include "drm_internal.h"
+#include "drm_legacy.h"
 
 /**
  * DOC: master and authentication
  *
  * &struct drm_master is used to track groups of clients with open
- * primary device nodes. For every &struct drm_file which has had at
+ * primary/legacy device nodes. For every &struct drm_file which has had at
  * least once successfully became the device master (either through the
  * SET_MASTER IOCTL, or implicitly through opening the primary device node when
  * no one else is the current master that time) there exists one &drm_master.
@@ -105,7 +106,7 @@ int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv)
 	auth->magic = file_priv->magic;
 	mutex_unlock(&dev->master_mutex);
 
-	drm_dbg_core(dev, "%u\n", auth->magic);
+	DRM_DEBUG("%u\n", auth->magic);
 
 	return ret < 0 ? ret : 0;
 }
@@ -116,7 +117,7 @@ int drm_authmagic(struct drm_device *dev, void *data,
 	struct drm_auth *auth = data;
 	struct drm_file *file;
 
-	drm_dbg_core(dev, "%u\n", auth->magic);
+	DRM_DEBUG("%u\n", auth->magic);
 
 	mutex_lock(&dev->master_mutex);
 	file = idr_find(&file_priv->master->magic_map, auth->magic);
@@ -138,14 +139,15 @@ struct drm_master *drm_master_create(struct drm_device *dev)
 		return NULL;
 
 	kref_init(&master->refcount);
-	idr_init_base(&master->magic_map, 1);
+	drm_master_legacy_init(master);
+	idr_init(&master->magic_map);
 	master->dev = dev;
 
 	/* initialize the tree of output resource lessees */
 	INIT_LIST_HEAD(&master->lessees);
 	INIT_LIST_HEAD(&master->lessee_list);
 	idr_init(&master->leases);
-	idr_init_base(&master->lessee_idr, 1);
+	idr_init(&master->lessee_idr);
 
 	return master;
 }
@@ -233,8 +235,7 @@ static int drm_new_set_master(struct drm_device *dev, struct drm_file *fpriv)
 static int
 drm_master_check_perm(struct drm_device *dev, struct drm_file *file_priv)
 {
-	if (file_priv->was_master &&
-	    rcu_access_pointer(file_priv->pid) == task_tgid(current))
+	if (file_priv->pid == task_pid(current) && file_priv->was_master)
 		return 0;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -273,9 +274,7 @@ int drm_setmaster_ioctl(struct drm_device *dev, void *data,
 	}
 
 	if (file_priv->master->lessor != NULL) {
-		drm_dbg_lease(dev,
-			      "Attempt to set lessee %d as master\n",
-			      file_priv->master->lessee_id);
+		DRM_DEBUG_LEASE("Attempt to set lessee %d as master\n", file_priv->master->lessee_id);
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -316,9 +315,7 @@ int drm_dropmaster_ioctl(struct drm_device *dev, void *data,
 	}
 
 	if (file_priv->master->lessor != NULL) {
-		drm_dbg_lease(dev,
-			      "Attempt to drop lessee %d as master\n",
-			      file_priv->master->lessee_id);
+		DRM_DEBUG_LEASE("Attempt to drop lessee %d as master\n", file_priv->master->lessee_id);
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -362,6 +359,8 @@ void drm_master_release(struct drm_file *file_priv)
 
 	if (!drm_is_current_master_locked(file_priv))
 		goto out;
+
+	drm_legacy_lock_master_cleanup(dev, master);
 
 	if (dev->master == file_priv->master)
 		drm_drop_master(dev, file_priv);
@@ -424,6 +423,8 @@ static void drm_master_destroy(struct kref *kref)
 
 	if (drm_core_check_feature(dev, DRIVER_MODESET))
 		drm_lease_destroy(master);
+
+	drm_legacy_master_rmmaps(dev, master);
 
 	idr_destroy(&master->magic_map);
 	idr_destroy(&master->leases);

@@ -1,0 +1,3 @@
+# arm64 need set lto=none
+
+CONFIG_KASAN_GENERIC=y

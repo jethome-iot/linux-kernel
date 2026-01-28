@@ -42,7 +42,8 @@ struct gstr str_new(void)
 /* Free storage for growable string */
 void str_free(struct gstr *gs)
 {
-	free(gs->s);
+	if (gs->s)
+		free(gs->s);
 	gs->s = NULL;
 	gs->len = 0;
 }
@@ -73,7 +74,7 @@ void str_printf(struct gstr *gs, const char *fmt, ...)
 }
 
 /* Retrieve value of growable string */
-char *str_get(struct gstr *gs)
+const char *str_get(struct gstr *gs)
 {
 	return gs->s;
 }

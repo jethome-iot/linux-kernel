@@ -16,7 +16,6 @@
 #include <linux/kernel.h>
 #include <linux/cpu.h>
 #include <linux/hardirq.h>
-#include <linux/of.h>
 
 #include <asm/page.h>
 #include <asm/current.h>
@@ -26,12 +25,14 @@
 #include <asm/paca.h>
 #include <asm/mmu.h>
 #include <asm/sections.h>	/* _end */
+#include <asm/prom.h>
 #include <asm/smp.h>
 #include <asm/hw_breakpoint.h>
+#include <asm/asm-prototypes.h>
 #include <asm/svm.h>
 #include <asm/ultravisor.h>
 
-int machine_kexec_prepare(struct kimage *image)
+int default_machine_kexec_prepare(struct kimage *image)
 {
 	int i;
 	unsigned long begin, end;	/* limits of segment */
@@ -283,13 +284,14 @@ static void kexec_prepare_cpus(void)
  * We could use a smaller stack if we don't care about anything using
  * current, but that audit has not been performed.
  */
-static union thread_union kexec_stack = { };
+static union thread_union kexec_stack __init_task_data =
+	{ };
 
 /*
  * For similar reasons to the stack above, the kexecing CPU needs to be on a
  * static PACA; we switch to kexec_paca.
  */
-static struct paca_struct kexec_paca;
+struct paca_struct kexec_paca;
 
 /* Our assembly helper, in misc_64.S */
 extern void kexec_sequence(void *newstack, unsigned long start,
@@ -359,7 +361,7 @@ void default_machine_kexec(struct kimage *image)
 	 * the RMA. On BookE there is no real MMU off mode, so we have to
 	 * keep it enabled as well (but then we have bolted TLB entries).
 	 */
-#ifdef CONFIG_PPC_BOOK3E_64
+#ifdef CONFIG_PPC_BOOK3E
 	copy_with_mmu_off = false;
 #else
 	copy_with_mmu_off = radix_enabled() ||
@@ -376,10 +378,10 @@ void default_machine_kexec(struct kimage *image)
 	/* NOTREACHED */
 }
 
-#ifdef CONFIG_PPC_64S_HASH_MMU
+#ifdef CONFIG_PPC_BOOK3S_64
 /* Values we need to export to the second kernel via the device tree. */
-static __be64 htab_base;
-static __be64 htab_size;
+static unsigned long htab_base;
+static unsigned long htab_size;
 
 static struct property htab_base_prop = {
 	.name = "linux,htab-base",
@@ -405,7 +407,7 @@ static int __init export_htab_values(void)
 	if (!node)
 		return -ENODEV;
 
-	/* remove any stale properties so ours can be found */
+	/* remove any stale propertys so ours can be found */
 	of_remove_property(node, of_find_property(node, htab_base_prop.name, NULL));
 	of_remove_property(node, of_find_property(node, htab_size_prop.name, NULL));
 
@@ -418,4 +420,4 @@ static int __init export_htab_values(void)
 	return 0;
 }
 late_initcall(export_htab_values);
-#endif /* CONFIG_PPC_64S_HASH_MMU */
+#endif /* CONFIG_PPC_BOOK3S_64 */

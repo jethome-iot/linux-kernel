@@ -76,9 +76,9 @@ static void ipack_bus_remove(struct device *device)
 		drv->ops->remove(dev);
 }
 
-static int ipack_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int ipack_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct ipack_device *idev;
+	struct ipack_device *idev;
 
 	if (!dev)
 		return -ENODEV;
@@ -207,7 +207,7 @@ struct ipack_bus_device *ipack_bus_register(struct device *parent, int slots,
 	if (!bus)
 		return NULL;
 
-	bus_nr = ida_alloc(&ipack_ida, GFP_KERNEL);
+	bus_nr = ida_simple_get(&ipack_ida, 0, 0, GFP_KERNEL);
 	if (bus_nr < 0) {
 		kfree(bus);
 		return NULL;
@@ -237,7 +237,7 @@ int ipack_bus_unregister(struct ipack_bus_device *bus)
 {
 	bus_for_each_dev(&ipack_bus_type, NULL, bus,
 		ipack_unregister_bus_member);
-	ida_free(&ipack_ida, bus->bus_nr);
+	ida_simple_remove(&ipack_ida, bus->bus_nr);
 	kfree(bus);
 	return 0;
 }
@@ -429,11 +429,8 @@ int ipack_device_init(struct ipack_device *dev)
 	dev->dev.bus = &ipack_bus_type;
 	dev->dev.release = ipack_device_release;
 	dev->dev.parent = dev->bus->parent;
-	ret = dev_set_name(&dev->dev,
+	dev_set_name(&dev->dev,
 		     "ipack-dev.%u.%u", dev->bus->bus_nr, dev->slot);
-	if (ret)
-		return ret;
-
 	device_initialize(&dev->dev);
 
 	if (dev->bus->ops->set_clockrate(dev, 8))

@@ -26,9 +26,8 @@
 #ifndef _DMUB_PSR_H_
 #define _DMUB_PSR_H_
 
-#include "dc_types.h"
-struct dc_link;
-struct dmub_psr_funcs;
+#include "os_types.h"
+#include "dc_link.h"
 
 struct dmub_psr {
 	struct dc_context *ctx;
@@ -47,9 +46,6 @@ struct dmub_psr_funcs {
 	void (*psr_force_static)(struct dmub_psr *dmub, uint8_t panel_inst);
 	void (*psr_get_residency)(struct dmub_psr *dmub, uint32_t *residency,
 	uint8_t panel_inst);
-	void (*psr_set_sink_vtotal_in_psr_active)(struct dmub_psr *dmub,
-	uint16_t psr_vtotal_idle, uint16_t psr_vtotal_su);
-	void (*psr_set_power_opt)(struct dmub_psr *dmub, unsigned int power_opt, uint8_t panel_inst);
 };
 
 struct dmub_psr *dmub_psr_create(struct dc_context *ctx);

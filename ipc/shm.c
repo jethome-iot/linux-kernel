@@ -29,7 +29,6 @@
 #include <linux/mm.h>
 #include <linux/hugetlb.h>
 #include <linux/shm.h>
-#include <uapi/linux/shm.h>
 #include <linux/init.h>
 #include <linux/file.h>
 #include <linux/mman.h>
@@ -276,8 +275,10 @@ static inline void shm_rmid(struct shmid_kernel *s)
 }
 
 
-static int __shm_open(struct shm_file_data *sfd)
+static int __shm_open(struct vm_area_struct *vma)
 {
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
 	struct shmid_kernel *shp;
 
 	shp = shm_lock(sfd->ns, sfd->id);
@@ -301,15 +302,7 @@ static int __shm_open(struct shm_file_data *sfd)
 /* This is called by fork, once for every shm attach. */
 static void shm_open(struct vm_area_struct *vma)
 {
-	struct file *file = vma->vm_file;
-	struct shm_file_data *sfd = shm_file_data(file);
-	int err;
-
-	/* Always call underlying open if present */
-	if (sfd->vm_ops->open)
-		sfd->vm_ops->open(vma);
-
-	err = __shm_open(sfd);
+	int err = __shm_open(vma);
 	/*
 	 * We raced in the idr lookup or with shm_destroy().
 	 * Either way, the ID is busted.
@@ -337,6 +330,9 @@ static void shm_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
 	shm_unlock(shp);
 	if (!is_file_hugepages(shm_file))
 		shmem_lock(shm_file, 0, shp->mlock_ucounts);
+	else if (shp->mlock_ucounts)
+		user_shm_unlock(i_size_read(file_inode(shm_file)),
+				shp->mlock_ucounts);
 	fput(shm_file);
 	ipc_update_pid(&shp->shm_cprid, NULL);
 	ipc_update_pid(&shp->shm_lprid, NULL);
@@ -366,8 +362,10 @@ static bool shm_may_destroy(struct shmid_kernel *shp)
  * The descriptor has already been removed from the current->mm->mmap list
  * and will later be kfree()d.
  */
-static void __shm_close(struct shm_file_data *sfd)
+static void shm_close(struct vm_area_struct *vma)
 {
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
 	struct shmid_kernel *shp;
 	struct ipc_namespace *ns = sfd->ns;
 
@@ -391,18 +389,6 @@ static void __shm_close(struct shm_file_data *sfd)
 		shm_unlock(shp);
 done:
 	up_write(&shm_ids(ns).rwsem);
-}
-
-static void shm_close(struct vm_area_struct *vma)
-{
-	struct file *file = vma->vm_file;
-	struct shm_file_data *sfd = shm_file_data(file);
-
-	/* Always call underlying close if present */
-	if (sfd->vm_ops->close)
-		sfd->vm_ops->close(vma);
-
-	__shm_close(sfd);
 }
 
 /* Called with ns->shm_ids(ns).rwsem locked */
@@ -563,25 +549,30 @@ static unsigned long shm_pagesize(struct vm_area_struct *vma)
 }
 
 #ifdef CONFIG_NUMA
-static int shm_set_policy(struct vm_area_struct *vma, struct mempolicy *mpol)
+static int shm_set_policy(struct vm_area_struct *vma, struct mempolicy *new)
 {
-	struct shm_file_data *sfd = shm_file_data(vma->vm_file);
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
 	int err = 0;
 
 	if (sfd->vm_ops->set_policy)
-		err = sfd->vm_ops->set_policy(vma, mpol);
+		err = sfd->vm_ops->set_policy(vma, new);
 	return err;
 }
 
 static struct mempolicy *shm_get_policy(struct vm_area_struct *vma,
-					unsigned long addr, pgoff_t *ilx)
+					unsigned long addr)
 {
-	struct shm_file_data *sfd = shm_file_data(vma->vm_file);
-	struct mempolicy *mpol = vma->vm_policy;
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
+	struct mempolicy *pol = NULL;
 
 	if (sfd->vm_ops->get_policy)
-		mpol = sfd->vm_ops->get_policy(vma, addr, ilx);
-	return mpol;
+		pol = sfd->vm_ops->get_policy(vma, addr);
+	else if (vma->vm_policy)
+		pol = vma->vm_policy;
+
+	return pol;
 }
 #endif
 
@@ -595,13 +586,13 @@ static int shm_mmap(struct file *file, struct vm_area_struct *vma)
 	 * IPC ID that was removed, and possibly even reused by another shm
 	 * segment already.  Propagate this case as an error to caller.
 	 */
-	ret = __shm_open(sfd);
+	ret = __shm_open(vma);
 	if (ret)
 		return ret;
 
 	ret = call_mmap(sfd->file, vma);
 	if (ret) {
-		__shm_close(sfd);
+		shm_close(vma);
 		return ret;
 	}
 	sfd->vm_ops = vma->vm_ops;
@@ -751,7 +742,8 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 		if (shmflg & SHM_NORESERVE)
 			acctflag = VM_NORESERVE;
 		file = hugetlb_file_setup(name, hugesize, acctflag,
-				HUGETLB_SHMFS_INODE, (shmflg >> SHM_HUGE_SHIFT) & SHM_HUGE_MASK);
+				  &shp->mlock_ucounts, HUGETLB_SHMFS_INODE,
+				(shmflg >> SHM_HUGE_SHIFT) & SHM_HUGE_MASK);
 	} else {
 		/*
 		 * Do not allow no accounting for OVERCOMMIT_NEVER, even
@@ -802,6 +794,8 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 no_id:
 	ipc_update_pid(&shp->shm_cprid, NULL);
 	ipc_update_pid(&shp->shm_lprid, NULL);
+	if (is_file_hugepages(file) && shp->mlock_ucounts)
+		user_shm_unlock(size, shp->mlock_ucounts);
 	fput(file);
 	ipc_rcu_putref(&shp->shm_perm, shm_rcu_free);
 	return error;
@@ -1658,7 +1652,7 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg,
 			goto invalid;
 	}
 
-	addr = do_mmap(file, addr, size, prot, flags, 0, 0, &populate, NULL);
+	addr = do_mmap(file, addr, size, prot, flags, 0, &populate, NULL);
 	*raddr = addr;
 	err = 0;
 	if (IS_ERR_VALUE(addr))
@@ -1733,7 +1727,7 @@ long ksys_shmdt(char __user *shmaddr)
 #ifdef CONFIG_MMU
 	loff_t size = 0;
 	struct file *file;
-	VMA_ITERATOR(vmi, mm, addr);
+	struct vm_area_struct *next;
 #endif
 
 	if (addr & ~PAGE_MASK)
@@ -1763,9 +1757,12 @@ long ksys_shmdt(char __user *shmaddr)
 	 * match the usual checks anyway. So assume all vma's are
 	 * above the starting address given.
 	 */
+	vma = find_vma(mm, addr);
 
 #ifdef CONFIG_MMU
-	for_each_vma(vmi, vma) {
+	while (vma) {
+		next = vma->vm_next;
+
 		/*
 		 * Check if the starting address would match, i.e. it's
 		 * a fragment created by mprotect() and/or munmap(), or it
@@ -1782,8 +1779,7 @@ long ksys_shmdt(char __user *shmaddr)
 			 */
 			file = vma->vm_file;
 			size = i_size_read(file_inode(vma->vm_file));
-			do_vma_munmap(&vmi, vma, vma->vm_start, vma->vm_end,
-				      NULL, false);
+			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
 			/*
 			 * We discovered the size of the shm segment, so
 			 * break out of here and fall through to the next
@@ -1791,9 +1787,10 @@ long ksys_shmdt(char __user *shmaddr)
 			 * searching for matching vma's.
 			 */
 			retval = 0;
-			vma = vma_next(&vmi);
+			vma = next;
 			break;
 		}
+		vma = next;
 	}
 
 	/*
@@ -1803,19 +1800,17 @@ long ksys_shmdt(char __user *shmaddr)
 	 */
 	size = PAGE_ALIGN(size);
 	while (vma && (loff_t)(vma->vm_end - addr) <= size) {
+		next = vma->vm_next;
+
 		/* finding a matching vma now does not alter retval */
 		if ((vma->vm_ops == &shm_vm_ops) &&
 		    ((vma->vm_start - addr)/PAGE_SIZE == vma->vm_pgoff) &&
-		    (vma->vm_file == file)) {
-			do_vma_munmap(&vmi, vma, vma->vm_start, vma->vm_end,
-				      NULL, false);
-		}
-
-		vma = vma_next(&vmi);
+		    (vma->vm_file == file))
+			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
+		vma = next;
 	}
 
 #else	/* CONFIG_MMU */
-	vma = vma_lookup(mm, addr);
 	/* under NOMMU conditions, the exact address to be destroyed must be
 	 * given
 	 */

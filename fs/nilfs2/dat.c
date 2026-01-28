@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * NILFS disk address translation.
+ * dat.c - NILFS disk address translation.
  *
  * Copyright (C) 2006-2008 Nippon Telegraph and Telephone Corporation.
  *
@@ -158,7 +158,6 @@ void nilfs_dat_commit_start(struct inode *dat, struct nilfs_palloc_req *req,
 int nilfs_dat_prepare_end(struct inode *dat, struct nilfs_palloc_req *req)
 {
 	struct nilfs_dat_entry *entry;
-	__u64 start;
 	sector_t blocknr;
 	void *kaddr;
 	int ret;
@@ -170,7 +169,6 @@ int nilfs_dat_prepare_end(struct inode *dat, struct nilfs_palloc_req *req)
 	kaddr = kmap_atomic(req->pr_entry_bh->b_page);
 	entry = nilfs_palloc_block_get_entry(dat, req->pr_entry_nr,
 					     req->pr_entry_bh, kaddr);
-	start = le64_to_cpu(entry->de_start);
 	blocknr = le64_to_cpu(entry->de_blocknr);
 	kunmap_atomic(kaddr);
 
@@ -180,15 +178,6 @@ int nilfs_dat_prepare_end(struct inode *dat, struct nilfs_palloc_req *req)
 			nilfs_dat_abort_entry(dat, req);
 			return ret;
 		}
-	}
-	if (unlikely(start > nilfs_mdt_cno(dat))) {
-		nilfs_err(dat->i_sb,
-			  "vblocknr = %llu has abnormal lifetime: start cno (= %llu) > current cno (= %llu)",
-			  (unsigned long long)req->pr_entry_nr,
-			  (unsigned long long)start,
-			  (unsigned long long)nilfs_mdt_cno(dat));
-		nilfs_dat_abort_entry(dat, req);
-		return -EINVAL;
 	}
 
 	return 0;

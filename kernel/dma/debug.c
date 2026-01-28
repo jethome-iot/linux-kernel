@@ -53,7 +53,6 @@ enum map_err_types {
  * struct dma_debug_entry - track a dma_map* or dma_alloc_coherent mapping
  * @list: node on pre-allocated free_entries list
  * @dev: 'dev' argument to dma_map_{page|single|sg} or dma_alloc_coherent
- * @dev_addr: dma address
  * @size: length of the mapping
  * @type: single, page, sg, coherent
  * @direction: enum dma_data_direction
@@ -62,8 +61,7 @@ enum map_err_types {
  * @pfn: page frame of the start address
  * @offset: offset of mapping relative to pfn
  * @map_err_type: track whether dma_mapping_error() was checked
- * @stack_len: number of backtrace entries in @stack_entries
- * @stack_entries: stack of backtrace history
+ * @stacktrace: support backtraces when a violation is detected
  */
 struct dma_debug_entry {
 	struct list_head list;
@@ -140,7 +138,7 @@ static const char *const maperr2str[] = {
 
 static const char *type2name[] = {
 	[dma_debug_single] = "single",
-	[dma_debug_sg] = "scatter-gather",
+	[dma_debug_sg] = "scather-gather",
 	[dma_debug_coherent] = "coherent",
 	[dma_debug_resource] = "resource",
 };
@@ -352,10 +350,11 @@ static struct dma_debug_entry *bucket_find_contain(struct hash_bucket **bucket,
 						   unsigned long *flags)
 {
 
+	unsigned int max_range = dma_get_max_seg_size(ref->dev);
 	struct dma_debug_entry *entry, index = *ref;
-	int limit = min(HASH_SIZE, (index.dev_addr >> HASH_FN_SHIFT) + 1);
+	unsigned int range = 0;
 
-	for (int i = 0; i < limit; i++) {
+	while (range <= max_range) {
 		entry = __hash_bucket_find(*bucket, ref, containing_match);
 
 		if (entry)
@@ -365,6 +364,7 @@ static struct dma_debug_entry *bucket_find_contain(struct hash_bucket **bucket,
 		 * Nothing found, go back a hash bucket
 		 */
 		put_hash_bucket(*bucket, *flags);
+		range          += (1 << HASH_FN_SHIFT);
 		index.dev_addr -= (1 << HASH_FN_SHIFT);
 		*bucket = get_hash_bucket(&index, flags);
 	}
@@ -395,6 +395,37 @@ static unsigned long long phys_addr(struct dma_debug_entry *entry)
 		return __pfn_to_phys(entry->pfn) + entry->offset;
 
 	return page_to_phys(pfn_to_page(entry->pfn)) + entry->offset;
+}
+
+/*
+ * Dump mapping entries for debugging purposes
+ */
+void debug_dma_dump_mappings(struct device *dev)
+{
+	int idx;
+
+	for (idx = 0; idx < HASH_SIZE; idx++) {
+		struct hash_bucket *bucket = &dma_entry_hash[idx];
+		struct dma_debug_entry *entry;
+		unsigned long flags;
+
+		spin_lock_irqsave(&bucket->lock, flags);
+
+		list_for_each_entry(entry, &bucket->list, list) {
+			if (!dev || dev == entry->dev) {
+				dev_info(entry->dev,
+					 "%s idx %d P=%Lx N=%lx D=%Lx L=%Lx %s %s\n",
+					 type2name[entry->type], idx,
+					 phys_addr(entry), entry->pfn,
+					 entry->dev_addr, entry->size,
+					 dir2name[entry->direction],
+					 maperr2str[entry->map_err_type]);
+			}
+		}
+
+		spin_unlock_irqrestore(&bucket->lock, flags);
+		cond_resched();
+	}
 }
 
 /*
@@ -516,70 +547,6 @@ static void active_cacheline_remove(struct dma_debug_entry *entry)
 		radix_tree_delete(&dma_active_cacheline, cln);
 	spin_unlock_irqrestore(&radix_lock, flags);
 }
-
-/*
- * Dump mappings entries on kernel space for debugging purposes
- */
-void debug_dma_dump_mappings(struct device *dev)
-{
-	int idx;
-	phys_addr_t cln;
-
-	for (idx = 0; idx < HASH_SIZE; idx++) {
-		struct hash_bucket *bucket = &dma_entry_hash[idx];
-		struct dma_debug_entry *entry;
-		unsigned long flags;
-
-		spin_lock_irqsave(&bucket->lock, flags);
-		list_for_each_entry(entry, &bucket->list, list) {
-			if (!dev || dev == entry->dev) {
-				cln = to_cacheline_number(entry);
-				dev_info(entry->dev,
-					 "%s idx %d P=%llx N=%lx D=%llx L=%llx cln=%pa %s %s\n",
-					 type2name[entry->type], idx,
-					 phys_addr(entry), entry->pfn,
-					 entry->dev_addr, entry->size,
-					 &cln, dir2name[entry->direction],
-					 maperr2str[entry->map_err_type]);
-			}
-		}
-		spin_unlock_irqrestore(&bucket->lock, flags);
-
-		cond_resched();
-	}
-}
-
-/*
- * Dump mappings entries on user space via debugfs
- */
-static int dump_show(struct seq_file *seq, void *v)
-{
-	int idx;
-	phys_addr_t cln;
-
-	for (idx = 0; idx < HASH_SIZE; idx++) {
-		struct hash_bucket *bucket = &dma_entry_hash[idx];
-		struct dma_debug_entry *entry;
-		unsigned long flags;
-
-		spin_lock_irqsave(&bucket->lock, flags);
-		list_for_each_entry(entry, &bucket->list, list) {
-			cln = to_cacheline_number(entry);
-			seq_printf(seq,
-				   "%s %s %s idx %d P=%llx N=%lx D=%llx L=%llx cln=%pa %s %s\n",
-				   dev_driver_string(entry->dev),
-				   dev_name(entry->dev),
-				   type2name[entry->type], idx,
-				   phys_addr(entry), entry->pfn,
-				   entry->dev_addr, entry->size,
-				   &cln, dir2name[entry->direction],
-				   maperr2str[entry->map_err_type]);
-		}
-		spin_unlock_irqrestore(&bucket->lock, flags);
-	}
-	return 0;
-}
-DEFINE_SHOW_ATTRIBUTE(dump);
 
 /*
  * Wrapper function for adding an entry to the hash.
@@ -809,6 +776,33 @@ static const struct file_operations filter_fops = {
 	.llseek = default_llseek,
 };
 
+static int dump_show(struct seq_file *seq, void *v)
+{
+	int idx;
+
+	for (idx = 0; idx < HASH_SIZE; idx++) {
+		struct hash_bucket *bucket = &dma_entry_hash[idx];
+		struct dma_debug_entry *entry;
+		unsigned long flags;
+
+		spin_lock_irqsave(&bucket->lock, flags);
+		list_for_each_entry(entry, &bucket->list, list) {
+			seq_printf(seq,
+				   "%s %s %s idx %d P=%llx N=%lx D=%llx L=%llx %s %s\n",
+				   dev_name(entry->dev),
+				   dev_driver_string(entry->dev),
+				   type2name[entry->type], idx,
+				   phys_addr(entry), entry->pfn,
+				   entry->dev_addr, entry->size,
+				   dir2name[entry->direction],
+				   maperr2str[entry->map_err_type]);
+		}
+		spin_unlock_irqrestore(&bucket->lock, flags);
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(dump);
+
 static int __init dma_debug_fs_init(void)
 {
 	struct dentry *dentry = debugfs_create_dir("dma-api", NULL);
@@ -877,7 +871,7 @@ static int dma_debug_device_change(struct notifier_block *nb, unsigned long acti
 	return 0;
 }
 
-void dma_debug_add_bus(const struct bus_type *bus)
+void dma_debug_add_bus(struct bus_type *bus)
 {
 	struct notifier_block *nb;
 
@@ -1280,13 +1274,13 @@ void debug_dma_mapping_error(struct device *dev, dma_addr_t dma_addr)
 }
 EXPORT_SYMBOL(debug_dma_mapping_error);
 
-void debug_dma_unmap_page(struct device *dev, dma_addr_t dma_addr,
+void debug_dma_unmap_page(struct device *dev, dma_addr_t addr,
 			  size_t size, int direction)
 {
 	struct dma_debug_entry ref = {
 		.type           = dma_debug_single,
 		.dev            = dev,
-		.dev_addr       = dma_addr,
+		.dev_addr       = addr,
 		.size           = size,
 		.direction      = direction,
 	};
@@ -1421,13 +1415,13 @@ void debug_dma_alloc_coherent(struct device *dev, size_t size,
 }
 
 void debug_dma_free_coherent(struct device *dev, size_t size,
-			 void *virt, dma_addr_t dma_addr)
+			 void *virt, dma_addr_t addr)
 {
 	struct dma_debug_entry ref = {
 		.type           = dma_debug_coherent,
 		.dev            = dev,
 		.offset		= offset_in_page(virt),
-		.dev_addr       = dma_addr,
+		.dev_addr       = addr,
 		.size           = size,
 		.direction      = DMA_BIDIRECTIONAL,
 	};

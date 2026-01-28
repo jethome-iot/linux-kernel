@@ -25,11 +25,11 @@ static const struct mvs_chip_info mvs_chips[] = {
 	[chip_1320] =	{ 2, 4, 0x800, 17, 64, 8,  9, &mvs_94xx_dispatch, },
 };
 
-static const struct attribute_group *mvst_host_groups[];
+static struct device_attribute *mvst_host_attrs[];
 
 #define SOC_SAS_NUM 2
 
-static const struct scsi_host_template mvs_sht = {
+static struct scsi_host_template mvs_sht = {
 	.module			= THIS_MODULE,
 	.name			= DRV_NAME,
 	.queuecommand		= sas_queuecommand,
@@ -52,7 +52,7 @@ static const struct scsi_host_template mvs_sht = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl		= sas_ioctl,
 #endif
-	.shost_groups		= mvst_host_groups,
+	.shost_attrs		= mvst_host_attrs,
 	.track_queue_depth	= 1,
 };
 
@@ -63,8 +63,9 @@ static struct sas_domain_function_template mvs_transport_ops = {
 	.lldd_control_phy	= mvs_phy_control,
 
 	.lldd_abort_task	= mvs_abort_task,
-	.lldd_abort_task_set    = sas_abort_task_set,
-	.lldd_clear_task_set    = sas_clear_task_set,
+	.lldd_abort_task_set    = mvs_abort_task_set,
+	.lldd_clear_aca         = mvs_clear_aca,
+	.lldd_clear_task_set    = mvs_clear_task_set,
 	.lldd_I_T_nexus_reset	= mvs_I_T_nexus_reset,
 	.lldd_lu_reset 		= mvs_lu_reset,
 	.lldd_query_task	= mvs_query_task,
@@ -84,8 +85,10 @@ static void mvs_phy_init(struct mvs_info *mvi, int phy_id)
 	phy->port = NULL;
 	timer_setup(&phy->timer, NULL, 0);
 	sas_phy->enabled = (phy_id < mvi->chip->n_phy) ? 1 : 0;
+	sas_phy->class = SAS;
 	sas_phy->iproto = SAS_PROTOCOL_ALL;
 	sas_phy->tproto = 0;
+	sas_phy->type = PHY_TYPE_PHYSICAL;
 	sas_phy->role = PHY_ROLE_INITIATOR;
 	sas_phy->oob_mode = OOB_NOT_CONNECTED;
 	sas_phy->linkrate = SAS_LINK_RATE_UNKNOWN;
@@ -140,7 +143,7 @@ static void mvs_free(struct mvs_info *mvi)
 		scsi_host_put(mvi->shost);
 	list_for_each_entry(mwq, &mvi->wq_list, entry)
 		cancel_delayed_work(&mwq->work_q);
-	kfree(mvi->rsvd_tags);
+	kfree(mvi->tags);
 	kfree(mvi);
 }
 
@@ -282,7 +285,10 @@ static int mvs_alloc(struct mvs_info *mvi, struct Scsi_Host *shost)
 			printk(KERN_DEBUG "failed to create dma pool %s.\n", pool_name);
 			goto err_out;
 	}
+	mvi->tags_num = slot_nr;
 
+	/* Initialize tags */
+	mvs_tag_init(mvi);
 	return 0;
 err_out:
 	return 1;
@@ -364,8 +370,8 @@ static struct mvs_info *mvs_pci_alloc(struct pci_dev *pdev,
 	mvi->sas = sha;
 	mvi->shost = shost;
 
-	mvi->rsvd_tags = bitmap_zalloc(MVS_RSVD_SLOTS, GFP_KERNEL);
-	if (!mvi->rsvd_tags)
+	mvi->tags = kzalloc(MVS_CHIP_SLOT_SZ>>3, GFP_KERNEL);
+	if (!mvi->tags)
 		goto err_out;
 
 	if (MVS_CHIP_DISP->chip_ioremap(mvi))
@@ -414,7 +420,7 @@ static int mvs_prep_sas_ha_init(struct Scsi_Host *shost,
 
 	sha->sas_phy = arr_phy;
 	sha->sas_port = arr_port;
-	sha->shost = shost;
+	sha->core.shost = shost;
 
 	sha->lldd_ha = kzalloc(sizeof(struct mvs_prv_info), GFP_KERNEL);
 	if (!sha->lldd_ha)
@@ -456,6 +462,7 @@ static void  mvs_post_sas_ha_init(struct Scsi_Host *shost,
 
 	sha->sas_ha_name = DRV_NAME;
 	sha->dev = mvi->dev;
+	sha->lldd_module = THIS_MODULE;
 	sha->sas_addr = &mvi->sas_addr[0];
 
 	sha->num_phys = nr_core * chip_info->n_phy;
@@ -465,12 +472,10 @@ static void  mvs_post_sas_ha_init(struct Scsi_Host *shost,
 	else
 		can_queue = MVS_CHIP_SLOT_SZ;
 
-	can_queue -= MVS_RSVD_SLOTS;
-
 	shost->sg_tablesize = min_t(u16, SG_ALL, MVS_MAX_SG);
 	shost->can_queue = can_queue;
 	mvi->shost->cmd_per_lun = MVS_QUEUE_SIZE;
-	sha->shost = mvi->shost;
+	sha->core.shost = mvi->shost;
 }
 
 static void mvs_init_sas_add(struct mvs_info *mvi)
@@ -489,6 +494,7 @@ static int mvs_pci_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	unsigned int rc, nhost = 0;
 	struct mvs_info *mvi;
+	struct mvs_prv_info *mpi;
 	irq_handler_t irq_handler = mvs_interrupt;
 	struct Scsi_Host *shost = NULL;
 	const struct mvs_chip_info *chip;
@@ -553,13 +559,10 @@ static int mvs_pci_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 		}
 		nhost++;
 	} while (nhost < chip->n_host);
+	mpi = (struct mvs_prv_info *)(SHOST_TO_SAS_HA(shost)->lldd_ha);
 #ifdef CONFIG_SCSI_MVSAS_TASKLET
-	{
-	struct mvs_prv_info *mpi = SHOST_TO_SAS_HA(shost)->lldd_ha;
-
 	tasklet_init(&(mpi->mv_tasklet), mvs_tasklet,
 		     (unsigned long)SHOST_TO_SAS_HA(shost));
-	}
 #endif
 
 	mvs_post_sas_ha_init(shost, chip);
@@ -771,13 +774,11 @@ static void __exit mvs_exit(void)
 	sas_release_transport(mvs_stt);
 }
 
-static struct attribute *mvst_host_attrs[] = {
-	&dev_attr_driver_version.attr,
-	&dev_attr_interrupt_coalescing.attr,
+static struct device_attribute *mvst_host_attrs[] = {
+	&dev_attr_driver_version,
+	&dev_attr_interrupt_coalescing,
 	NULL,
 };
-
-ATTRIBUTE_GROUPS(mvst_host);
 
 module_init(mvs_init);
 module_exit(mvs_exit);

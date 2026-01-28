@@ -30,20 +30,19 @@
 #include <linux/vgaarb.h>
 #include <linux/numa.h>
 #include <linux/msi.h>
-#include <linux/irqdomain.h>
 
 #include <asm/processor.h>
 #include <asm/io.h>
+#include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <asm/byteorder.h>
 #include <asm/machdep.h>
 #include <asm/ppc-pci.h>
 #include <asm/eeh.h>
-#include <asm/setup.h>
 
 #include "../../../drivers/pci/pci.h"
 
-/* hose_spinlock protects accesses to the phb_bitmap. */
+/* hose_spinlock protects accesses to the the phb_bitmap. */
 static DEFINE_SPINLOCK(hose_spinlock);
 LIST_HEAD(hose_list);
 
@@ -63,7 +62,7 @@ EXPORT_SYMBOL(isa_mem_base);
 
 static const struct dma_map_ops *pci_dma_ops;
 
-void __init set_pci_dma_ops(const struct dma_map_ops *dma_ops)
+void set_pci_dma_ops(const struct dma_map_ops *dma_ops)
 {
 	pci_dma_ops = dma_ops;
 }
@@ -125,7 +124,7 @@ struct pci_controller *pcibios_alloc_controller(struct device_node *dev)
 {
 	struct pci_controller *phb;
 
-	phb = kzalloc(sizeof(struct pci_controller), GFP_KERNEL);
+	phb = zalloc_maybe_bootmem(sizeof(struct pci_controller), GFP_KERNEL);
 	if (phb == NULL)
 		return NULL;
 
@@ -135,7 +134,7 @@ struct pci_controller *pcibios_alloc_controller(struct device_node *dev)
 	list_add_tail(&phb->list_node, &hose_list);
 	spin_unlock(&hose_spinlock);
 
-	phb->dn = of_node_get(dev);
+	phb->dn = dev;
 	phb->is_dynamic = slab_is_available();
 #ifdef CONFIG_PPC64
 	if (dev) {
@@ -158,7 +157,7 @@ void pcibios_free_controller(struct pci_controller *phb)
 	/* Clear bit of phb_bitmap to allow reuse of this PHB number. */
 	if (phb->global_number < MAX_PHBS)
 		clear_bit(phb->global_number, phb_bitmap);
-	of_node_put(phb->dn);
+
 	list_del(&phb->list_node);
 	spin_unlock(&hose_spinlock);
 
@@ -521,7 +520,8 @@ int pci_iobar_pfn(struct pci_dev *pdev, int bar, struct vm_area_struct *vma)
  * PCI device, it tries to find the PCI device first and calls the
  * above routine
  */
-pgprot_t pci_phys_mem_access_prot(unsigned long pfn,
+pgprot_t pci_phys_mem_access_prot(struct file *file,
+				  unsigned long pfn,
 				  unsigned long size,
 				  pgprot_t prot)
 {
@@ -879,7 +879,6 @@ int pcibios_root_bridge_prepare(struct pci_host_bridge *bridge)
 static void pcibios_fixup_resources(struct pci_dev *dev)
 {
 	struct pci_controller *hose = pci_bus_to_host(dev->bus);
-	struct resource *res;
 	int i;
 
 	if (!hose) {
@@ -891,9 +890,9 @@ static void pcibios_fixup_resources(struct pci_dev *dev)
 	if (dev->is_virtfn)
 		return;
 
-	pci_dev_for_each_resource(dev, res, i) {
+	for (i = 0; i < DEVICE_COUNT_RESOURCE; i++) {
+		struct resource *res = dev->resource + i;
 		struct pci_bus_region reg;
-
 		if (!res->flags)
 			continue;
 
@@ -1077,7 +1076,7 @@ void pcibios_bus_add_device(struct pci_dev *dev)
 		ppc_md.pcibios_bus_add_device(dev);
 }
 
-int pcibios_device_add(struct pci_dev *dev)
+int pcibios_add_device(struct pci_dev *dev)
 {
 	struct irq_domain *d;
 
@@ -1105,7 +1104,7 @@ void pcibios_fixup_bus(struct pci_bus *bus)
 	 */
 	pci_read_bridge_bases(bus);
 
-	/* Now fixup the bus */
+	/* Now fixup the bus bus */
 	pcibios_setup_bus_self(bus);
 }
 EXPORT_SYMBOL(pcibios_fixup_bus);
@@ -1452,10 +1451,11 @@ void pcibios_claim_one_bus(struct pci_bus *bus)
 	struct pci_bus *child_bus;
 
 	list_for_each_entry(dev, &bus->devices, bus_list) {
-		struct resource *r;
 		int i;
 
-		pci_dev_for_each_resource(dev, r, i) {
+		for (i = 0; i < PCI_NUM_RESOURCES; i++) {
+			struct resource *r = &dev->resource[i];
+
 			if (r->parent || !r->start || !r->flags)
 				continue;
 
@@ -1704,20 +1704,19 @@ EXPORT_SYMBOL_GPL(pcibios_scan_phb);
 
 static void fixup_hide_host_resource_fsl(struct pci_dev *dev)
 {
-	int class = dev->class >> 8;
-	/* When configured as agent, programming interface = 1 */
+	int i, class = dev->class >> 8;
+	/* When configured as agent, programing interface = 1 */
 	int prog_if = dev->class & 0xf;
-	struct resource *r;
 
 	if ((class == PCI_CLASS_PROCESSOR_POWERPC ||
 	     class == PCI_CLASS_BRIDGE_OTHER) &&
 		(dev->hdr_type == PCI_HEADER_TYPE_NORMAL) &&
 		(prog_if == 0) &&
 		(dev->bus->parent == NULL)) {
-		pci_dev_for_each_resource(dev, r) {
-			r->start = 0;
-			r->end = 0;
-			r->flags = 0;
+		for (i = 0; i < DEVICE_COUNT_RESOURCE; i++) {
+			dev->resource[i].start = 0;
+			dev->resource[i].end = 0;
+			dev->resource[i].flags = 0;
 		}
 	}
 }

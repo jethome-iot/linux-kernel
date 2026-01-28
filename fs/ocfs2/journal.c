@@ -15,7 +15,6 @@
 #include <linux/time.h>
 #include <linux/random.h>
 #include <linux/delay.h>
-#include <linux/writeback.h>
 
 #include <cluster/masklog.h>
 
@@ -90,7 +89,7 @@ enum ocfs2_replay_state {
 struct ocfs2_replay_map {
 	unsigned int rm_slots;
 	enum ocfs2_replay_state rm_state;
-	unsigned char rm_replay_slots[] __counted_by(rm_slots);
+	unsigned char rm_replay_slots[];
 };
 
 static void ocfs2_replay_map_set_state(struct ocfs2_super *osb, int state)
@@ -114,9 +113,9 @@ int ocfs2_compute_replay_slots(struct ocfs2_super *osb)
 	if (osb->replay_map)
 		return 0;
 
-	replay_map = kzalloc(struct_size(replay_map, rm_replay_slots,
-					 osb->max_slots),
-			     GFP_KERNEL);
+	replay_map = kzalloc(sizeof(struct ocfs2_replay_map) +
+			     (osb->max_slots * sizeof(char)), GFP_KERNEL);
+
 	if (!replay_map) {
 		mlog_errno(-ENOMEM);
 		return -ENOMEM;
@@ -178,13 +177,16 @@ int ocfs2_recovery_init(struct ocfs2_super *osb)
 	osb->recovery_thread_task = NULL;
 	init_waitqueue_head(&osb->recovery_event);
 
-	rm = kzalloc(struct_size(rm, rm_entries, osb->max_slots),
+	rm = kzalloc(sizeof(struct ocfs2_recovery_map) +
+		     osb->max_slots * sizeof(unsigned int),
 		     GFP_KERNEL);
 	if (!rm) {
 		mlog_errno(-ENOMEM);
 		return -ENOMEM;
 	}
 
+	rm->rm_entries = (unsigned int *)((char *)rm +
+					  sizeof(struct ocfs2_recovery_map));
 	osb->recovery_map = rm;
 
 	return 0;
@@ -554,7 +556,7 @@ static void ocfs2_abort_trigger(struct jbd2_buffer_trigger_type *triggers,
 	     (unsigned long)bh,
 	     (unsigned long long)bh->b_blocknr);
 
-	ocfs2_error(bh->b_assoc_map->host->i_sb,
+	ocfs2_error(bh->b_bdev->bd_super,
 		    "JBD2 has aborted our journal, ocfs2 cannot continue\n");
 }
 
@@ -777,14 +779,14 @@ void ocfs2_journal_dirty(handle_t *handle, struct buffer_head *bh)
 		mlog_errno(status);
 		if (!is_handle_aborted(handle)) {
 			journal_t *journal = handle->h_transaction->t_journal;
+			struct super_block *sb = bh->b_bdev->bd_super;
 
 			mlog(ML_ERROR, "jbd2_journal_dirty_metadata failed. "
 					"Aborting transaction and journal.\n");
 			handle->h_err = status;
 			jbd2_journal_abort_handle(handle);
 			jbd2_journal_abort(journal, status);
-			ocfs2_abort(bh->b_assoc_map->host->i_sb,
-				    "Journal already aborted.\n");
+			ocfs2_abort(sb, "Journal already aborted.\n");
 		}
 	}
 }
@@ -808,61 +810,20 @@ void ocfs2_set_journal_params(struct ocfs2_super *osb)
 	write_unlock(&journal->j_state_lock);
 }
 
-/*
- * alloc & initialize skeleton for journal structure.
- * ocfs2_journal_init() will make fs have journal ability.
- */
-int ocfs2_journal_alloc(struct ocfs2_super *osb)
-{
-	int status = 0;
-	struct ocfs2_journal *journal;
-
-	journal = kzalloc(sizeof(struct ocfs2_journal), GFP_KERNEL);
-	if (!journal) {
-		mlog(ML_ERROR, "unable to alloc journal\n");
-		status = -ENOMEM;
-		goto bail;
-	}
-	osb->journal = journal;
-	journal->j_osb = osb;
-
-	atomic_set(&journal->j_num_trans, 0);
-	init_rwsem(&journal->j_trans_barrier);
-	init_waitqueue_head(&journal->j_checkpointed);
-	spin_lock_init(&journal->j_lock);
-	journal->j_trans_id = 1UL;
-	INIT_LIST_HEAD(&journal->j_la_cleanups);
-	INIT_WORK(&journal->j_recovery_work, ocfs2_complete_recovery);
-	journal->j_state = OCFS2_JOURNAL_FREE;
-
-bail:
-	return status;
-}
-
-static int ocfs2_journal_submit_inode_data_buffers(struct jbd2_inode *jinode)
-{
-	struct address_space *mapping = jinode->i_vfs_inode->i_mapping;
-	struct writeback_control wbc = {
-		.sync_mode =  WB_SYNC_ALL,
-		.nr_to_write = mapping->nrpages * 2,
-		.range_start = jinode->i_dirty_start,
-		.range_end = jinode->i_dirty_end,
-	};
-
-	return filemap_fdatawrite_wbc(mapping, &wbc);
-}
-
-int ocfs2_journal_init(struct ocfs2_super *osb, int *dirty)
+int ocfs2_journal_init(struct ocfs2_journal *journal, int *dirty)
 {
 	int status = -1;
 	struct inode *inode = NULL; /* the journal inode */
 	journal_t *j_journal = NULL;
-	struct ocfs2_journal *journal = osb->journal;
 	struct ocfs2_dinode *di = NULL;
 	struct buffer_head *bh = NULL;
+	struct ocfs2_super *osb;
 	int inode_lock = 0;
 
 	BUG_ON(!journal);
+
+	osb = journal->j_osb;
+
 	/* already have the inode for our journal */
 	inode = ocfs2_get_system_file_inode(osb, JOURNAL_SYSTEM_INODE,
 					    osb->slot_num);
@@ -908,9 +869,9 @@ int ocfs2_journal_init(struct ocfs2_super *osb, int *dirty)
 
 	/* call the kernels journal init function now */
 	j_journal = jbd2_journal_init_inode(inode);
-	if (IS_ERR(j_journal)) {
+	if (j_journal == NULL) {
 		mlog(ML_ERROR, "Linux journal layer error\n");
-		status = PTR_ERR(j_journal);
+		status = -EINVAL;
 		goto done;
 	}
 
@@ -921,7 +882,7 @@ int ocfs2_journal_init(struct ocfs2_super *osb, int *dirty)
 
 	journal->j_journal = j_journal;
 	journal->j_journal->j_submit_inode_data_buffers =
-		ocfs2_journal_submit_inode_data_buffers;
+		jbd2_journal_submit_inode_data_buffers;
 	journal->j_journal->j_finish_inode_data_buffers =
 		jbd2_journal_finish_inode_data_buffers;
 	journal->j_inode = inode;
@@ -1067,10 +1028,9 @@ void ocfs2_journal_shutdown(struct ocfs2_super *osb)
 
 	journal->j_state = OCFS2_JOURNAL_FREE;
 
+//	up_write(&journal->j_trans_barrier);
 done:
 	iput(inode);
-	kfree(journal);
-	osb->journal = NULL;
 }
 
 static void ocfs2_clear_journal_error(struct super_block *sb,
@@ -1537,7 +1497,10 @@ bail:
 	if (quota_enabled)
 		kfree(rm_quota);
 
-	return status;
+	/* no one is callint kthread_stop() for us so the kthread() api
+	 * requires that we call do_exit().  And it isn't exported, but
+	 * complete_and_exit() seems to be a minimal wrapper around it. */
+	complete_and_exit(NULL, status);
 }
 
 void ocfs2_recovery_thread(struct ocfs2_super *osb, int node_num)
@@ -1684,16 +1647,17 @@ static int ocfs2_replay_journal(struct ocfs2_super *osb,
 	}
 
 	journal = jbd2_journal_init_inode(inode);
-	if (IS_ERR(journal)) {
+	if (journal == NULL) {
 		mlog(ML_ERROR, "Linux journal layer error\n");
-		status = PTR_ERR(journal);
+		status = -EIO;
 		goto done;
 	}
 
 	status = jbd2_journal_load(journal);
 	if (status < 0) {
 		mlog_errno(status);
-		BUG_ON(!igrab(inode));
+		if (!igrab(inode))
+			BUG();
 		jbd2_journal_destroy(journal);
 		goto done;
 	}
@@ -1722,7 +1686,8 @@ static int ocfs2_replay_journal(struct ocfs2_super *osb,
 	if (status < 0)
 		mlog_errno(status);
 
-	BUG_ON(!igrab(inode));
+	if (!igrab(inode))
+		BUG();
 
 	jbd2_journal_destroy(journal);
 
@@ -2068,7 +2033,7 @@ struct ocfs2_orphan_filldir_priv {
 	enum ocfs2_orphan_reco_type orphan_reco_type;
 };
 
-static bool ocfs2_orphan_filldir(struct dir_context *ctx, const char *name,
+static int ocfs2_orphan_filldir(struct dir_context *ctx, const char *name,
 				int name_len, loff_t pos, u64 ino,
 				unsigned type)
 {
@@ -2077,21 +2042,21 @@ static bool ocfs2_orphan_filldir(struct dir_context *ctx, const char *name,
 	struct inode *iter;
 
 	if (name_len == 1 && !strncmp(".", name, 1))
-		return true;
+		return 0;
 	if (name_len == 2 && !strncmp("..", name, 2))
-		return true;
+		return 0;
 
 	/* do not include dio entry in case of orphan scan */
 	if ((p->orphan_reco_type == ORPHAN_NO_NEED_TRUNCATE) &&
 			(!strncmp(name, OCFS2_DIO_ORPHAN_PREFIX,
 			OCFS2_DIO_ORPHAN_PREFIX_LEN)))
-		return true;
+		return 0;
 
 	/* Skip bad inodes so that recovery can continue */
 	iter = ocfs2_iget(p->osb, ino,
 			  OCFS2_FI_FLAG_ORPHAN_RECOVERY, 0);
 	if (IS_ERR(iter))
-		return true;
+		return 0;
 
 	if (!strncmp(name, OCFS2_DIO_ORPHAN_PREFIX,
 			OCFS2_DIO_ORPHAN_PREFIX_LEN))
@@ -2101,7 +2066,7 @@ static bool ocfs2_orphan_filldir(struct dir_context *ctx, const char *name,
 	 * happen concurrently with unlink/rename */
 	if (OCFS2_I(iter)->ip_next_orphan) {
 		iput(iter);
-		return true;
+		return 0;
 	}
 
 	trace_ocfs2_orphan_filldir((unsigned long long)OCFS2_I(iter)->ip_blkno);
@@ -2110,7 +2075,7 @@ static bool ocfs2_orphan_filldir(struct dir_context *ctx, const char *name,
 	OCFS2_I(iter)->ip_next_orphan = p->head;
 	p->head = iter;
 
-	return true;
+	return 0;
 }
 
 static int ocfs2_queue_orphans(struct ocfs2_super *osb,

@@ -7,8 +7,6 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: Broadcom UniMAC MDIO bus controller
 
 maintainers:
-  - Doug Berger <opendmb@gmail.com>
-  - Florian Fainelli <f.fainelli@gmail.com>
   - Rafał Miłecki <rafal@milecki.pl>
 
 allOf:
@@ -22,8 +20,6 @@ properties:
       - brcm,genet-mdio-v3
       - brcm,genet-mdio-v4
       - brcm,genet-mdio-v5
-      - brcm,asp-v2.0-mdio
-      - brcm,asp-v2.1-mdio
       - brcm,unimac-mdio
 
   reg:
@@ -68,6 +64,7 @@ unevaluatedProperties: false
 
 required:
   - reg
+  - reg-names
   - '#address-cells'
   - '#size-cells'
 

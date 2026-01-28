@@ -11,9 +11,7 @@ maintainers:
 
 properties:
   compatible:
-    enum:
-      - ti,tusb320
-      - ti,tusb320l
+    const: ti,tusb320
 
   reg:
     maxItems: 1
@@ -30,7 +28,7 @@ additionalProperties: false
 
 examples:
   - |
-    i2c {
+    i2c0 {
         #address-cells = <1>;
         #size-cells = <0>;
         tusb320@61 {

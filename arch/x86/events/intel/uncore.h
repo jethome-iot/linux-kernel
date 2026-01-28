@@ -34,8 +34,6 @@
 
 #define UNCORE_EVENT_CONSTRAINT(c, n) EVENT_CONSTRAINT(c, n, 0xff)
 
-#define UNCORE_IGNORE_END		-1
-
 struct pci_extra_dev {
 	struct pci_dev *dev[UNCORE_EXTRA_PCI_DEV_MAX];
 };
@@ -72,9 +70,9 @@ struct intel_uncore_type {
 	unsigned single_fixed:1;
 	unsigned pair_ctr_ctl:1;
 	union {
-		u64 *msr_offsets;
-		u64 *pci_offsets;
-		u64 *mmio_offsets;
+		unsigned *msr_offsets;
+		unsigned *pci_offsets;
+		unsigned *mmio_offsets;
 	};
 	unsigned *box_ids;
 	struct event_constraint unconstrainted;
@@ -91,12 +89,12 @@ struct intel_uncore_type {
 	 * to identify which platform component each PMON block of that type is
 	 * supposed to monitor.
 	 */
-	struct intel_uncore_topology **topology;
+	struct intel_uncore_topology *topology;
 	/*
 	 * Optional callbacks for managing mapping of Uncore units to PMONs
 	 */
 	int (*get_topology)(struct intel_uncore_type *type);
-	void (*set_mapping)(struct intel_uncore_type *type);
+	int (*set_mapping)(struct intel_uncore_type *type);
 	void (*cleanup_mapping)(struct intel_uncore_type *type);
 };
 
@@ -181,24 +179,9 @@ struct freerunning_counters {
 	unsigned *box_offsets;
 };
 
-struct uncore_iio_topology {
-	int pci_bus_no;
-	int segment;
-};
-
-struct uncore_upi_topology {
-	int die_to;
-	int pmu_idx_to;
-	int enabled;
-};
-
 struct intel_uncore_topology {
-	int pmu_idx;
-	union {
-		void *untyped;
-		struct uncore_iio_topology *iio;
-		struct uncore_upi_topology *upi;
-	};
+	u64 configuration;
+	int segment;
 };
 
 struct pci2phy_map {
@@ -210,7 +193,6 @@ struct pci2phy_map {
 struct pci2phy_map *__find_pci2phy_map(int segment);
 int uncore_pcibus_to_dieid(struct pci_bus *bus);
 int uncore_die_to_segment(int die);
-int uncore_device_to_die(struct pci_dev *dev);
 
 ssize_t uncore_event_show(struct device *dev,
 			  struct device_attribute *attr, char *buf);
@@ -592,8 +574,6 @@ extern raw_spinlock_t pci2phy_map_lock;
 extern struct list_head pci2phy_map_head;
 extern struct pci_extra_dev *uncore_extra_pci_dev;
 extern struct event_constraint uncore_constraint_empty;
-extern int spr_uncore_units_ignore[];
-extern int gnr_uncore_units_ignore[];
 
 /* uncore_snb.c */
 int snb_uncore_pci_init(void);
@@ -605,12 +585,10 @@ void snb_uncore_cpu_init(void);
 void nhm_uncore_cpu_init(void);
 void skl_uncore_cpu_init(void);
 void icl_uncore_cpu_init(void);
-void tgl_uncore_cpu_init(void);
 void adl_uncore_cpu_init(void);
-void mtl_uncore_cpu_init(void);
+void tgl_uncore_cpu_init(void);
 void tgl_uncore_mmio_init(void);
 void tgl_l_uncore_mmio_init(void);
-void adl_uncore_mmio_init(void);
 int snb_pci2phy_map_init(int devid);
 
 /* uncore_snbep.c */
@@ -635,9 +613,6 @@ void icx_uncore_mmio_init(void);
 int spr_uncore_pci_init(void);
 void spr_uncore_cpu_init(void);
 void spr_uncore_mmio_init(void);
-int gnr_uncore_pci_init(void);
-void gnr_uncore_cpu_init(void);
-void gnr_uncore_mmio_init(void);
 
 /* uncore_nhmex.c */
 void nhmex_uncore_cpu_init(void);

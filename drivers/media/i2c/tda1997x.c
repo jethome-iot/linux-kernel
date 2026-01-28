@@ -1092,82 +1092,67 @@ tda1997x_detect_std(struct tda1997x_state *state,
 		    struct v4l2_dv_timings *timings)
 {
 	struct v4l2_subdev *sd = &state->sd;
+	u32 vper;
+	u16 hper;
+	u16 hsper;
+	int i;
 
 	/*
 	 * Read the FMT registers
-	 *   REG_V_PER: Period of a frame (or field) in MCLK (27MHz) cycles
-	 *   REG_H_PER: Period of a line in MCLK (27MHz) cycles
-	 *   REG_HS_WIDTH: Period of horiz sync pulse in MCLK (27MHz) cycles
+	 *   REG_V_PER: Period of a frame (or two fields) in MCLK(27MHz) cycles
+	 *   REG_H_PER: Period of a line in MCLK(27MHz) cycles
+	 *   REG_HS_WIDTH: Period of horiz sync pulse in MCLK(27MHz) cycles
 	 */
-	u32 vper, vsync_pos;
-	u16 hper, hsync_pos, hsper, interlaced;
-	u16 htot, hact, hfront, hsync, hback;
-	u16 vtot, vact, vfront1, vfront2, vsync, vback1, vback2;
+	vper = io_read24(sd, REG_V_PER) & MASK_VPER;
+	hper = io_read16(sd, REG_H_PER) & MASK_HPER;
+	hsper = io_read16(sd, REG_HS_WIDTH) & MASK_HSWIDTH;
+	v4l2_dbg(1, debug, sd, "Signal Timings: %u/%u/%u\n", vper, hper, hsper);
 
 	if (!state->input_detect[0] && !state->input_detect[1])
 		return -ENOLINK;
 
-	vper = io_read24(sd, REG_V_PER);
-	hper = io_read16(sd, REG_H_PER);
-	hsper = io_read16(sd, REG_HS_WIDTH);
-	vsync_pos = vper & MASK_VPER_SYNC_POS;
-	hsync_pos = hper & MASK_HPER_SYNC_POS;
-	interlaced = hsper & MASK_HSWIDTH_INTERLACED;
-	vper &= MASK_VPER;
-	hper &= MASK_HPER;
-	hsper &= MASK_HSWIDTH;
-	v4l2_dbg(1, debug, sd, "Signal Timings: %u/%u/%u\n", vper, hper, hsper);
+	for (i = 0; v4l2_dv_timings_presets[i].bt.width; i++) {
+		const struct v4l2_bt_timings *bt;
+		u32 lines, width, _hper, _hsper;
+		u32 vmin, vmax, hmin, hmax, hsmin, hsmax;
+		bool vmatch, hmatch, hsmatch;
 
-	htot = io_read16(sd, REG_FMT_H_TOT);
-	hact = io_read16(sd, REG_FMT_H_ACT);
-	hfront = io_read16(sd, REG_FMT_H_FRONT);
-	hsync = io_read16(sd, REG_FMT_H_SYNC);
-	hback = io_read16(sd, REG_FMT_H_BACK);
+		bt = &v4l2_dv_timings_presets[i].bt;
+		width = V4L2_DV_BT_FRAME_WIDTH(bt);
+		lines = V4L2_DV_BT_FRAME_HEIGHT(bt);
+		_hper = (u32)bt->pixelclock / width;
+		if (bt->interlaced)
+			lines /= 2;
+		/* vper +/- 0.7% */
+		vmin = ((27000000 / 1000) * 993) / _hper * lines;
+		vmax = ((27000000 / 1000) * 1007) / _hper * lines;
+		/* hper +/- 1.0% */
+		hmin = ((27000000 / 100) * 99) / _hper;
+		hmax = ((27000000 / 100) * 101) / _hper;
+		/* hsper +/- 2 (take care to avoid 32bit overflow) */
+		_hsper = 27000 * bt->hsync / ((u32)bt->pixelclock/1000);
+		hsmin = _hsper - 2;
+		hsmax = _hsper + 2;
 
-	vtot = io_read16(sd, REG_FMT_V_TOT);
-	vact = io_read16(sd, REG_FMT_V_ACT);
-	vfront1 = io_read(sd, REG_FMT_V_FRONT_F1);
-	vfront2 = io_read(sd, REG_FMT_V_FRONT_F2);
-	vsync = io_read(sd, REG_FMT_V_SYNC);
-	vback1 = io_read(sd, REG_FMT_V_BACK_F1);
-	vback2 = io_read(sd, REG_FMT_V_BACK_F2);
-
-	v4l2_dbg(1, debug, sd, "Geometry: H %u %u %u %u %u Sync%c  V %u %u %u %u %u %u %u Sync%c\n",
-		 htot, hact, hfront, hsync, hback, hsync_pos ? '+' : '-',
-		 vtot, vact, vfront1, vfront2, vsync, vback1, vback2, vsync_pos ? '+' : '-');
-
-	if (!timings)
-		return 0;
-
-	timings->type = V4L2_DV_BT_656_1120;
-	timings->bt.width = hact;
-	timings->bt.hfrontporch = hfront;
-	timings->bt.hsync = hsync;
-	timings->bt.hbackporch = hback;
-	timings->bt.height = vact;
-	timings->bt.vfrontporch = vfront1;
-	timings->bt.vsync = vsync;
-	timings->bt.vbackporch = vback1;
-	timings->bt.interlaced = interlaced ? V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
-	timings->bt.polarities = vsync_pos ? V4L2_DV_VSYNC_POS_POL : 0;
-	timings->bt.polarities |= hsync_pos ? V4L2_DV_HSYNC_POS_POL : 0;
-
-	timings->bt.pixelclock = (u64)htot * vtot * 27000000;
-	if (interlaced) {
-		timings->bt.il_vfrontporch = vfront2;
-		timings->bt.il_vsync = timings->bt.vsync;
-		timings->bt.il_vbackporch = vback2;
-		do_div(timings->bt.pixelclock, vper * 2 /* full frame */);
-	} else {
-		timings->bt.il_vfrontporch = 0;
-		timings->bt.il_vsync = 0;
-		timings->bt.il_vbackporch = 0;
-		do_div(timings->bt.pixelclock, vper);
+		/* vmatch matches the framerate */
+		vmatch = ((vper <= vmax) && (vper >= vmin)) ? 1 : 0;
+		/* hmatch matches the width */
+		hmatch = ((hper <= hmax) && (hper >= hmin)) ? 1 : 0;
+		/* hsmatch matches the hswidth */
+		hsmatch = ((hsper <= hsmax) && (hsper >= hsmin)) ? 1 : 0;
+		if (hmatch && vmatch && hsmatch) {
+			v4l2_print_dv_timings(sd->name, "Detected format: ",
+					      &v4l2_dv_timings_presets[i],
+					      false);
+			if (timings)
+				*timings = v4l2_dv_timings_presets[i];
+			return 0;
+		}
 	}
-	v4l2_find_dv_timings_cap(timings, &tda1997x_dv_timings_cap,
-				 (u32)timings->bt.pixelclock / 500, NULL, NULL);
-	v4l2_print_dv_timings(sd->name, "Detected format: ", timings, false);
-	return 0;
+
+	v4l_err(state->client, "no resolution match for timings: %d/%d/%d\n",
+		vper, hper, hsper);
+	return -ERANGE;
 }
 
 /* some sort of errata workaround for chip revision 0 (N1) */
@@ -1734,13 +1719,13 @@ static const struct v4l2_subdev_video_ops tda1997x_video_ops = {
  * v4l2_subdev_pad_ops
  */
 
-static int tda1997x_init_state(struct v4l2_subdev *sd,
-			       struct v4l2_subdev_state *sd_state)
+static int tda1997x_init_cfg(struct v4l2_subdev *sd,
+			     struct v4l2_subdev_state *sd_state)
 {
 	struct tda1997x_state *state = to_state(sd);
 	struct v4l2_mbus_framefmt *mf;
 
-	mf = v4l2_subdev_state_get_format(sd_state, 0);
+	mf = v4l2_subdev_get_try_format(sd, sd_state, 0);
 	mf->code = state->mbus_codes[0];
 
 	return 0;
@@ -1792,7 +1777,7 @@ static int tda1997x_get_format(struct v4l2_subdev *sd,
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY) {
 		struct v4l2_mbus_framefmt *fmt;
 
-		fmt = v4l2_subdev_state_get_format(sd_state, format->pad);
+		fmt = v4l2_subdev_get_try_format(sd, sd_state, format->pad);
 		format->format.code = fmt->code;
 	} else
 		format->format.code = state->mbus_code;
@@ -1826,7 +1811,7 @@ static int tda1997x_set_format(struct v4l2_subdev *sd,
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY) {
 		struct v4l2_mbus_framefmt *fmt;
 
-		fmt = v4l2_subdev_state_get_format(sd_state, format->pad);
+		fmt = v4l2_subdev_get_try_format(sd, sd_state, format->pad);
 		*fmt = format->format;
 	} else {
 		int ret = tda1997x_setup_format(state, format->format.code);
@@ -1925,6 +1910,7 @@ static int tda1997x_enum_dv_timings(struct v4l2_subdev *sd,
 }
 
 static const struct v4l2_subdev_pad_ops tda1997x_pad_ops = {
+	.init_cfg = tda1997x_init_cfg,
 	.enum_mbus_code = tda1997x_enum_mbus_code,
 	.get_fmt = tda1997x_get_format,
 	.set_fmt = tda1997x_set_format,
@@ -2044,10 +2030,6 @@ static const struct v4l2_subdev_ops tda1997x_subdev_ops = {
 	.core = &tda1997x_core_ops,
 	.video = &tda1997x_video_ops,
 	.pad = &tda1997x_pad_ops,
-};
-
-static const struct v4l2_subdev_internal_ops tda1997x_internal_ops = {
-	.init_state = tda1997x_init_state,
 };
 
 /* -----------------------------------------------------------------------------
@@ -2468,8 +2450,7 @@ static const struct media_entity_operations tda1997x_media_ops = {
 static int tda1997x_pcm_startup(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
-	struct v4l2_subdev *sd = snd_soc_dai_get_drvdata(dai);
-	struct tda1997x_state *state = to_state(sd);
+	struct tda1997x_state *state = snd_soc_dai_get_drvdata(dai);
 	struct snd_soc_component *component = dai->component;
 	struct snd_pcm_runtime *rtd = substream->runtime;
 	int rate, err;
@@ -2520,11 +2501,12 @@ static struct snd_soc_component_driver tda1997x_codec_driver = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
-static int tda1997x_probe(struct i2c_client *client)
+static int tda1997x_probe(struct i2c_client *client,
+			 const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct tda1997x_state *state;
 	struct tda1997x_platform_data *pdata;
 	struct v4l2_subdev *sd;
@@ -2591,7 +2573,6 @@ static int tda1997x_probe(struct i2c_client *client)
 	/* initialize subdev */
 	sd = &state->sd;
 	v4l2_i2c_subdev_init(sd, client, &tda1997x_subdev_ops);
-	sd->internal_ops = &tda1997x_internal_ops;
 	snprintf(sd->name, sizeof(sd->name), "%s %d-%04x",
 		 id->name, i2c_adapter_id(client->adapter),
 		 client->addr);
@@ -2778,6 +2759,7 @@ static int tda1997x_probe(struct i2c_client *client)
 			dev_err(&client->dev, "register audio codec failed\n");
 			goto err_free_media;
 		}
+		dev_set_drvdata(&state->client->dev, state);
 		v4l_info(state->client, "registered audio codec\n");
 	}
 
@@ -2801,7 +2783,6 @@ err_free_mutex:
 	cancel_delayed_work(&state->delayed_work_enable_hpd);
 	mutex_destroy(&state->page_lock);
 	mutex_destroy(&state->lock);
-	tda1997x_set_power(state, 0);
 err_free_state:
 	kfree(state);
 	dev_err(&client->dev, "%s failed: %d\n", __func__, ret);
@@ -2809,7 +2790,7 @@ err_free_state:
 	return ret;
 }
 
-static void tda1997x_remove(struct i2c_client *client)
+static int tda1997x_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct tda1997x_state *state = to_state(sd);
@@ -2831,6 +2812,8 @@ static void tda1997x_remove(struct i2c_client *client)
 	mutex_destroy(&state->lock);
 
 	kfree(state);
+
+	return 0;
 }
 
 static struct i2c_driver tda1997x_i2c_driver = {

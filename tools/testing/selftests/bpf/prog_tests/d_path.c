@@ -9,19 +9,6 @@
 #define MAX_FILES		7
 
 #include "test_d_path.skel.h"
-#include "test_d_path_check_rdonly_mem.skel.h"
-#include "test_d_path_check_types.skel.h"
-
-/* sys_close_range is not around for long time, so let's
- * make sure we can call it on systems with older glibc
- */
-#ifndef __NR_close_range
-#ifdef __alpha__
-#define __NR_close_range 546
-#else
-#define __NR_close_range 436
-#endif
-#endif
 
 static int duration;
 
@@ -101,11 +88,7 @@ static int trigger_fstat_events(pid_t pid)
 	fstat(indicatorfd, &fileStat);
 
 out_close:
-	/* sys_close no longer triggers filp_close, but we can
-	 * call sys_close_range instead which still does
-	 */
-#define close(fd) syscall(__NR_close_range, fd, fd, 0)
-
+	/* triggers filp_close */
 	close(pipefd[0]);
 	close(pipefd[1]);
 	close(sockfd);
@@ -113,12 +96,10 @@ out_close:
 	close(devfd);
 	close(localfd);
 	close(indicatorfd);
-
-#undef close
 	return ret;
 }
 
-static void test_d_path_basic(void)
+void test_d_path(void)
 {
 	struct test_d_path__bss *bss;
 	struct test_d_path *skel;
@@ -173,36 +154,4 @@ static void test_d_path_basic(void)
 
 cleanup:
 	test_d_path__destroy(skel);
-}
-
-static void test_d_path_check_rdonly_mem(void)
-{
-	struct test_d_path_check_rdonly_mem *skel;
-
-	skel = test_d_path_check_rdonly_mem__open_and_load();
-	ASSERT_ERR_PTR(skel, "unexpected_load_overwriting_rdonly_mem");
-
-	test_d_path_check_rdonly_mem__destroy(skel);
-}
-
-static void test_d_path_check_types(void)
-{
-	struct test_d_path_check_types *skel;
-
-	skel = test_d_path_check_types__open_and_load();
-	ASSERT_ERR_PTR(skel, "unexpected_load_passing_wrong_type");
-
-	test_d_path_check_types__destroy(skel);
-}
-
-void test_d_path(void)
-{
-	if (test__start_subtest("basic"))
-		test_d_path_basic();
-
-	if (test__start_subtest("check_rdonly_mem"))
-		test_d_path_check_rdonly_mem();
-
-	if (test__start_subtest("check_alloc_mem"))
-		test_d_path_check_types();
 }

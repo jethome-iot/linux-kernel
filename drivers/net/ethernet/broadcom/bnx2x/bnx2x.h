@@ -1271,7 +1271,7 @@ struct bnx2x_fw_stats_data {
 	struct per_port_stats		port;
 	struct per_pf_stats		pf;
 	struct fcoe_statistics_params	fcoe;
-	struct per_queue_stats		queue_stats[];
+	struct per_queue_stats		queue_stats[1];
 };
 
 /* Public slow path states */
@@ -1486,6 +1486,7 @@ struct bnx2x {
 #define IS_VF_FLAG			(1 << 22)
 #define BC_SUPPORTS_RMMOD_CMD		(1 << 23)
 #define HAS_PHYS_PORT_ID		(1 << 24)
+#define AER_ENABLED			(1 << 25)
 #define PTP_SUPPORTED			(1 << 26)
 #define TX_TIMESTAMPING_EN		(1 << 27)
 
@@ -1507,8 +1508,6 @@ struct bnx2x {
 	bool			cnic_enabled;
 	bool			cnic_loaded;
 	struct cnic_eth_dev	*(*cnic_probe)(struct net_device *);
-
-	bool                    nic_stopped;
 
 	/* Flag that indicates that we can start looking for FCoE L2 queue
 	 * completions in the default status block.

@@ -1,0 +1,43 @@
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/meson-s7d-gpio.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	fragment@0 {
+		target-path = "/";
+
+		__overlay__ {
+			can0_clk: can0_clk {
+				compatible = "fixed-clock";
+				#clock-cells = <0>;
+				clock-frequency = <20000000>;
+			};
+		};
+	};
+	fragment@1 {
+		target = <&spicc0>;
+
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			num_chipselect = <1>;
+			pinctrl-names = "not-use-it", "default";
+			use-hw-cs;
+			cs-gpios = <0>;
+
+			mcp2517fd: can@0 {
+				compatible = "microchip,mcp2517fd";
+				reg = <0>;
+				clocks = <&can0_clk>;
+				interrupt-parent = <&gpio_intc>;
+				interrupts = <46 IRQ_TYPE_EDGE_FALLING>; /* GPIOX_5 */
+				spi-max-frequency = <10000000>;
+				status = "okay";
+			};
+		};
+	};
+};

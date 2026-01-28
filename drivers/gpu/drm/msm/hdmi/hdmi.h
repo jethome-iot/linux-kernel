@@ -48,8 +48,8 @@ struct hdmi {
 	void __iomem *qfprom_mmio;
 	phys_addr_t mmio_phy_addr;
 
-	struct regulator_bulk_data *hpd_regs;
-	struct regulator_bulk_data *pwr_regs;
+	struct regulator **hpd_regs;
+	struct regulator **pwr_regs;
 	struct clk **hpd_clks;
 	struct clk **pwr_clks;
 
@@ -61,8 +61,6 @@ struct hdmi {
 	struct i2c_adapter *i2c;
 	struct drm_connector *connector;
 	struct drm_bridge *bridge;
-
-	struct drm_bridge *next_bridge;
 
 	/* the encoder we are hooked to (outside of hdmi block) */
 	struct drm_encoder *encoder;
@@ -86,6 +84,9 @@ struct hdmi {
 
 /* platform config data (ie. from DT, or pdata) */
 struct hdmi_platform_config {
+	const char *mmio_name;
+	const char *qfprom_mmio_name;
+
 	/* regulators that need to be on for hpd: */
 	const char **hpd_reg_names;
 	int hpd_reg_cnt;
@@ -160,7 +161,7 @@ struct hdmi_phy {
 	void __iomem *mmio;
 	struct hdmi_phy_cfg *cfg;
 	const struct hdmi_phy_funcs *funcs;
-	struct regulator_bulk_data *regs;
+	struct regulator **regs;
 	struct clk **clks;
 };
 
@@ -224,13 +225,14 @@ void msm_hdmi_audio_set_sample_rate(struct hdmi *hdmi, int rate);
  * hdmi bridge:
  */
 
-int msm_hdmi_bridge_init(struct hdmi *hdmi);
+struct drm_bridge *msm_hdmi_bridge_init(struct hdmi *hdmi);
+void msm_hdmi_bridge_destroy(struct drm_bridge *bridge);
 
 void msm_hdmi_hpd_irq(struct drm_bridge *bridge);
 enum drm_connector_status msm_hdmi_bridge_detect(
 		struct drm_bridge *bridge);
 int msm_hdmi_hpd_enable(struct drm_bridge *bridge);
-void msm_hdmi_hpd_disable(struct hdmi *hdmi);
+void msm_hdmi_hpd_disable(struct hdmi_bridge *hdmi_bridge);
 
 /*
  * i2c adapter for ddc:

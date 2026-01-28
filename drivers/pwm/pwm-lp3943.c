@@ -8,9 +8,9 @@
  */
 
 #include <linux/err.h>
+#include <linux/i2c.h>
 #include <linux/mfd/lp3943.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
 #include <linux/slab.h>
@@ -23,12 +23,11 @@ struct lp3943_pwm {
 	struct pwm_chip chip;
 	struct lp3943 *lp3943;
 	struct lp3943_platform_data *pdata;
-	struct lp3943_pwm_map pwm_map[LP3943_NUM_PWMS];
 };
 
-static inline struct lp3943_pwm *to_lp3943_pwm(struct pwm_chip *chip)
+static inline struct lp3943_pwm *to_lp3943_pwm(struct pwm_chip *_chip)
 {
-	return container_of(chip, struct lp3943_pwm, chip);
+	return container_of(_chip, struct lp3943_pwm, chip);
 }
 
 static struct lp3943_pwm_map *
@@ -36,8 +35,12 @@ lp3943_pwm_request_map(struct lp3943_pwm *lp3943_pwm, int hwpwm)
 {
 	struct lp3943_platform_data *pdata = lp3943_pwm->pdata;
 	struct lp3943 *lp3943 = lp3943_pwm->lp3943;
-	struct lp3943_pwm_map *pwm_map = &lp3943_pwm->pwm_map[hwpwm];
+	struct lp3943_pwm_map *pwm_map;
 	int i, offset;
+
+	pwm_map = kzalloc(sizeof(*pwm_map), GFP_KERNEL);
+	if (!pwm_map)
+		return ERR_PTR(-ENOMEM);
 
 	pwm_map->output = pdata->pwms[hwpwm]->output;
 	pwm_map->num_outputs = pdata->pwms[hwpwm]->num_outputs;
@@ -46,8 +49,10 @@ lp3943_pwm_request_map(struct lp3943_pwm *lp3943_pwm, int hwpwm)
 		offset = pwm_map->output[i];
 
 		/* Return an error if the pin is already assigned */
-		if (test_and_set_bit(offset, &lp3943->pin_used))
+		if (test_and_set_bit(offset, &lp3943->pin_used)) {
+			kfree(pwm_map);
 			return ERR_PTR(-EBUSY);
+		}
 	}
 
 	return pwm_map;
@@ -62,7 +67,7 @@ static int lp3943_pwm_request(struct pwm_chip *chip, struct pwm_device *pwm)
 	if (IS_ERR(pwm_map))
 		return PTR_ERR(pwm_map);
 
-	return 0;
+	return pwm_set_chip_data(pwm, pwm_map);
 }
 
 static void lp3943_pwm_free_map(struct lp3943_pwm *lp3943_pwm,
@@ -75,18 +80,20 @@ static void lp3943_pwm_free_map(struct lp3943_pwm *lp3943_pwm,
 		offset = pwm_map->output[i];
 		clear_bit(offset, &lp3943->pin_used);
 	}
+
+	kfree(pwm_map);
 }
 
 static void lp3943_pwm_free(struct pwm_chip *chip, struct pwm_device *pwm)
 {
 	struct lp3943_pwm *lp3943_pwm = to_lp3943_pwm(chip);
-	struct lp3943_pwm_map *pwm_map = &lp3943_pwm->pwm_map[pwm->hwpwm];
+	struct lp3943_pwm_map *pwm_map = pwm_get_chip_data(pwm);
 
 	lp3943_pwm_free_map(lp3943_pwm, pwm_map);
 }
 
 static int lp3943_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
-			     u64 duty_ns, u64 period_ns)
+			     int duty_ns, int period_ns)
 {
 	struct lp3943_pwm *lp3943_pwm = to_lp3943_pwm(chip);
 	struct lp3943 *lp3943 = lp3943_pwm->lp3943;
@@ -111,20 +118,15 @@ static int lp3943_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 		reg_duty     = LP3943_REG_PWM1;
 	}
 
-	/*
-	 * Note that after this clamping, period_ns fits into an int. This is
-	 * helpful because we can resort to integer division below instead of
-	 * the (more expensive) 64 bit division.
-	 */
-	period_ns = clamp(period_ns, (u64)LP3943_MIN_PERIOD, (u64)LP3943_MAX_PERIOD);
-	val       = (u8)((int)period_ns / LP3943_MIN_PERIOD - 1);
+	period_ns = clamp(period_ns, LP3943_MIN_PERIOD, LP3943_MAX_PERIOD);
+	val       = (u8)(period_ns / LP3943_MIN_PERIOD - 1);
 
 	err = lp3943_write_byte(lp3943, reg_prescale, val);
 	if (err)
 		return err;
 
 	duty_ns = min(duty_ns, period_ns);
-	val = (u8)((int)duty_ns * LP3943_MAX_DUTY / (int)period_ns);
+	val = (u8)(duty_ns * LP3943_MAX_DUTY / period_ns);
 
 	return lp3943_write_byte(lp3943, reg_duty, val);
 }
@@ -152,7 +154,7 @@ static int lp3943_pwm_set_mode(struct lp3943_pwm *lp3943_pwm,
 static int lp3943_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 {
 	struct lp3943_pwm *lp3943_pwm = to_lp3943_pwm(chip);
-	struct lp3943_pwm_map *pwm_map = &lp3943_pwm->pwm_map[pwm->hwpwm];
+	struct lp3943_pwm_map *pwm_map = pwm_get_chip_data(pwm);
 	u8 val;
 
 	if (pwm->hwpwm == 0)
@@ -171,7 +173,7 @@ static int lp3943_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 static void lp3943_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 {
 	struct lp3943_pwm *lp3943_pwm = to_lp3943_pwm(chip);
-	struct lp3943_pwm_map *pwm_map = &lp3943_pwm->pwm_map[pwm->hwpwm];
+	struct lp3943_pwm_map *pwm_map = pwm_get_chip_data(pwm);
 
 	/*
 	 * LP3943 outputs are open-drain, so the pin should be configured
@@ -181,34 +183,13 @@ static void lp3943_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 	lp3943_pwm_set_mode(lp3943_pwm, pwm_map, LP3943_GPIO_OUT_HIGH);
 }
 
-static int lp3943_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
-			    const struct pwm_state *state)
-{
-	int err;
-
-	if (state->polarity != PWM_POLARITY_NORMAL)
-		return -EINVAL;
-
-	if (!state->enabled) {
-		if (pwm->state.enabled)
-			lp3943_pwm_disable(chip, pwm);
-		return 0;
-	}
-
-	err = lp3943_pwm_config(chip, pwm, state->duty_cycle, state->period);
-	if (err)
-		return err;
-
-	if (!pwm->state.enabled)
-		err = lp3943_pwm_enable(chip, pwm);
-
-	return err;
-}
-
 static const struct pwm_ops lp3943_pwm_ops = {
 	.request	= lp3943_pwm_request,
 	.free		= lp3943_pwm_free,
-	.apply		= lp3943_pwm_apply,
+	.config		= lp3943_pwm_config,
+	.enable		= lp3943_pwm_enable,
+	.disable	= lp3943_pwm_disable,
+	.owner		= THIS_MODULE,
 };
 
 static int lp3943_pwm_parse_dt(struct device *dev,

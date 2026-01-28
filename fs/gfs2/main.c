@@ -38,6 +38,7 @@ static void gfs2_init_inode_once(void *foo)
 	inode_init_once(&ip->i_inode);
 	atomic_set(&ip->i_sizehint, 0);
 	init_rwsem(&ip->i_rw_mutex);
+	INIT_LIST_HEAD(&ip->i_trunc_list);
 	INIT_LIST_HEAD(&ip->i_ordered);
 	ip->i_qadata = NULL;
 	gfs2_holder_mark_uninitialized(&ip->i_rgd_gh);
@@ -61,10 +62,11 @@ static void gfs2_init_glock_once(void *foo)
 
 static void gfs2_init_gl_aspace_once(void *foo)
 {
-	struct gfs2_glock_aspace *gla = foo;
+	struct gfs2_glock *gl = foo;
+	struct address_space *mapping = (struct address_space *)(gl + 1);
 
-	gfs2_init_glock_once(&gla->glock);
-	address_space_init_once(&gla->mapping);
+	gfs2_init_glock_once(gl);
+	address_space_init_once(mapping);
 }
 
 /**
@@ -102,7 +104,8 @@ static int __init init_gfs2_fs(void)
 		goto fail_cachep1;
 
 	gfs2_glock_aspace_cachep = kmem_cache_create("gfs2_glock(aspace)",
-					sizeof(struct gfs2_glock_aspace),
+					sizeof(struct gfs2_glock) +
+					sizeof(struct address_space),
 					0, 0, gfs2_init_gl_aspace_once);
 
 	if (!gfs2_glock_aspace_cachep)
@@ -147,14 +150,22 @@ static int __init init_gfs2_fs(void)
 	if (!gfs2_trans_cachep)
 		goto fail_cachep8;
 
-	error = gfs2_qd_shrinker_init();
+	error = register_shrinker(&gfs2_qd_shrinker);
 	if (error)
 		goto fail_shrinker;
 
+	error = register_filesystem(&gfs2_fs_type);
+	if (error)
+		goto fail_fs1;
+
+	error = register_filesystem(&gfs2meta_fs_type);
+	if (error)
+		goto fail_fs2;
+
 	error = -ENOMEM;
-	gfs2_recovery_wq = alloc_workqueue("gfs2_recovery",
+	gfs_recovery_wq = alloc_workqueue("gfs_recovery",
 					  WQ_MEM_RECLAIM | WQ_FREEZABLE, 0);
-	if (!gfs2_recovery_wq)
+	if (!gfs_recovery_wq)
 		goto fail_wq1;
 
 	gfs2_control_wq = alloc_workqueue("gfs2_control",
@@ -162,7 +173,7 @@ static int __init init_gfs2_fs(void)
 	if (!gfs2_control_wq)
 		goto fail_wq2;
 
-	gfs2_freeze_wq = alloc_workqueue("gfs2_freeze", 0, 0);
+	gfs2_freeze_wq = alloc_workqueue("freeze_workqueue", 0, 0);
 
 	if (!gfs2_freeze_wq)
 		goto fail_wq3;
@@ -172,31 +183,23 @@ static int __init init_gfs2_fs(void)
 		goto fail_mempool;
 
 	gfs2_register_debugfs();
-	error = register_filesystem(&gfs2_fs_type);
-	if (error)
-		goto fail_fs1;
-
-	error = register_filesystem(&gfs2meta_fs_type);
-	if (error)
-		goto fail_fs2;
-
 
 	pr_info("GFS2 installed\n");
 
 	return 0;
 
-fail_fs2:
-	unregister_filesystem(&gfs2_fs_type);
-fail_fs1:
-	mempool_destroy(gfs2_page_pool);
 fail_mempool:
 	destroy_workqueue(gfs2_freeze_wq);
 fail_wq3:
 	destroy_workqueue(gfs2_control_wq);
 fail_wq2:
-	destroy_workqueue(gfs2_recovery_wq);
+	destroy_workqueue(gfs_recovery_wq);
 fail_wq1:
-	gfs2_qd_shrinker_exit();
+	unregister_filesystem(&gfs2meta_fs_type);
+fail_fs2:
+	unregister_filesystem(&gfs2_fs_type);
+fail_fs1:
+	unregister_shrinker(&gfs2_qd_shrinker);
 fail_shrinker:
 	kmem_cache_destroy(gfs2_trans_cachep);
 fail_cachep8:
@@ -229,12 +232,12 @@ fail_lru:
 
 static void __exit exit_gfs2_fs(void)
 {
-	gfs2_qd_shrinker_exit();
+	unregister_shrinker(&gfs2_qd_shrinker);
 	gfs2_glock_exit();
 	gfs2_unregister_debugfs();
 	unregister_filesystem(&gfs2_fs_type);
 	unregister_filesystem(&gfs2meta_fs_type);
-	destroy_workqueue(gfs2_recovery_wq);
+	destroy_workqueue(gfs_recovery_wq);
 	destroy_workqueue(gfs2_control_wq);
 	destroy_workqueue(gfs2_freeze_wq);
 	list_lru_destroy(&gfs2_qd_lru);
@@ -257,6 +260,7 @@ static void __exit exit_gfs2_fs(void)
 MODULE_DESCRIPTION("Global File System");
 MODULE_AUTHOR("Red Hat, Inc.");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
 
 module_init(init_gfs2_fs);
 module_exit(exit_gfs2_fs);

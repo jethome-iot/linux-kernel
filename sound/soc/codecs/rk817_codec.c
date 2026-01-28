@@ -444,6 +444,7 @@ static const struct snd_soc_component_driver soc_codec_dev_rk817 = {
 	.idle_bias_on = 1,
 	.use_pmdown_time = 1,
 	.endianness = 1,
+	.non_legacy_dai_naming = 1,
 	.controls = rk817_volume_controls,
 	.num_controls = ARRAY_SIZE(rk817_volume_controls),
 	.dapm_routes = rk817_dapm_routes,
@@ -518,11 +519,13 @@ err_:
 	return ret;
 }
 
-static void rk817_platform_remove(struct platform_device *pdev)
+static int rk817_platform_remove(struct platform_device *pdev)
 {
 	struct rk817_codec_priv *rk817 = platform_get_drvdata(pdev);
 
 	clk_disable_unprepare(rk817->mclk);
+
+	return 0;
 }
 
 static struct platform_driver rk817_codec_driver = {
@@ -530,7 +533,7 @@ static struct platform_driver rk817_codec_driver = {
 		   .name = "rk817-codec",
 		   },
 	.probe = rk817_platform_probe,
-	.remove_new = rk817_platform_remove,
+	.remove = rk817_platform_remove,
 };
 
 module_platform_driver(rk817_codec_driver);

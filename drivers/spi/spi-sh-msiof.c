@@ -20,6 +20,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/sh_dma.h>
@@ -57,7 +58,7 @@ struct sh_msiof_spi_priv {
 	dma_addr_t rx_dma_addr;
 	bool native_cs_inited;
 	bool native_cs_high;
-	bool target_aborted;
+	bool slave_aborted;
 };
 
 #define MAX_SS	3	/* Maximum number of native chip selects */
@@ -364,7 +365,7 @@ static void sh_msiof_spi_set_pin_regs(struct sh_msiof_spi_priv *p, u32 ss,
 	tmp |= !cs_high << SIMDR1_SYNCAC_SHIFT;
 	tmp |= lsb_first << SIMDR1_BITLSB_SHIFT;
 	tmp |= sh_msiof_spi_get_dtdl_and_syncdl(p);
-	if (spi_controller_is_target(p->ctlr)) {
+	if (spi_controller_is_slave(p->ctlr)) {
 		sh_msiof_write(p, SITMDR1, tmp | SITMDR1_PCON);
 	} else {
 		sh_msiof_write(p, SITMDR1,
@@ -556,7 +557,7 @@ static int sh_msiof_spi_setup(struct spi_device *spi)
 		spi_controller_get_devdata(spi->controller);
 	u32 clr, set, tmp;
 
-	if (spi_get_csgpiod(spi, 0) || spi_controller_is_target(p->ctlr))
+	if (spi->cs_gpiod || spi_controller_is_slave(p->ctlr))
 		return 0;
 
 	if (p->native_cs_inited &&
@@ -589,11 +590,11 @@ static int sh_msiof_prepare_message(struct spi_controller *ctlr,
 	u32 ss, cs_high;
 
 	/* Configure pins before asserting CS */
-	if (spi_get_csgpiod(spi, 0)) {
+	if (spi->cs_gpiod) {
 		ss = ctlr->unused_native_cs;
 		cs_high = p->native_cs_high;
 	} else {
-		ss = spi_get_chipselect(spi, 0);
+		ss = spi->chip_select;
 		cs_high = !!(spi->mode & SPI_CS_HIGH);
 	}
 	sh_msiof_spi_set_pin_regs(p, ss, !!(spi->mode & SPI_CPOL),
@@ -605,11 +606,11 @@ static int sh_msiof_prepare_message(struct spi_controller *ctlr,
 
 static int sh_msiof_spi_start(struct sh_msiof_spi_priv *p, void *rx_buf)
 {
-	bool target = spi_controller_is_target(p->ctlr);
+	bool slave = spi_controller_is_slave(p->ctlr);
 	int ret = 0;
 
 	/* setup clock and rx/tx signals */
-	if (!target)
+	if (!slave)
 		ret = sh_msiof_modify_ctr_wait(p, 0, SICTR_TSCKE);
 	if (rx_buf && !ret)
 		ret = sh_msiof_modify_ctr_wait(p, 0, SICTR_RXE);
@@ -617,7 +618,7 @@ static int sh_msiof_spi_start(struct sh_msiof_spi_priv *p, void *rx_buf)
 		ret = sh_msiof_modify_ctr_wait(p, 0, SICTR_TXE);
 
 	/* start by setting frame bit */
-	if (!ret && !target)
+	if (!ret && !slave)
 		ret = sh_msiof_modify_ctr_wait(p, 0, SICTR_TFSE);
 
 	return ret;
@@ -625,27 +626,27 @@ static int sh_msiof_spi_start(struct sh_msiof_spi_priv *p, void *rx_buf)
 
 static int sh_msiof_spi_stop(struct sh_msiof_spi_priv *p, void *rx_buf)
 {
-	bool target = spi_controller_is_target(p->ctlr);
+	bool slave = spi_controller_is_slave(p->ctlr);
 	int ret = 0;
 
 	/* shut down frame, rx/tx and clock signals */
-	if (!target)
+	if (!slave)
 		ret = sh_msiof_modify_ctr_wait(p, SICTR_TFSE, 0);
 	if (!ret)
 		ret = sh_msiof_modify_ctr_wait(p, SICTR_TXE, 0);
 	if (rx_buf && !ret)
 		ret = sh_msiof_modify_ctr_wait(p, SICTR_RXE, 0);
-	if (!ret && !target)
+	if (!ret && !slave)
 		ret = sh_msiof_modify_ctr_wait(p, SICTR_TSCKE, 0);
 
 	return ret;
 }
 
-static int sh_msiof_target_abort(struct spi_controller *ctlr)
+static int sh_msiof_slave_abort(struct spi_controller *ctlr)
 {
 	struct sh_msiof_spi_priv *p = spi_controller_get_devdata(ctlr);
 
-	p->target_aborted = true;
+	p->slave_aborted = true;
 	complete(&p->done);
 	complete(&p->done_txdma);
 	return 0;
@@ -654,9 +655,9 @@ static int sh_msiof_target_abort(struct spi_controller *ctlr)
 static int sh_msiof_wait_for_completion(struct sh_msiof_spi_priv *p,
 					struct completion *x)
 {
-	if (spi_controller_is_target(p->ctlr)) {
+	if (spi_controller_is_slave(p->ctlr)) {
 		if (wait_for_completion_interruptible(x) ||
-		    p->target_aborted) {
+		    p->slave_aborted) {
 			dev_dbg(&p->pdev->dev, "interrupted\n");
 			return -EINTR;
 		}
@@ -702,7 +703,7 @@ static int sh_msiof_spi_txrx_once(struct sh_msiof_spi_priv *p,
 		tx_fifo(p, tx_buf, words, fifo_shift);
 
 	reinit_completion(&p->done);
-	p->target_aborted = false;
+	p->slave_aborted = false;
 
 	ret = sh_msiof_spi_start(p, rx_buf);
 	if (ret) {
@@ -799,7 +800,7 @@ static int sh_msiof_dma_once(struct sh_msiof_spi_priv *p, const void *tx,
 	reinit_completion(&p->done);
 	if (tx)
 		reinit_completion(&p->done_txdma);
-	p->target_aborted = false;
+	p->slave_aborted = false;
 
 	/* Now start DMA */
 	if (rx)
@@ -928,7 +929,7 @@ static int sh_msiof_transfer_one(struct spi_controller *ctlr,
 	sh_msiof_spi_reset_regs(p);
 
 	/* setup clocks (clock already enabled in chipselect()) */
-	if (!spi_controller_is_target(p->ctlr))
+	if (!spi_controller_is_slave(p->ctlr))
 		sh_msiof_spi_set_clk_regs(p, t);
 
 	while (ctlr->dma_tx && len > 15) {
@@ -1085,7 +1086,7 @@ static const struct sh_msiof_chipdata rcar_r8a7795_data = {
 	.flags = SH_MSIOF_FLAG_FIXED_DTDL_200,
 };
 
-static const struct of_device_id sh_msiof_match[] __maybe_unused = {
+static const struct of_device_id sh_msiof_match[] = {
 	{ .compatible = "renesas,sh-mobile-msiof", .data = &sh_data },
 	{ .compatible = "renesas,msiof-r8a7743",   .data = &rcar_gen2_data },
 	{ .compatible = "renesas,msiof-r8a7745",   .data = &rcar_gen2_data },
@@ -1098,7 +1099,6 @@ static const struct of_device_id sh_msiof_match[] __maybe_unused = {
 	{ .compatible = "renesas,msiof-r8a7795",   .data = &rcar_r8a7795_data },
 	{ .compatible = "renesas,msiof-r8a7796",   .data = &rcar_gen3_data },
 	{ .compatible = "renesas,rcar-gen3-msiof", .data = &rcar_gen3_data },
-	{ .compatible = "renesas,rcar-gen4-msiof", .data = &rcar_gen3_data },
 	{ .compatible = "renesas,sh-msiof",        .data = &sh_data }, /* Deprecated */
 	{},
 };
@@ -1115,11 +1115,11 @@ static struct sh_msiof_spi_info *sh_msiof_spi_parse_dt(struct device *dev)
 	if (!info)
 		return NULL;
 
-	info->mode = of_property_read_bool(np, "spi-slave") ? MSIOF_SPI_TARGET
-							    : MSIOF_SPI_HOST;
+	info->mode = of_property_read_bool(np, "spi-slave") ? MSIOF_SPI_SLAVE
+							    : MSIOF_SPI_MASTER;
 
 	/* Parse the MSIOF properties */
-	if (info->mode == MSIOF_SPI_HOST)
+	if (info->mode == MSIOF_SPI_MASTER)
 		of_property_read_u32(np, "num-cs", &num_cs);
 	of_property_read_u32(np, "renesas,tx-fifo-size",
 					&info->tx_fifo_override);
@@ -1296,12 +1296,12 @@ static int sh_msiof_spi_probe(struct platform_device *pdev)
 	if (chipdata->flags & SH_MSIOF_FLAG_FIXED_DTDL_200)
 		info->dtdl = 200;
 
-	if (info->mode == MSIOF_SPI_TARGET)
-		ctlr = spi_alloc_target(&pdev->dev,
-				        sizeof(struct sh_msiof_spi_priv));
+	if (info->mode == MSIOF_SPI_SLAVE)
+		ctlr = spi_alloc_slave(&pdev->dev,
+				       sizeof(struct sh_msiof_spi_priv));
 	else
-		ctlr = spi_alloc_host(&pdev->dev,
-				      sizeof(struct sh_msiof_spi_priv));
+		ctlr = spi_alloc_master(&pdev->dev,
+					sizeof(struct sh_msiof_spi_priv));
 	if (ctlr == NULL)
 		return -ENOMEM;
 
@@ -1364,7 +1364,7 @@ static int sh_msiof_spi_probe(struct platform_device *pdev)
 	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->setup = sh_msiof_spi_setup;
 	ctlr->prepare_message = sh_msiof_prepare_message;
-	ctlr->target_abort = sh_msiof_target_abort;
+	ctlr->slave_abort = sh_msiof_slave_abort;
 	ctlr->bits_per_word_mask = chipdata->bits_per_word_mask;
 	ctlr->auto_runtime_pm = true;
 	ctlr->transfer_one = sh_msiof_transfer_one;
@@ -1391,12 +1391,13 @@ static int sh_msiof_spi_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static void sh_msiof_spi_remove(struct platform_device *pdev)
+static int sh_msiof_spi_remove(struct platform_device *pdev)
 {
 	struct sh_msiof_spi_priv *p = platform_get_drvdata(pdev);
 
 	sh_msiof_release_dma(p);
 	pm_runtime_disable(&pdev->dev);
+	return 0;
 }
 
 static const struct platform_device_id spi_driver_ids[] = {
@@ -1429,7 +1430,7 @@ static SIMPLE_DEV_PM_OPS(sh_msiof_spi_pm_ops, sh_msiof_spi_suspend,
 
 static struct platform_driver sh_msiof_spi_drv = {
 	.probe		= sh_msiof_spi_probe,
-	.remove_new	= sh_msiof_spi_remove,
+	.remove		= sh_msiof_spi_remove,
 	.id_table	= spi_driver_ids,
 	.driver		= {
 		.name		= "spi_sh_msiof",
@@ -1442,3 +1443,4 @@ module_platform_driver(sh_msiof_spi_drv);
 MODULE_DESCRIPTION("SuperH MSIOF SPI Controller Interface Driver");
 MODULE_AUTHOR("Magnus Damm");
 MODULE_LICENSE("GPL v2");
+MODULE_ALIAS("platform:spi_sh_msiof");

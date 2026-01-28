@@ -121,6 +121,13 @@ NOKPROBE_SYMBOL(read_wb_reg);
 
 static void write_wb_reg(int reg, int n, u64 val)
 {
+#ifdef CONFIG_AMLOGIC_VMAP
+	/* avoid write DBGWVR since we use it for special purpose */
+	if ((reg + n) >= (AARCH64_DBG_REG_WVR + 2) &&
+		(reg + n) < AARCH64_DBG_REG_WCR) {
+		return;
+	}
+#endif
 	switch (reg + n) {
 	GEN_WRITE_WB_REG_CASES(AARCH64_DBG_REG_BVR, AARCH64_DBG_REG_NAME_BVR, val);
 	GEN_WRITE_WB_REG_CASES(AARCH64_DBG_REG_BCR, AARCH64_DBG_REG_NAME_BCR, val);
@@ -701,7 +708,7 @@ NOKPROBE_SYMBOL(breakpoint_handler);
  * addresses. There is no straight-forward way, short of disassembling the
  * offending instruction, to map that address back to the watchpoint. This
  * function computes the distance of the memory access from the watchpoint as a
- * heuristic for the likelihood that a given access triggered the watchpoint.
+ * heuristic for the likelyhood that a given access triggered the watchpoint.
  *
  * See Section D2.10.5 "Determining the memory location that caused a Watchpoint
  * exception" of ARMv8 Architecture Reference Manual for details.
@@ -972,6 +979,14 @@ static int hw_breakpoint_reset(unsigned int cpu)
 
 	return 0;
 }
+
+#ifdef CONFIG_CPU_PM
+extern void cpu_suspend_set_dbg_restorer(int (*hw_bp_restore)(unsigned int));
+#else
+static inline void cpu_suspend_set_dbg_restorer(int (*hw_bp_restore)(unsigned int))
+{
+}
+#endif
 
 /*
  * One-time initialisation.

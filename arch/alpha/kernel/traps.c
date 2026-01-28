@@ -9,7 +9,6 @@
  * This file initializes the trap entry points
  */
 
-#include <linux/cpu.h>
 #include <linux/jiffies.h>
 #include <linux/mm.h>
 #include <linux/sched/signal.h>
@@ -130,7 +129,9 @@ dik_show_trace(unsigned long *sp, const char *loglvl)
 		extern char _stext[], _etext[];
 		unsigned long tmp = *sp;
 		sp++;
-		if (!is_kernel_text(tmp))
+		if (tmp < (unsigned long) &_stext)
+			continue;
+		if (tmp >= (unsigned long) &_etext)
 			continue;
 		printk("%s[<%lx>] %pSR\n", loglvl, tmp, (void *)tmp);
 		if (i > 40) {

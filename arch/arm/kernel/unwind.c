@@ -28,13 +28,14 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/list.h>
-#include <linux/module.h>
+#ifdef CONFIG_AMLOGIC_VMAP
+#include <linux/amlogic/vmap_stack.h>
+#include <asm/irq.h>
+#endif
 
 #include <asm/stacktrace.h>
 #include <asm/traps.h>
 #include <asm/unwind.h>
-
-#include "reboot.h"
 
 /* Dummy functions to avoid linker complaints */
 void __aeabi_unwind_cpp_pr0(void)
@@ -56,7 +57,6 @@ struct unwind_ctrl_block {
 	unsigned long vrs[16];		/* virtual register set */
 	const unsigned long *insn;	/* pointer to the current instructions word */
 	unsigned long sp_high;		/* highest value of sp allowed */
-	unsigned long *lr_addr;		/* address of LR value on the stack */
 	/*
 	 * 1 : check for stack overflow for each register pop.
 	 * 0 : save overhead if there is plenty of stack remaining.
@@ -241,8 +241,6 @@ static int unwind_pop_register(struct unwind_ctrl_block *ctrl,
 	 * from being tracked by KASAN.
 	 */
 	ctrl->vrs[reg] = READ_ONCE_NOCHECK(*(*vsp));
-	if (reg == 14)
-		ctrl->lr_addr = *vsp;
 	(*vsp)++;
 	return URC_OK;
 }
@@ -262,9 +260,8 @@ static int unwind_exec_pop_subset_r4_to_r13(struct unwind_ctrl_block *ctrl,
 		mask >>= 1;
 		reg++;
 	}
-	if (!load_sp) {
+	if (!load_sp)
 		ctrl->vrs[SP] = (unsigned long)vsp;
-	}
 
 	return URC_OK;
 }
@@ -343,9 +340,9 @@ static int unwind_exec_insn(struct unwind_ctrl_block *ctrl)
 
 	if ((insn & 0xc0) == 0x00)
 		ctrl->vrs[SP] += ((insn & 0x3f) << 2) + 4;
-	else if ((insn & 0xc0) == 0x40) {
+	else if ((insn & 0xc0) == 0x40)
 		ctrl->vrs[SP] -= ((insn & 0x3f) << 2) + 4;
-	} else if ((insn & 0xf0) == 0x80) {
+	else if ((insn & 0xf0) == 0x80) {
 		unsigned long mask;
 
 		insn = (insn << 8) | unwind_get_byte(ctrl);
@@ -360,9 +357,9 @@ static int unwind_exec_insn(struct unwind_ctrl_block *ctrl)
 		if (ret)
 			goto error;
 	} else if ((insn & 0xf0) == 0x90 &&
-		   (insn & 0x0d) != 0x0d) {
+		   (insn & 0x0d) != 0x0d)
 		ctrl->vrs[SP] = ctrl->vrs[insn & 0x0f];
-	} else if ((insn & 0xf0) == 0xa0) {
+	else if ((insn & 0xf0) == 0xa0) {
 		ret = unwind_exec_pop_r4_to_rN(ctrl, insn);
 		if (ret)
 			goto error;
@@ -405,34 +402,35 @@ error:
  */
 int unwind_frame(struct stackframe *frame)
 {
+	unsigned long low;
 	const struct unwind_idx *idx;
 	struct unwind_ctrl_block ctrl;
-	unsigned long sp_low;
 
 	/* store the highest address on the stack to avoid crossing it*/
-	sp_low = frame->sp;
-	ctrl.sp_high = ALIGN(sp_low - THREAD_SIZE, THREAD_ALIGN)
-		       + THREAD_SIZE;
+	low = frame->sp;
+	ctrl.sp_high = ALIGN(low, THREAD_SIZE);
 
 	pr_debug("%s(pc = %08lx lr = %08lx sp = %08lx)\n", __func__,
 		 frame->pc, frame->lr, frame->sp);
 
+	if (!kernel_text_address(frame->pc))
+		return -URC_FAILURE;
+
 	idx = unwind_find_idx(frame->pc);
+#if IS_ENABLED(CONFIG_AMLOGIC_ARM_UNWIND)
+	if (!idx)
+		idx = unwind_find_idx(frame->lr);
 	if (!idx) {
-		if (frame->pc && kernel_text_address(frame->pc)) {
-			if (in_module_plt(frame->pc) && frame->pc != frame->lr) {
-				/*
-				 * Quoting Ard: Veneers only set PC using a
-				 * PC+immediate LDR, and so they don't affect
-				 * the state of the stack or the register file
-				 */
-				frame->pc = frame->lr;
-				return URC_OK;
-			}
-			pr_warn("unwind: Index not found %08lx\n", frame->pc);
-		}
+		pr_warn("unwind: Index not found, pc=%pS, lr=%pS\n",
+			(void *)frame->pc, (void *)frame->lr);
 		return -URC_FAILURE;
 	}
+#else
+	if (!idx) {
+		pr_warn("unwind: Index not found %08lx\n", frame->pc);
+		return -URC_FAILURE;
+	}
+#endif
 
 	ctrl.vrs[FP] = frame->fp;
 	ctrl.vrs[SP] = frame->sp;
@@ -442,20 +440,7 @@ int unwind_frame(struct stackframe *frame)
 	if (idx->insn == 1)
 		/* can't unwind */
 		return -URC_FAILURE;
-	else if (frame->pc == prel31_to_addr(&idx->addr_offset)) {
-		/*
-		 * Unwinding is tricky when we're halfway through the prologue,
-		 * since the stack frame that the unwinder expects may not be
-		 * fully set up yet. However, one thing we do know for sure is
-		 * that if we are unwinding from the very first instruction of
-		 * a function, we are still effectively in the stack frame of
-		 * the caller, and the unwind info has no relevance yet.
-		 */
-		if (frame->pc == frame->lr)
-			return -URC_FAILURE;
-		frame->pc = frame->lr;
-		return URC_OK;
-	} else if ((idx->insn & 0x80000000) == 0)
+	else if ((idx->insn & 0x80000000) == 0)
 		/* prel31 to the unwind table */
 		ctrl.insn = (unsigned long *)prel31_to_addr(&idx->insn);
 	else if ((idx->insn & 0xff000000) == 0x80000000)
@@ -482,16 +467,6 @@ int unwind_frame(struct stackframe *frame)
 
 	ctrl.check_each_pop = 0;
 
-	if (prel31_to_addr(&idx->addr_offset) == (u32)&call_with_stack) {
-		/*
-		 * call_with_stack() is the only place where we permit SP to
-		 * jump from one stack to another, and since we know it is
-		 * guaranteed to happen, set up the SP bounds accordingly.
-		 */
-		sp_low = frame->fp;
-		ctrl.sp_high = ALIGN(frame->fp, THREAD_SIZE);
-	}
-
 	while (ctrl.entries > 0) {
 		int urc;
 		if ((ctrl.sp_high - ctrl.vrs[SP]) < sizeof(ctrl.vrs))
@@ -499,7 +474,7 @@ int unwind_frame(struct stackframe *frame)
 		urc = unwind_exec_insn(&ctrl);
 		if (urc < 0)
 			return urc;
-		if (ctrl.vrs[SP] < sp_low || ctrl.vrs[SP] > ctrl.sp_high)
+		if (ctrl.vrs[SP] < low || ctrl.vrs[SP] >= ctrl.sp_high)
 			return -URC_FAILURE;
 	}
 
@@ -514,10 +489,23 @@ int unwind_frame(struct stackframe *frame)
 	frame->sp = ctrl.vrs[SP];
 	frame->lr = ctrl.vrs[LR];
 	frame->pc = ctrl.vrs[PC];
-	frame->lr_addr = ctrl.lr_addr;
 
 	return URC_OK;
 }
+
+#ifdef CONFIG_AMLOGIC_VMAP
+static void dump_backtrace_entry_fp(unsigned long where, unsigned long fp,
+				    unsigned long sp)
+{
+	signed long fp_size = 0;
+
+	fp_size = fp - sp + 4;
+	if (fp_size < 0 || !fp)
+		fp_size = 0;
+	pr_info("[%08lx+%4ld][<%08lx>] %pS\n",
+		fp, fp_size, where, (void *)where);
+}
+#endif
 
 void unwind_backtrace(struct pt_regs *regs, struct task_struct *tsk,
 		      const char *loglvl)
@@ -538,12 +526,7 @@ void unwind_backtrace(struct pt_regs *regs, struct task_struct *tsk,
 		frame.fp = (unsigned long)__builtin_frame_address(0);
 		frame.sp = current_stack_pointer;
 		frame.lr = (unsigned long)__builtin_return_address(0);
-		/* We are saving the stack and execution state at this
-		 * point, so we should ensure that frame.pc is within
-		 * this block of code.
-		 */
-here:
-		frame.pc = (unsigned long)&&here;
+		frame.pc = (unsigned long)unwind_backtrace;
 	} else {
 		/* task blocked in __switch_to */
 		frame.fp = thread_saved_fp(tsk);
@@ -561,9 +544,43 @@ here:
 		unsigned long where = frame.pc;
 
 		urc = unwind_frame(&frame);
+	#ifdef CONFIG_AMLOGIC_VMAP
+		if (urc < 0) {
+			int keep = 0;
+			int cpu;
+			unsigned long addr;
+			struct pt_regs *pt_regs;
+
+			cpu = raw_smp_processor_id();
+			/* continue search for irq stack */
+			if (on_vmap_irq_stack(frame.sp, cpu)) {
+				unsigned long sp_irq;
+
+				keep = 1;
+				sp_irq   = (unsigned long)irq_stack[cpu];
+				addr     = *((unsigned long *)(sp_irq +
+					      THREAD_INFO_OFFSET - 8));
+				pt_regs  = (struct pt_regs *)addr;
+				frame.fp = pt_regs->ARM_fp;
+				frame.sp = pt_regs->ARM_sp;
+				frame.lr = pt_regs->ARM_lr;
+				frame.pc = pt_regs->ARM_pc;
+			}
+			if (!keep)
+				break;
+		}
+		where = frame.pc;
+		/*
+		 * The last "where" may be an invalid one,
+		 * rechecking it
+		 */
+		if (kernel_text_address(where))
+			dump_backtrace_entry_fp(where, frame.fp, frame.sp);
+	#else
 		if (urc < 0)
 			break;
 		dump_backtrace_entry(where, frame.pc, frame.sp - 4, loglvl);
+	#endif
 	}
 }
 

@@ -25,9 +25,7 @@ properties:
 
   spi-cpol: true
 
-  spi-cs-inactive-delay-ns:
-    minimum: 16000
-    default: 16000
+  spi-max-frequency: true
 
   interrupts:
     maxItems: 1
@@ -37,16 +35,13 @@ required:
   - reg
   - interrupts
 
-allOf:
-  - $ref: /schemas/spi/spi-peripheral-props.yaml#
-
-unevaluatedProperties: false
+additionalProperties: false
 
 examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
     #include <dt-bindings/interrupt-controller/irq.h>
-    spi {
+    spi0 {
         #address-cells = <1>;
         #size-cells = <0>;
 

@@ -26,6 +26,7 @@
    by Kyle McMartin in "Remove __ldcw_align for PA-RISC 2.0 processors". */
 
 #define __PA_LDCW_ALIGNMENT	16
+#define __PA_LDCW_ALIGN_ORDER	4
 #define __ldcw_align(a) ({					\
 	unsigned long __ret = (unsigned long) &(a)->lock[0];	\
 	__ret = (__ret + __PA_LDCW_ALIGNMENT - 1)		\
@@ -55,7 +56,7 @@
 })
 
 #ifdef CONFIG_SMP
-# define __lock_aligned __section(".data..lock_aligned") __aligned(16)
+# define __lock_aligned __section(".data..lock_aligned")
 #endif
 
 #endif /* __PARISC_LDCW_H */

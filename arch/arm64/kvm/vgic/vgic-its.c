@@ -378,12 +378,6 @@ static int update_affinity(struct vgic_irq *irq, struct kvm_vcpu *vcpu)
 	return ret;
 }
 
-static struct kvm_vcpu *collection_to_vcpu(struct kvm *kvm,
-					   struct its_collection *col)
-{
-	return kvm_get_vcpu_by_id(kvm, col->target_addr);
-}
-
 /*
  * Promotes the ITS view of affinity of an ITTE (which redistributor this LPI
  * is targeting) to the VGIC's view, which deals with target VCPUs.
@@ -397,7 +391,7 @@ static void update_affinity_ite(struct kvm *kvm, struct its_ite *ite)
 	if (!its_is_collection_mapped(ite->collection))
 		return;
 
-	vcpu = collection_to_vcpu(kvm, ite->collection);
+	vcpu = kvm_get_vcpu(kvm, ite->collection->target_addr);
 	update_affinity(ite->irq, vcpu);
 }
 
@@ -468,6 +462,9 @@ static int its_sync_lpi_pending_table(struct kvm_vcpu *vcpu)
 		}
 
 		irq = vgic_get_irq(vcpu->kvm, NULL, intids[i]);
+		if (!irq)
+			continue;
+
 		raw_spin_lock_irqsave(&irq->irq_lock, flags);
 		irq->pending_latch = pendmask & (1U << bit_nr);
 		vgic_queue_irq_unlock(vcpu->kvm, irq, flags);
@@ -689,7 +686,7 @@ int vgic_its_resolve_lpi(struct kvm *kvm, struct vgic_its *its,
 	if (!ite || !its_is_collection_mapped(ite->collection))
 		return E_ITS_INT_UNMAPPED_INTERRUPT;
 
-	vcpu = collection_to_vcpu(kvm, ite->collection);
+	vcpu = kvm_get_vcpu(kvm, ite->collection->target_addr);
 	if (!vcpu)
 		return E_ITS_INT_UNMAPPED_INTERRUPT;
 
@@ -898,7 +895,7 @@ static int vgic_its_cmd_handle_movi(struct kvm *kvm, struct vgic_its *its,
 		return E_ITS_MOVI_UNMAPPED_COLLECTION;
 
 	ite->collection = collection;
-	vcpu = collection_to_vcpu(kvm, collection);
+	vcpu = kvm_get_vcpu(kvm, collection->target_addr);
 
 	vgic_its_invalidate_cache(kvm);
 
@@ -1132,7 +1129,7 @@ static int vgic_its_cmd_handle_mapi(struct kvm *kvm, struct vgic_its *its,
 	}
 
 	if (its_is_collection_mapped(collection))
-		vcpu = collection_to_vcpu(kvm, collection);
+		vcpu = kvm_get_vcpu(kvm, collection->target_addr);
 
 	irq = vgic_add_lpi(kvm, lpi_nr, vcpu);
 	if (IS_ERR(irq)) {
@@ -1253,22 +1250,21 @@ static int vgic_its_cmd_handle_mapc(struct kvm *kvm, struct vgic_its *its,
 				    u64 *its_cmd)
 {
 	u16 coll_id;
+	u32 target_addr;
 	struct its_collection *collection;
 	bool valid;
 
 	valid = its_cmd_get_validbit(its_cmd);
 	coll_id = its_cmd_get_collection(its_cmd);
+	target_addr = its_cmd_get_target_addr(its_cmd);
+
+	if (target_addr >= atomic_read(&kvm->online_vcpus))
+		return E_ITS_MAPC_PROCNUM_OOR;
 
 	if (!valid) {
 		vgic_its_free_collection(its, coll_id);
 		vgic_its_invalidate_cache(kvm);
 	} else {
-		struct kvm_vcpu *vcpu;
-
-		vcpu = kvm_get_vcpu_by_id(kvm, its_cmd_get_target_addr(its_cmd));
-		if (!vcpu)
-			return E_ITS_MAPC_PROCNUM_OOR;
-
 		collection = find_collection(its, coll_id);
 
 		if (!collection) {
@@ -1282,9 +1278,9 @@ static int vgic_its_cmd_handle_mapc(struct kvm *kvm, struct vgic_its *its,
 							coll_id);
 			if (ret)
 				return ret;
-			collection->target_addr = vcpu->vcpu_id;
+			collection->target_addr = target_addr;
 		} else {
-			collection->target_addr = vcpu->vcpu_id;
+			collection->target_addr = target_addr;
 			update_affinity_collection(kvm, its, collection);
 		}
 	}
@@ -1394,7 +1390,7 @@ static int vgic_its_cmd_handle_invall(struct kvm *kvm, struct vgic_its *its,
 	if (!its_is_collection_mapped(collection))
 		return E_ITS_INVALL_UNMAPPED_COLLECTION;
 
-	vcpu = collection_to_vcpu(kvm, collection);
+	vcpu = kvm_get_vcpu(kvm, collection->target_addr);
 	vgic_its_invall(vcpu);
 
 	return 0;
@@ -1411,20 +1407,22 @@ static int vgic_its_cmd_handle_invall(struct kvm *kvm, struct vgic_its *its,
 static int vgic_its_cmd_handle_movall(struct kvm *kvm, struct vgic_its *its,
 				      u64 *its_cmd)
 {
+	u32 target1_addr = its_cmd_get_target_addr(its_cmd);
+	u32 target2_addr = its_cmd_mask_field(its_cmd, 3, 16, 32);
 	struct kvm_vcpu *vcpu1, *vcpu2;
 	struct vgic_irq *irq;
 	u32 *intids;
 	int irq_count, i;
 
-	/* We advertise GITS_TYPER.PTA==0, making the address the vcpu ID */
-	vcpu1 = kvm_get_vcpu_by_id(kvm, its_cmd_get_target_addr(its_cmd));
-	vcpu2 = kvm_get_vcpu_by_id(kvm, its_cmd_mask_field(its_cmd, 3, 16, 32));
-
-	if (!vcpu1 || !vcpu2)
+	if (target1_addr >= atomic_read(&kvm->online_vcpus) ||
+	    target2_addr >= atomic_read(&kvm->online_vcpus))
 		return E_ITS_MOVALL_PROCNUM_OOR;
 
-	if (vcpu1 == vcpu2)
+	if (target1_addr == target2_addr)
 		return 0;
+
+	vcpu1 = kvm_get_vcpu(kvm, target1_addr);
+	vcpu2 = kvm_get_vcpu(kvm, target2_addr);
 
 	irq_count = vgic_copy_lpi_list(kvm, vcpu1, &intids);
 	if (irq_count < 0)
@@ -1432,6 +1430,8 @@ static int vgic_its_cmd_handle_movall(struct kvm *kvm, struct vgic_its *its,
 
 	for (i = 0; i < irq_count; i++) {
 		irq = vgic_get_irq(kvm, NULL, intids[i]);
+		if (!irq)
+			continue;
 
 		update_affinity(irq, vcpu2);
 
@@ -2268,7 +2268,7 @@ static int vgic_its_restore_ite(struct vgic_its *its, u32 event_id,
 		return PTR_ERR(ite);
 
 	if (its_is_collection_mapped(collection))
-		vcpu = kvm_get_vcpu_by_id(kvm, collection->target_addr);
+		vcpu = kvm_get_vcpu(kvm, collection->target_addr);
 
 	irq = vgic_add_lpi(kvm, lpi_id, vcpu);
 	if (IS_ERR(irq)) {
@@ -2583,7 +2583,7 @@ static int vgic_its_restore_cte(struct vgic_its *its, gpa_t gpa, int esz)
 	coll_id = val & KVM_ITS_CTE_ICID_MASK;
 
 	if (target_addr != COLLECTION_NOT_MAPPED &&
-	    !kvm_get_vcpu_by_id(kvm, target_addr))
+	    target_addr >= atomic_read(&kvm->online_vcpus))
 		return -EINVAL;
 
 	collection = find_collection(its, coll_id);
@@ -2804,23 +2804,6 @@ static int vgic_its_ctrl(struct kvm *kvm, struct vgic_its *its, u64 attr)
 	unlock_all_vcpus(kvm);
 	mutex_unlock(&kvm->lock);
 	return ret;
-}
-
-/*
- * kvm_arch_allow_write_without_running_vcpu - allow writing guest memory
- * without the running VCPU when dirty ring is enabled.
- *
- * The running VCPU is required to track dirty guest pages when dirty ring
- * is enabled. Otherwise, the backup bitmap should be used to track the
- * dirty guest pages. When vgic/its tables are being saved, the backup
- * bitmap is used to track the dirty guest pages due to the missed running
- * VCPU in the period.
- */
-bool kvm_arch_allow_write_without_running_vcpu(struct kvm *kvm)
-{
-	struct vgic_dist *dist = &kvm->arch.vgic;
-
-	return dist->table_write_in_progress;
 }
 
 static int vgic_its_set_attr(struct kvm_device *dev,

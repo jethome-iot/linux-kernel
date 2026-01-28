@@ -692,7 +692,7 @@ static int stts751_detect(struct i2c_client *new_client,
 	}
 	dev_dbg(&new_client->dev, "Chip %s detected", name);
 
-	strscpy(info->type, stts751_id[0].name, I2C_NAME_SIZE);
+	strlcpy(info->type, stts751_id[0].name, I2C_NAME_SIZE);
 	return 0;
 }
 
@@ -821,7 +821,7 @@ static struct i2c_driver stts751_driver = {
 		.name	= DEVNAME,
 		.of_match_table = of_match_ptr(stts751_of_match),
 	},
-	.probe		= stts751_probe,
+	.probe_new	= stts751_probe,
 	.id_table	= stts751_id,
 	.detect		= stts751_detect,
 	.alert		= stts751_alert,

@@ -28,8 +28,7 @@ properties:
     patternProperties:
       "^vbuck[1-4]$":
         type: object
-        $ref: regulator.yaml#
-        unevaluatedProperties: false
+        $ref: "regulator.yaml#"
 
         properties:
           regulator-compatible:

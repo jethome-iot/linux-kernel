@@ -48,7 +48,7 @@ unsigned int zfcp_fc_port_scan_backoff(void)
 {
 	if (!port_scan_backoff)
 		return 0;
-	return get_random_u32_below(port_scan_backoff);
+	return prandom_u32_max(port_scan_backoff);
 }
 
 static void zfcp_fc_port_scan_time(struct zfcp_adapter *adapter)
@@ -881,7 +881,7 @@ static int zfcp_fc_gspn(struct zfcp_adapter *adapter,
 			 dev_name(&adapter->ccw_device->dev),
 			 init_utsname()->nodename);
 	else
-		strscpy(fc_host_symbolic_name(adapter->scsi_host),
+		strlcpy(fc_host_symbolic_name(adapter->scsi_host),
 			gspn_rsp->gspn.fp_name, FC_SYMBOLIC_NAME_SIZE);
 
 	return 0;
@@ -900,19 +900,8 @@ static void zfcp_fc_rspn(struct zfcp_adapter *adapter,
 	zfcp_fc_ct_ns_init(&rspn_req->ct_hdr, FC_NS_RSPN_ID,
 			   FC_SYMBOLIC_NAME_SIZE);
 	hton24(rspn_req->rspn.fr_fid.fp_fid, fc_host_port_id(shost));
-
-	BUILD_BUG_ON(sizeof(rspn_req->name) !=
-			sizeof(fc_host_symbolic_name(shost)));
-	BUILD_BUG_ON(sizeof(rspn_req->name) !=
-			type_max(typeof(rspn_req->rspn.fr_name_len)) + 1);
-	len = strscpy(rspn_req->name, fc_host_symbolic_name(shost),
-		      sizeof(rspn_req->name));
-	/*
-	 * It should be impossible for this to truncate (see BUILD_BUG_ON()
-	 * above), but be robust anyway.
-	 */
-	if (WARN_ON(len < 0))
-		len = sizeof(rspn_req->name) - 1;
+	len = strlcpy(rspn_req->rspn.fr_name, fc_host_symbolic_name(shost),
+		      FC_SYMBOLIC_NAME_SIZE);
 	rspn_req->rspn.fr_name_len = len;
 
 	sg_init_one(&fc_req->sg_req, rspn_req, sizeof(*rspn_req));

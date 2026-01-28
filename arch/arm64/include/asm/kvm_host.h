@@ -16,7 +16,6 @@
 #include <linux/types.h>
 #include <linux/jump_label.h>
 #include <linux/kvm_types.h>
-#include <linux/maple_tree.h>
 #include <linux/percpu.h>
 #include <linux/psci.h>
 #include <asm/arch_gicv3.h>
@@ -27,7 +26,6 @@
 #include <asm/fpsimd.h>
 #include <asm/kvm.h>
 #include <asm/kvm_asm.h>
-#include <asm/vncr_mapping.h>
 
 #define __KVM_HAVE_ARCH_INTC_INITIALIZED
 
@@ -40,7 +38,6 @@
 #define KVM_MAX_VCPUS VGIC_V3_MAX_CPUS
 
 #define KVM_VCPU_MAX_FEATURES 7
-#define KVM_VCPU_VALID_FEATURES	(BIT(KVM_VCPU_MAX_FEATURES) - 1)
 
 #define KVM_REQ_SLEEP \
 	KVM_ARCH_REQ_FLAGS(0, KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
@@ -50,7 +47,6 @@
 #define KVM_REQ_RELOAD_GICv4	KVM_ARCH_REQ(4)
 #define KVM_REQ_RELOAD_PMU	KVM_ARCH_REQ(5)
 #define KVM_REQ_SUSPEND		KVM_ARCH_REQ(6)
-#define KVM_REQ_RESYNC_PMU_EL0	KVM_ARCH_REQ(7)
 
 #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
 				     KVM_DIRTY_LOG_INITIALLY_SET)
@@ -64,22 +60,18 @@
 enum kvm_mode {
 	KVM_MODE_DEFAULT,
 	KVM_MODE_PROTECTED,
-	KVM_MODE_NV,
 	KVM_MODE_NONE,
 };
-#ifdef CONFIG_KVM
 enum kvm_mode kvm_get_mode(void);
-#else
-static inline enum kvm_mode kvm_get_mode(void) { return KVM_MODE_NONE; };
-#endif
 
 DECLARE_STATIC_KEY_FALSE(userspace_irqchip_in_use);
 
-extern unsigned int __ro_after_init kvm_sve_max_vl;
-int __init kvm_arm_init_sve(void);
+extern unsigned int kvm_sve_max_vl;
+extern unsigned int kvm_host_sve_max_vl;
+int kvm_arm_init_sve(void);
 
 u32 __attribute_const__ kvm_target_cpu(void);
-void kvm_reset_vcpu(struct kvm_vcpu *vcpu);
+int kvm_reset_vcpu(struct kvm_vcpu *vcpu);
 void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu);
 
 struct kvm_hyp_memcache {
@@ -136,8 +128,9 @@ static inline void __free_hyp_memcache(struct kvm_hyp_memcache *mc,
 		free_fn(pop_hyp_memcache(mc, to_va), arg);
 }
 
-void free_hyp_memcache(struct kvm_hyp_memcache *mc);
-int topup_hyp_memcache(struct kvm_hyp_memcache *mc, unsigned long min_pages);
+void free_hyp_memcache(struct kvm_hyp_memcache *mc, struct kvm *kvm);
+void free_hyp_stage2_memcache(struct kvm_hyp_memcache *mc, struct kvm *kvm);
+int topup_hyp_memcache(struct kvm_vcpu *vcpu);
 
 struct kvm_vmid {
 	atomic64_t id;
@@ -159,33 +152,8 @@ struct kvm_s2_mmu {
 	phys_addr_t	pgd_phys;
 	struct kvm_pgtable *pgt;
 
-	/*
-	 * VTCR value used on the host. For a non-NV guest (or a NV
-	 * guest that runs in a context where its own S2 doesn't
-	 * apply), its T0SZ value reflects that of the IPA size.
-	 *
-	 * For a shadow S2 MMU, T0SZ reflects the PARange exposed to
-	 * the guest.
-	 */
-	u64	vtcr;
-
 	/* The last vcpu id that ran on each physical CPU */
 	int __percpu *last_vcpu_ran;
-
-#define KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT 0
-	/*
-	 * Memory cache used to split
-	 * KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE worth of huge pages. It
-	 * is used to allocate stage2 page tables while splitting huge
-	 * pages. The choice of KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE
-	 * influences both the capacity of the split page cache, and
-	 * how often KVM reschedules. Be wary of raising CHUNK_SIZE
-	 * too high.
-	 *
-	 * Protected by kvm->slots_lock.
-	 */
-	struct kvm_mmu_memory_cache split_page_cache;
-	uint64_t split_page_chunk_size;
 
 	struct kvm_arch *arch;
 };
@@ -206,52 +174,42 @@ struct kvm_smccc_features {
 	unsigned long vendor_hyp_bmap;
 };
 
+struct kvm_pinned_page {
+	struct rb_node		node;
+	struct page		*page;
+	u64			ipa;
+};
+
 typedef unsigned int pkvm_handle_t;
 
 struct kvm_protected_vm {
 	pkvm_handle_t handle;
 	struct kvm_hyp_memcache teardown_mc;
+	struct kvm_hyp_memcache teardown_stage2_mc;
+	struct rb_root pinned_pages;
+	gpa_t pvmfw_load_addr;
+	bool enabled;
 };
-
-struct kvm_mpidr_data {
-	u64			mpidr_mask;
-	DECLARE_FLEX_ARRAY(u16, cmpidr_to_idx);
-};
-
-static inline u16 kvm_mpidr_index(struct kvm_mpidr_data *data, u64 mpidr)
-{
-	unsigned long mask = data->mpidr_mask;
-	u64 aff = mpidr & MPIDR_HWID_BITMASK;
-	int nbits, bit, bit_idx = 0;
-	u16 index = 0;
-
-	/*
-	 * If this looks like RISC-V's BEXT or x86's PEXT
-	 * instructions, it isn't by accident.
-	 */
-	nbits = fls(mask);
-	for_each_set_bit(bit, &mask, nbits) {
-		index |= (aff & BIT(bit)) >> (bit - bit_idx);
-		bit_idx++;
-	}
-
-	return index;
-}
 
 struct kvm_arch {
 	struct kvm_s2_mmu mmu;
 
+	/* VTCR_EL2 value for this VM */
+	u64    vtcr;
+
+	/* The maximum number of vCPUs depends on the used GIC model */
+	int max_vcpus;
+
 	/* Interrupt controller */
 	struct vgic_dist	vgic;
-
-	/* Timers */
-	struct arch_timer_vm_data timer_data;
 
 	/* Mandated version of PSCI */
 	u32 psci_version;
 
+#ifndef __GENKSYMS__
 	/* Protects VM-scoped configuration data */
 	struct mutex config_lock;
+#endif
 
 	/*
 	 * If we encounter a data abort without valid instruction syndrome
@@ -264,23 +222,20 @@ struct kvm_arch {
 #define KVM_ARCH_FLAG_MTE_ENABLED			1
 	/* At least one vCPU has ran in the VM */
 #define KVM_ARCH_FLAG_HAS_RAN_ONCE			2
-	/* The vCPU feature set for the VM is configured */
-#define KVM_ARCH_FLAG_VCPU_FEATURES_CONFIGURED		3
+	/*
+	 * The following two bits are used to indicate the guest's EL1
+	 * register width configuration. A value of KVM_ARCH_FLAG_EL1_32BIT
+	 * bit is valid only when KVM_ARCH_FLAG_REG_WIDTH_CONFIGURED is set.
+	 * Otherwise, the guest's EL1 register width has not yet been
+	 * determined yet.
+	 */
+#define KVM_ARCH_FLAG_REG_WIDTH_CONFIGURED		3
+#define KVM_ARCH_FLAG_EL1_32BIT				4
 	/* PSCI SYSTEM_SUSPEND enabled for the guest */
-#define KVM_ARCH_FLAG_SYSTEM_SUSPEND_ENABLED		4
-	/* VM counter offset */
-#define KVM_ARCH_FLAG_VM_COUNTER_OFFSET			5
-	/* Timer PPIs made immutable */
-#define KVM_ARCH_FLAG_TIMER_PPIS_IMMUTABLE		6
-	/* Initial ID reg values loaded */
-#define KVM_ARCH_FLAG_ID_REGS_INITIALIZED		7
+#define KVM_ARCH_FLAG_SYSTEM_SUSPEND_ENABLED		5
+	/* Guest has bought into the MMIO guard extension */
+#define KVM_ARCH_FLAG_MMIO_GUARD			6
 	unsigned long flags;
-
-	/* VM-wide vCPU feature set */
-	DECLARE_BITMAP(vcpu_features, KVM_VCPU_MAX_FEATURES);
-
-	/* MPIDR to vcpu index mapping, optional */
-	struct kvm_mpidr_data *mpidr_data;
 
 	/*
 	 * VM-wide PMU filter, implemented as a bitmap and big enough for
@@ -291,26 +246,11 @@ struct kvm_arch {
 
 	cpumask_var_t supported_cpus;
 
-	/* PMCR_EL0.N value for the guest */
-	u8 pmcr_n;
+	u8 pfr0_csv2;
+	u8 pfr0_csv3;
 
 	/* Hypercall features firmware registers' descriptor */
 	struct kvm_smccc_features smccc_feat;
-	struct maple_tree smccc_filter;
-
-	/*
-	 * Emulated CPU ID registers per VM
-	 * (Op0, Op1, CRn, CRm, Op2) of the ID registers to be saved in it
-	 * is (3, 0, 0, crm, op2), where 1<=crm<8, 0<=op2<8.
-	 *
-	 * These emulated idregs are VM-wide, but accessed from the context of a vCPU.
-	 * Atomic access to multiple idregs are guarded by kvm_arch.config_lock.
-	 */
-#define IDREG_IDX(id)		(((sys_reg_CRm(id) - 1) << 3) | sys_reg_Op2(id))
-#define IDX_IDREG(idx)		sys_reg(3, 0, 0, ((idx) >> 3) + 1, (idx) & Op2_mask)
-#define IDREG(kvm, id)		((kvm)->arch.id_regs[IDREG_IDX(id)])
-#define KVM_ARM_ID_REG_NUM	(IDREG_IDX(sys_reg(3, 0, 0, 7, 7)) + 1)
-	u64 id_regs[KVM_ARM_ID_REG_NUM];
 
 	/*
 	 * For an untrusted host VM, 'pkvm.handle' is used to lookup
@@ -320,39 +260,37 @@ struct kvm_arch {
 };
 
 struct kvm_vcpu_fault_info {
-	u64 esr_el2;		/* Hyp Syndrom Register */
+	u32 esr_el2;		/* Hyp Syndrom Register */
 	u64 far_el2;		/* Hyp Fault Address Register */
 	u64 hpfar_el2;		/* Hyp IPA Fault Address Register */
 	u64 disr_el1;		/* Deferred [SError] Status Register */
 };
 
-/*
- * VNCR() just places the VNCR_capable registers in the enum after
- * __VNCR_START__, and the value (after correction) to be an 8-byte offset
- * from the VNCR base. As we don't require the enum to be otherwise ordered,
- * we need the terrible hack below to ensure that we correctly size the
- * sys_regs array, no matter what.
- *
- * The __MAX__ macro has been lifted from Sean Eron Anderson's wonderful
- * treasure trove of bit hacks:
- * https://graphics.stanford.edu/~seander/bithacks.html#IntegerMinOrMax
- */
-#define __MAX__(x,y)	((x) ^ (((x) ^ (y)) & -((x) < (y))))
-#define VNCR(r)						\
-	__before_##r,					\
-	r = __VNCR_START__ + ((VNCR_ ## r) / 8),	\
-	__after_##r = __MAX__(__before_##r - 1, r)
-
 enum vcpu_sysreg {
 	__INVALID_SYSREG__,   /* 0 is reserved as an invalid value */
 	MPIDR_EL1,	/* MultiProcessor Affinity Register */
-	CLIDR_EL1,	/* Cache Level ID Register */
 	CSSELR_EL1,	/* Cache Size Selection Register */
+	SCTLR_EL1,	/* System Control Register */
+	ACTLR_EL1,	/* Auxiliary Control Register */
+	CPACR_EL1,	/* Coprocessor Access Control */
+	ZCR_EL1,	/* SVE Control */
+	TTBR0_EL1,	/* Translation Table Base Register 0 */
+	TTBR1_EL1,	/* Translation Table Base Register 1 */
+	TCR_EL1,	/* Translation Control Register */
+	ESR_EL1,	/* Exception Syndrome Register */
+	AFSR0_EL1,	/* Auxiliary Fault Status Register 0 */
+	AFSR1_EL1,	/* Auxiliary Fault Status Register 1 */
+	FAR_EL1,	/* Fault Address Register */
+	MAIR_EL1,	/* Memory Attribute Indirection Register */
+	VBAR_EL1,	/* Vector Base Address Register */
+	CONTEXTIDR_EL1,	/* Context ID Register */
 	TPIDR_EL0,	/* Thread ID, User R/W */
 	TPIDRRO_EL0,	/* Thread ID, User R/O */
 	TPIDR_EL1,	/* Thread ID, Privileged */
+	AMAIR_EL1,	/* Aux Memory Attribute Indirection Register */
 	CNTKCTL_EL1,	/* Timer Control Register (EL1) */
 	PAR_EL1,	/* Physical Address Register */
+	MDSCR_EL1,	/* Monitor Debug System Control Register */
 	MDCCINT_EL1,	/* Monitor Debug Comms Channel Interrupt Enable Reg */
 	OSLSR_EL1,	/* OS Lock Status Register */
 	DISR_EL1,	/* Deferred Interrupt Status Register */
@@ -383,93 +321,27 @@ enum vcpu_sysreg {
 	APGAKEYLO_EL1,
 	APGAKEYHI_EL1,
 
+	ELR_EL1,
+	SP_EL1,
+	SPSR_EL1,
+
+	CNTVOFF_EL2,
+	CNTV_CVAL_EL0,
+	CNTV_CTL_EL0,
+	CNTP_CVAL_EL0,
+	CNTP_CTL_EL0,
+
 	/* Memory Tagging Extension registers */
 	RGSR_EL1,	/* Random Allocation Tag Seed Register */
 	GCR_EL1,	/* Tag Control Register */
+	TFSR_EL1,	/* Tag Fault Status Register (EL1) */
 	TFSRE0_EL1,	/* Tag Fault Status Register (EL0) */
 
-	/* 32bit specific registers. */
+	/* 32bit specific registers. Keep them at the end of the range */
 	DACR32_EL2,	/* Domain Access Control Register */
 	IFSR32_EL2,	/* Instruction Fault Status Register */
 	FPEXC32_EL2,	/* Floating-Point Exception Control Register */
 	DBGVCR32_EL2,	/* Debug Vector Catch Register */
-
-	/* EL2 registers */
-	SCTLR_EL2,	/* System Control Register (EL2) */
-	ACTLR_EL2,	/* Auxiliary Control Register (EL2) */
-	MDCR_EL2,	/* Monitor Debug Configuration Register (EL2) */
-	CPTR_EL2,	/* Architectural Feature Trap Register (EL2) */
-	HACR_EL2,	/* Hypervisor Auxiliary Control Register */
-	TTBR0_EL2,	/* Translation Table Base Register 0 (EL2) */
-	TTBR1_EL2,	/* Translation Table Base Register 1 (EL2) */
-	TCR_EL2,	/* Translation Control Register (EL2) */
-	SPSR_EL2,	/* EL2 saved program status register */
-	ELR_EL2,	/* EL2 exception link register */
-	AFSR0_EL2,	/* Auxiliary Fault Status Register 0 (EL2) */
-	AFSR1_EL2,	/* Auxiliary Fault Status Register 1 (EL2) */
-	ESR_EL2,	/* Exception Syndrome Register (EL2) */
-	FAR_EL2,	/* Fault Address Register (EL2) */
-	HPFAR_EL2,	/* Hypervisor IPA Fault Address Register */
-	MAIR_EL2,	/* Memory Attribute Indirection Register (EL2) */
-	AMAIR_EL2,	/* Auxiliary Memory Attribute Indirection Register (EL2) */
-	VBAR_EL2,	/* Vector Base Address Register (EL2) */
-	RVBAR_EL2,	/* Reset Vector Base Address Register */
-	CONTEXTIDR_EL2,	/* Context ID Register (EL2) */
-	CNTHCTL_EL2,	/* Counter-timer Hypervisor Control register */
-	SP_EL2,		/* EL2 Stack Pointer */
-	CNTHP_CTL_EL2,
-	CNTHP_CVAL_EL2,
-	CNTHV_CTL_EL2,
-	CNTHV_CVAL_EL2,
-
-	__VNCR_START__,	/* Any VNCR-capable reg goes after this point */
-
-	VNCR(SCTLR_EL1),/* System Control Register */
-	VNCR(ACTLR_EL1),/* Auxiliary Control Register */
-	VNCR(CPACR_EL1),/* Coprocessor Access Control */
-	VNCR(ZCR_EL1),	/* SVE Control */
-	VNCR(TTBR0_EL1),/* Translation Table Base Register 0 */
-	VNCR(TTBR1_EL1),/* Translation Table Base Register 1 */
-	VNCR(TCR_EL1),	/* Translation Control Register */
-	VNCR(TCR2_EL1),	/* Extended Translation Control Register */
-	VNCR(ESR_EL1),	/* Exception Syndrome Register */
-	VNCR(AFSR0_EL1),/* Auxiliary Fault Status Register 0 */
-	VNCR(AFSR1_EL1),/* Auxiliary Fault Status Register 1 */
-	VNCR(FAR_EL1),	/* Fault Address Register */
-	VNCR(MAIR_EL1),	/* Memory Attribute Indirection Register */
-	VNCR(VBAR_EL1),	/* Vector Base Address Register */
-	VNCR(CONTEXTIDR_EL1),	/* Context ID Register */
-	VNCR(AMAIR_EL1),/* Aux Memory Attribute Indirection Register */
-	VNCR(MDSCR_EL1),/* Monitor Debug System Control Register */
-	VNCR(ELR_EL1),
-	VNCR(SP_EL1),
-	VNCR(SPSR_EL1),
-	VNCR(TFSR_EL1),	/* Tag Fault Status Register (EL1) */
-	VNCR(VPIDR_EL2),/* Virtualization Processor ID Register */
-	VNCR(VMPIDR_EL2),/* Virtualization Multiprocessor ID Register */
-	VNCR(HCR_EL2),	/* Hypervisor Configuration Register */
-	VNCR(HSTR_EL2),	/* Hypervisor System Trap Register */
-	VNCR(VTTBR_EL2),/* Virtualization Translation Table Base Register */
-	VNCR(VTCR_EL2),	/* Virtualization Translation Control Register */
-	VNCR(TPIDR_EL2),/* EL2 Software Thread ID Register */
-	VNCR(HCRX_EL2),	/* Extended Hypervisor Configuration Register */
-
-	/* Permission Indirection Extension registers */
-	VNCR(PIR_EL1),	 /* Permission Indirection Register 1 (EL1) */
-	VNCR(PIRE0_EL1), /*  Permission Indirection Register 0 (EL1) */
-
-	VNCR(HFGRTR_EL2),
-	VNCR(HFGWTR_EL2),
-	VNCR(HFGITR_EL2),
-	VNCR(HDFGRTR_EL2),
-	VNCR(HDFGWTR_EL2),
-	VNCR(HAFGRTR_EL2),
-
-	VNCR(CNTVOFF_EL2),
-	VNCR(CNTV_CVAL_EL0),
-	VNCR(CNTV_CTL_EL0),
-	VNCR(CNTP_CVAL_EL0),
-	VNCR(CNTP_CTL_EL0),
 
 	NR_SYS_REGS	/* Nothing after this line! */
 };
@@ -486,10 +358,11 @@ struct kvm_cpu_context {
 
 	u64 sys_regs[NR_SYS_REGS];
 
+#ifdef __GENKSYMS__
 	struct kvm_vcpu *__hyp_running_vcpu;
-
-	/* This pointer has to be 4kB aligned. */
-	u64 *vncr_array;
+#else
+	void *__hyp_running_vcpu;
+#endif
 };
 
 struct kvm_host_data {
@@ -519,6 +392,34 @@ extern s64 kvm_nvhe_sym(hyp_physvirt_offset);
 extern u64 kvm_nvhe_sym(hyp_cpu_logical_map)[NR_CPUS];
 #define hyp_cpu_logical_map CHOOSE_NVHE_SYM(hyp_cpu_logical_map)
 
+enum pkvm_iommu_pm_event {
+	PKVM_IOMMU_PM_SUSPEND,
+	PKVM_IOMMU_PM_RESUME,
+};
+
+struct pkvm_iommu_ops;
+
+struct pkvm_iommu_driver {
+	const struct pkvm_iommu_ops *ops;
+	struct list_head list;
+	atomic_t state;
+};
+
+int pkvm_iommu_driver_init(u64 drv, void *data, size_t size);
+int pkvm_iommu_register(struct device *dev, u64 drv, phys_addr_t pa,
+			size_t size, struct device *parent, u8 flags);
+int pkvm_iommu_suspend(struct device *dev);
+int pkvm_iommu_resume(struct device *dev);
+
+/*
+ * Reject future calls to pkvm_iommu_driver_init() and pkvm_iommu_register()
+ * and report errors if found. Incase of errors pKVM can take proper actions
+ * as erasing pvmfw.
+ */
+int pkvm_iommu_finalize(int err);
+
+bool pkvm_iommu_finalized(void);
+
 struct vcpu_reset_state {
 	unsigned long	pc;
 	unsigned long	r0;
@@ -529,18 +430,8 @@ struct vcpu_reset_state {
 struct kvm_vcpu_arch {
 	struct kvm_cpu_context ctxt;
 
-	/*
-	 * Guest floating point state
-	 *
-	 * The architecture has two main floating point extensions,
-	 * the original FPSIMD and SVE.  These have overlapping
-	 * register views, with the FPSIMD V registers occupying the
-	 * low 128 bits of the SVE Z registers.  When the core
-	 * floating point code saves the register state of a task it
-	 * records which view it saved in fp_type.
-	 */
+	/* Guest floating point state */
 	void *sve_state;
-	enum fp_type fp_type;
 	unsigned int sve_max_vl;
 	u64 svcr;
 
@@ -601,7 +492,6 @@ struct kvm_vcpu_arch {
 	struct kvm_guest_debug_arch external_debug_state;
 
 	struct user_fpsimd_state *host_fpsimd_state;	/* hyp VA */
-	struct task_struct *parent_task;
 
 	struct {
 		/* {Break,watch}point registers */
@@ -631,10 +521,20 @@ struct kvm_vcpu_arch {
 
 	/* vcpu power state */
 	struct kvm_mp_state mp_state;
+#ifndef __GENKSYMS__
 	spinlock_t mp_state_lock;
+#endif
 
-	/* Cache some mmu pages needed inside spinlock regions */
-	struct kvm_mmu_memory_cache mmu_page_cache;
+	union {
+		/* Cache some mmu pages needed inside spinlock regions */
+		struct kvm_mmu_memory_cache mmu_page_cache;
+		/* Pages to be donated to pkvm/EL2 if it runs out */
+		struct kvm_hyp_memcache pkvm_memcache;
+	};
+
+	/* Target CPU and feature flags */
+	int target;
+	DECLARE_BITMAP(features, KVM_VCPU_MAX_FEATURES);
 
 	/* Virtual SError ESR to restore when HCR_EL2.VSE is set */
 	u64 vsesr_el2;
@@ -647,9 +547,6 @@ struct kvm_vcpu_arch {
 		u64 last_steal;
 		gpa_t base;
 	} steal;
-
-	/* Per-vcpu CCSIDR override or NULL */
-	u32 *ccsidr;
 };
 
 /*
@@ -724,9 +621,27 @@ struct kvm_vcpu_arch {
 		__vcpu_flags_preempt_enable();			\
 	} while (0)
 
+#define __vcpu_copy_flag(vt, vs, flagset, f, m)			\
+	do {							\
+		typeof(vs->arch.flagset) tmp, val;		\
+								\
+		__build_check_flag(vs, flagset, f, m);		\
+								\
+		__vcpu_flags_preempt_disable();			\
+		val = READ_ONCE(vs->arch.flagset);		\
+		val &= (m);					\
+		tmp = READ_ONCE(vt->arch.flagset);		\
+		tmp &= ~(m);					\
+		tmp |= val;					\
+		WRITE_ONCE(vt->arch.flagset, tmp);		\
+		__vcpu_flags_preempt_enable();			\
+	} while (0)
+
+
 #define vcpu_get_flag(v, ...)	__vcpu_get_flag((v), __VA_ARGS__)
 #define vcpu_set_flag(v, ...)	__vcpu_set_flag((v), __VA_ARGS__)
 #define vcpu_clear_flag(v, ...)	__vcpu_clear_flag((v), __VA_ARGS__)
+#define vcpu_copy_flag(vt, vs,...) __vcpu_copy_flag((vt), (vs), __VA_ARGS__)
 
 /* SVE exposed to guest */
 #define GUEST_HAS_SVE		__vcpu_single_flag(cflags, BIT(0))
@@ -734,8 +649,6 @@ struct kvm_vcpu_arch {
 #define VCPU_SVE_FINALIZED	__vcpu_single_flag(cflags, BIT(1))
 /* PTRAUTH exposed to guest */
 #define GUEST_HAS_PTRAUTH	__vcpu_single_flag(cflags, BIT(2))
-/* KVM_ARM_VCPU_INIT completed */
-#define VCPU_INITIALIZED	__vcpu_single_flag(cflags, BIT(3))
 
 /* Exception pending */
 #define PENDING_EXCEPTION	__vcpu_single_flag(iflags, BIT(0))
@@ -746,6 +659,8 @@ struct kvm_vcpu_arch {
 #define INCREMENT_PC		__vcpu_single_flag(iflags, BIT(1))
 /* Target EL/MODE (not a single flag, but let's abuse the macro) */
 #define EXCEPT_MASK		__vcpu_single_flag(iflags, GENMASK(3, 1))
+/* Cover both PENDING_EXCEPTION and EXCEPT_MASK for global operations */
+#define PC_UPDATE_REQ		__vcpu_single_flag(iflags, GENMASK(3, 0))
 
 /* Helpers to encode exceptions with minimum fuss */
 #define __EXCEPT_MASK_VAL	unpack_vcpu_flag(EXCEPT_MASK)
@@ -766,7 +681,7 @@ struct kvm_vcpu_arch {
 #define EXCEPT_AA64_EL1_IRQ	__vcpu_except_flags(1)
 #define EXCEPT_AA64_EL1_FIQ	__vcpu_except_flags(2)
 #define EXCEPT_AA64_EL1_SERR	__vcpu_except_flags(3)
-/* For AArch64 with NV: */
+/* For AArch64 with NV (one day): */
 #define EXCEPT_AA64_EL2_SYNC	__vcpu_except_flags(4)
 #define EXCEPT_AA64_EL2_IRQ	__vcpu_except_flags(5)
 #define EXCEPT_AA64_EL2_FIQ	__vcpu_except_flags(6)
@@ -777,8 +692,8 @@ struct kvm_vcpu_arch {
 #define DEBUG_STATE_SAVE_SPE	__vcpu_single_flag(iflags, BIT(5))
 /* Save TRBE context if active  */
 #define DEBUG_STATE_SAVE_TRBE	__vcpu_single_flag(iflags, BIT(6))
-/* vcpu running in HYP context */
-#define VCPU_HYP_CONTEXT	__vcpu_single_flag(iflags, BIT(7))
+/* pKVM host vcpu state is dirty, needs resync */
+#define PKVM_HOST_STATE_DIRTY	__vcpu_single_flag(iflags, BIT(7))
 
 /* SVE enabled for host EL0 */
 #define HOST_SVE_ENABLED	__vcpu_single_flag(sflags, BIT(0))
@@ -792,10 +707,6 @@ struct kvm_vcpu_arch {
 #define SYSREGS_ON_CPU		__vcpu_single_flag(sflags, BIT(4))
 /* Software step state is Active-pending */
 #define DBG_SS_ACTIVE_PENDING	__vcpu_single_flag(sflags, BIT(5))
-/* PMUSERENR for the guest EL0 is on physical CPU */
-#define PMUSERENR_ON_CPU	__vcpu_single_flag(sflags, BIT(6))
-/* WFI instruction trapped */
-#define IN_WFI			__vcpu_single_flag(sflags, BIT(7))
 
 
 /* Pointer to the vcpu's SVE FFR for sve_{save,load}_state() */
@@ -852,26 +763,12 @@ struct kvm_vcpu_arch {
  * accessed by a running VCPU.  For example, for userspace access or
  * for system registers that are never context switched, but only
  * emulated.
- *
- * Don't bother with VNCR-based accesses in the nVHE code, it has no
- * business dealing with NV.
  */
-static inline u64 *__ctxt_sys_reg(const struct kvm_cpu_context *ctxt, int r)
-{
-#if !defined (__KVM_NVHE_HYPERVISOR__)
-	if (unlikely(cpus_have_final_cap(ARM64_HAS_NESTED_VIRT) &&
-		     r >= __VNCR_START__ && ctxt->vncr_array))
-		return &ctxt->vncr_array[r - __VNCR_START__];
-#endif
-	return (u64 *)&ctxt->sys_regs[r];
-}
+#define __ctxt_sys_reg(c,r)	(&(c)->sys_regs[(r)])
 
 #define ctxt_sys_reg(c,r)	(*__ctxt_sys_reg(c,r))
 
 #define __vcpu_sys_reg(v,r)	(ctxt_sys_reg(&(v)->arch.ctxt, (r)))
-
-u64 vcpu_read_sys_reg(const struct kvm_vcpu *vcpu, int reg);
-void vcpu_write_sys_reg(struct kvm_vcpu *vcpu, u64 val, int reg);
 
 static inline bool __vcpu_read_sys_reg_from_cpu(int reg, u64 *val)
 {
@@ -890,6 +787,7 @@ static inline bool __vcpu_read_sys_reg_from_cpu(int reg, u64 *val)
 		return false;
 
 	switch (reg) {
+	case CSSELR_EL1:	*val = read_sysreg_s(SYS_CSSELR_EL1);	break;
 	case SCTLR_EL1:		*val = read_sysreg_s(SYS_SCTLR_EL12);	break;
 	case CPACR_EL1:		*val = read_sysreg_s(SYS_CPACR_EL12);	break;
 	case TTBR0_EL1:		*val = read_sysreg_s(SYS_TTBR0_EL12);	break;
@@ -908,7 +806,6 @@ static inline bool __vcpu_read_sys_reg_from_cpu(int reg, u64 *val)
 	case AMAIR_EL1:		*val = read_sysreg_s(SYS_AMAIR_EL12);	break;
 	case CNTKCTL_EL1:	*val = read_sysreg_s(SYS_CNTKCTL_EL12);	break;
 	case ELR_EL1:		*val = read_sysreg_s(SYS_ELR_EL12);	break;
-	case SPSR_EL1:		*val = read_sysreg_s(SYS_SPSR_EL12);	break;
 	case PAR_EL1:		*val = read_sysreg_par();		break;
 	case DACR32_EL2:	*val = read_sysreg_s(SYS_DACR32_EL2);	break;
 	case IFSR32_EL2:	*val = read_sysreg_s(SYS_IFSR32_EL2);	break;
@@ -935,6 +832,7 @@ static inline bool __vcpu_write_sys_reg_to_cpu(u64 val, int reg)
 		return false;
 
 	switch (reg) {
+	case CSSELR_EL1:	write_sysreg_s(val, SYS_CSSELR_EL1);	break;
 	case SCTLR_EL1:		write_sysreg_s(val, SYS_SCTLR_EL12);	break;
 	case CPACR_EL1:		write_sysreg_s(val, SYS_CPACR_EL12);	break;
 	case TTBR0_EL1:		write_sysreg_s(val, SYS_TTBR0_EL12);	break;
@@ -953,7 +851,6 @@ static inline bool __vcpu_write_sys_reg_to_cpu(u64 val, int reg)
 	case AMAIR_EL1:		write_sysreg_s(val, SYS_AMAIR_EL12);	break;
 	case CNTKCTL_EL1:	write_sysreg_s(val, SYS_CNTKCTL_EL12);	break;
 	case ELR_EL1:		write_sysreg_s(val, SYS_ELR_EL12);	break;
-	case SPSR_EL1:		write_sysreg_s(val, SYS_SPSR_EL12);	break;
 	case PAR_EL1:		write_sysreg_s(val, SYS_PAR_EL1);	break;
 	case DACR32_EL2:	write_sysreg_s(val, SYS_DACR32_EL2);	break;
 	case IFSR32_EL2:	write_sysreg_s(val, SYS_IFSR32_EL2);	break;
@@ -964,8 +861,32 @@ static inline bool __vcpu_write_sys_reg_to_cpu(u64 val, int reg)
 	return true;
 }
 
+#define vcpu_read_sys_reg(__vcpu, reg)					\
+	({								\
+		u64 __val = 0x8badf00d8badf00d;				\
+									\
+		/* SYSREGS_ON_CPU is only used in VHE */		\
+		((!is_nvhe_hyp_code() &&				\
+		  vcpu_get_flag(__vcpu, SYSREGS_ON_CPU) &&		\
+		  __vcpu_read_sys_reg_from_cpu(reg, &__val))) ?		\
+		 __val							\
+		 :							\
+		 ctxt_sys_reg(&__vcpu->arch.ctxt, reg);			\
+	 })
+
+#define vcpu_write_sys_reg(__vcpu, __val, reg)				\
+	do {								\
+		/* SYSREGS_ON_CPU is only used in VHE */		\
+		if (is_nvhe_hyp_code() ||				\
+		    !vcpu_get_flag(__vcpu, SYSREGS_ON_CPU) ||		\
+		    !__vcpu_write_sys_reg_to_cpu(__val, reg))		\
+			ctxt_sys_reg(&__vcpu->arch.ctxt, reg) = __val;	\
+	} while (0)
+
 struct kvm_vm_stat {
 	struct kvm_vm_stat_generic generic;
+	atomic64_t protected_hyp_mem;
+	atomic64_t protected_shared_mem;
 };
 
 struct kvm_vcpu_stat {
@@ -979,6 +900,7 @@ struct kvm_vcpu_stat {
 	u64 exits;
 };
 
+void kvm_vcpu_preferred_target(struct kvm_vcpu_init *init);
 unsigned long kvm_arm_num_regs(struct kvm_vcpu *vcpu);
 int kvm_arm_copy_reg_indices(struct kvm_vcpu *vcpu, u64 __user *indices);
 int kvm_arm_get_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg);
@@ -992,6 +914,8 @@ int __kvm_arm_vcpu_get_events(struct kvm_vcpu *vcpu,
 
 int __kvm_arm_vcpu_set_events(struct kvm_vcpu *vcpu,
 			      struct kvm_vcpu_events *events);
+
+#define KVM_ARCH_WANT_MMU_NOTIFIER
 
 void kvm_arm_halt_guest(struct kvm *kvm);
 void kvm_arm_resume_guest(struct kvm *kvm);
@@ -1044,6 +968,8 @@ void kvm_arm_resume_guest(struct kvm *kvm);
 #define kvm_call_hyp_nvhe(f, ...) f(__VA_ARGS__)
 #endif /* __KVM_NVHE_HYPERVISOR__ */
 
+void force_vm_exit(const cpumask_t *mask);
+
 int handle_exit(struct kvm_vcpu *vcpu, int exception_index);
 void handle_exit_early(struct kvm_vcpu *vcpu, int exception_index);
 
@@ -1057,11 +983,7 @@ int kvm_handle_cp10_id(struct kvm_vcpu *vcpu);
 
 void kvm_reset_sys_regs(struct kvm_vcpu *vcpu);
 
-int __init kvm_sys_reg_table_init(void);
-int __init populate_nv_trap_config(void);
-
-bool lock_all_vcpus(struct kvm *kvm);
-void unlock_all_vcpus(struct kvm *kvm);
+int kvm_sys_reg_table_init(void);
 
 /* MMIO helpers */
 void kvm_mmio_write_buf(void *buf, unsigned int len, unsigned long data);
@@ -1092,20 +1014,20 @@ int kvm_arm_pvtime_get_attr(struct kvm_vcpu *vcpu,
 int kvm_arm_pvtime_has_attr(struct kvm_vcpu *vcpu,
 			    struct kvm_device_attr *attr);
 
-extern unsigned int __ro_after_init kvm_arm_vmid_bits;
-int __init kvm_arm_vmid_alloc_init(void);
-void __init kvm_arm_vmid_alloc_free(void);
-bool kvm_arm_vmid_update(struct kvm_vmid *kvm_vmid);
+extern unsigned int kvm_arm_vmid_bits;
+int kvm_arm_vmid_alloc_init(void);
+void kvm_arm_vmid_alloc_free(void);
+void kvm_arm_vmid_update(struct kvm_vmid *kvm_vmid);
 void kvm_arm_vmid_clear_active(void);
 
 static inline void kvm_arm_pvtime_vcpu_init(struct kvm_vcpu_arch *vcpu_arch)
 {
-	vcpu_arch->steal.base = INVALID_GPA;
+	vcpu_arch->steal.base = GPA_INVALID;
 }
 
 static inline bool kvm_arm_is_pvtime_enabled(struct kvm_vcpu_arch *vcpu_arch)
 {
-	return (vcpu_arch->steal.base != INVALID_GPA);
+	return (vcpu_arch->steal.base != GPA_INVALID);
 }
 
 void kvm_set_sei_esr(struct kvm_vcpu *vcpu, u64 syndrome);
@@ -1122,11 +1044,15 @@ static inline void kvm_init_host_cpu_context(struct kvm_cpu_context *cpu_ctxt)
 
 static inline bool kvm_system_needs_idmapped_vectors(void)
 {
-	return cpus_have_final_cap(ARM64_SPECTRE_V3A);
+	return cpus_have_const_cap(ARM64_SPECTRE_V3A);
 }
 
+void kvm_arm_vcpu_ptrauth_trap(struct kvm_vcpu *vcpu);
+
+static inline void kvm_arch_hardware_unsetup(void) {}
 static inline void kvm_arch_sync_events(struct kvm *kvm) {}
 static inline void kvm_arch_sched_in(struct kvm_vcpu *vcpu, int cpu) {}
+static inline void kvm_arch_vcpu_block_finish(struct kvm_vcpu *vcpu) {}
 
 void kvm_arm_init_debug(void);
 void kvm_arm_vcpu_init_debug(struct kvm_vcpu *vcpu);
@@ -1134,8 +1060,25 @@ void kvm_arm_setup_debug(struct kvm_vcpu *vcpu);
 void kvm_arm_clear_debug(struct kvm_vcpu *vcpu);
 void kvm_arm_reset_debug_ptr(struct kvm_vcpu *vcpu);
 
+#define __vcpu_save_guest_debug_regs(vcpu)				\
+	do {								\
+		u64 val = vcpu_read_sys_reg(vcpu, MDSCR_EL1);		\
+									\
+		(vcpu)->arch.guest_debug_preserved.mdscr_el1 = val;	\
+	} while(0)
+
+#define __vcpu_restore_guest_debug_regs(vcpu)				\
+	do {								\
+		u64 val = (vcpu)->arch.guest_debug_preserved.mdscr_el1;	\
+									\
+		vcpu_write_sys_reg(vcpu, val, MDSCR_EL1);		\
+	} while (0)
+
 #define kvm_vcpu_os_lock_enabled(vcpu)		\
-	(!!(__vcpu_sys_reg(vcpu, OSLSR_EL1) & OSLSR_EL1_OSLK))
+	(!!(__vcpu_sys_reg(vcpu, OSLSR_EL1) & SYS_OSLSR_OSLK))
+
+#define kvm_vcpu_needs_debug_regs(vcpu)		\
+	((vcpu)->guest_debug || kvm_vcpu_os_lock_enabled(vcpu))
 
 int kvm_arm_vcpu_arch_set_attr(struct kvm_vcpu *vcpu,
 			       struct kvm_device_attr *attr);
@@ -1144,12 +1087,8 @@ int kvm_arm_vcpu_arch_get_attr(struct kvm_vcpu *vcpu,
 int kvm_arm_vcpu_arch_has_attr(struct kvm_vcpu *vcpu,
 			       struct kvm_device_attr *attr);
 
-int kvm_vm_ioctl_mte_copy_tags(struct kvm *kvm,
-			       struct kvm_arm_copy_mte_tags *copy_tags);
-int kvm_vm_ioctl_set_counter_offset(struct kvm *kvm,
-				    struct kvm_arm_counter_offset *offset);
-int kvm_vm_ioctl_get_reg_writable_masks(struct kvm *kvm,
-					struct reg_mask_range *range);
+long kvm_vm_ioctl_mte_copy_tags(struct kvm *kvm,
+				struct kvm_arm_copy_mte_tags *copy_tags);
 
 /* Guest/host FPSIMD coordination helpers */
 int kvm_arch_vcpu_run_map_fp(struct kvm_vcpu *vcpu);
@@ -1157,7 +1096,6 @@ void kvm_arch_vcpu_load_fp(struct kvm_vcpu *vcpu);
 void kvm_arch_vcpu_ctxflush_fp(struct kvm_vcpu *vcpu);
 void kvm_arch_vcpu_ctxsync_fp(struct kvm_vcpu *vcpu);
 void kvm_arch_vcpu_put_fp(struct kvm_vcpu *vcpu);
-void kvm_vcpu_unshare_task_fp(struct kvm_vcpu *vcpu);
 
 static inline bool kvm_pmu_counter_deferred(struct perf_event_attr *attr)
 {
@@ -1171,32 +1109,23 @@ void kvm_arch_vcpu_put_debug_state_flags(struct kvm_vcpu *vcpu);
 #ifdef CONFIG_KVM
 void kvm_set_pmu_events(u32 set, struct perf_event_attr *attr);
 void kvm_clr_pmu_events(u32 clr);
-bool kvm_set_pmuserenr(u64 val);
 #else
 static inline void kvm_set_pmu_events(u32 set, struct perf_event_attr *attr) {}
 static inline void kvm_clr_pmu_events(u32 clr) {}
-static inline bool kvm_set_pmuserenr(u64 val)
-{
-	return false;
-}
 #endif
 
-void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu);
-void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu);
+void kvm_vcpu_load_sysregs_vhe(struct kvm_vcpu *vcpu);
+void kvm_vcpu_put_sysregs_vhe(struct kvm_vcpu *vcpu);
 
-int __init kvm_set_ipa_limit(void);
+int kvm_set_ipa_limit(void);
 
 #define __KVM_HAVE_ARCH_VM_ALLOC
 struct kvm *kvm_arch_alloc_vm(void);
+void kvm_arch_free_vm(struct kvm *kvm);
 
-#define __KVM_HAVE_ARCH_FLUSH_REMOTE_TLBS
+#define kvm_vm_is_protected(kvm)	((kvm)->arch.pkvm.enabled)
 
-#define __KVM_HAVE_ARCH_FLUSH_REMOTE_TLBS_RANGE
-
-static inline bool kvm_vm_is_protected(struct kvm *kvm)
-{
-	return false;
-}
+void kvm_init_protected_traps(struct kvm_vcpu *vcpu);
 
 int kvm_arm_vcpu_finalize(struct kvm_vcpu *vcpu, int feature);
 bool kvm_arm_vcpu_is_finalized(struct kvm_vcpu *vcpu);
@@ -1210,16 +1139,6 @@ bool kvm_arm_vcpu_is_finalized(struct kvm_vcpu *vcpu);
 #define kvm_supports_32bit_el0()				\
 	(system_supports_32bit_el0() &&				\
 	 !static_branch_unlikely(&arm64_mismatched_32bit_el0))
-
-#define kvm_vm_has_ran_once(kvm)					\
-	(test_bit(KVM_ARCH_FLAG_HAS_RAN_ONCE, &(kvm)->arch.flags))
-
-static inline bool __vcpu_has_feature(const struct kvm_arch *ka, int feature)
-{
-	return test_bit(feature, ka->vcpu_features);
-}
-
-#define vcpu_has_feature(v, f)	__vcpu_has_feature(&(v)->kvm->arch, (f))
 
 int kvm_trng_call(struct kvm_vcpu *vcpu);
 #ifdef CONFIG_KVM

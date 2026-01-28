@@ -3,7 +3,6 @@
 #include <linux/acpi.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/of.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/memblock.h>
@@ -12,7 +11,6 @@
 #include <linux/nodemask.h>
 #include <linux/sched.h>
 #include <linux/topology.h>
-#include <linux/sort.h>
 
 #include <asm/e820/api.h>
 #include <asm/proto.h>
@@ -58,7 +56,7 @@ s16 __apicid_to_node[MAX_LOCAL_APIC] = {
 
 int numa_cpu_node(int cpu)
 {
-	u32 apicid = early_per_cpu(x86_cpu_to_apicid, cpu);
+	int apicid = early_per_cpu(x86_cpu_to_apicid, cpu);
 
 	if (apicid != BAD_APICID)
 		return __apicid_to_node[apicid];
@@ -357,7 +355,7 @@ void __init numa_reset_distance(void)
 
 	/* numa_distance could be 1LU marking allocation failure, test cnt */
 	if (numa_distance_cnt)
-		memblock_free(numa_distance, size);
+		memblock_free_ptr(numa_distance, size);
 	numa_distance_cnt = 0;
 	numa_distance = NULL;	/* enable table creation */
 }
@@ -448,6 +446,37 @@ int __node_distance(int from, int to)
 	return numa_distance[from * numa_distance_cnt + to];
 }
 EXPORT_SYMBOL(__node_distance);
+
+/*
+ * Sanity check to catch more bad NUMA configurations (they are amazingly
+ * common).  Make sure the nodes cover all memory.
+ */
+static bool __init numa_meminfo_cover_memory(const struct numa_meminfo *mi)
+{
+	u64 numaram, e820ram;
+	int i;
+
+	numaram = 0;
+	for (i = 0; i < mi->nr_blks; i++) {
+		u64 s = mi->blk[i].start >> PAGE_SHIFT;
+		u64 e = mi->blk[i].end >> PAGE_SHIFT;
+		numaram += e - s;
+		numaram -= __absent_pages_in_range(mi->blk[i].nid, s, e);
+		if ((s64)numaram < 0)
+			numaram = 0;
+	}
+
+	e820ram = max_pfn - absent_pages_in_range(0, max_pfn);
+
+	/* We seem to lose 3 pages somewhere. Allow 1M of slack. */
+	if ((s64)(e820ram - numaram) >= (1 << (20 - PAGE_SHIFT))) {
+		printk(KERN_ERR "NUMA: nodes only cover %LuMB of your %LuMB e820 RAM. Not used.\n",
+		       (numaram << PAGE_SHIFT) >> 20,
+		       (e820ram << PAGE_SHIFT) >> 20);
+		return false;
+	}
+	return true;
+}
 
 /*
  * Mark all currently memblock-reserved physical memory (which covers the
@@ -554,8 +583,7 @@ static int __init numa_register_memblks(struct numa_meminfo *mi)
 			return -EINVAL;
 		}
 	}
-
-	if (!memblock_validate_numa_coverage(SZ_1M))
+	if (!numa_meminfo_cover_memory(mi))
 		return -EINVAL;
 
 	/* Finally register nodes. */
@@ -698,13 +726,22 @@ void __init x86_numa_init(void)
 		if (!numa_init(amd_numa_init))
 			return;
 #endif
-		if (acpi_disabled && !numa_init(of_numa_init))
-			return;
 	}
 
 	numa_init(dummy_numa_init);
 }
 
+static void __init init_memory_less_node(int nid)
+{
+	/* Allocate and initialize node data. Memory-less node is now online.*/
+	alloc_node_data(nid);
+	free_area_init_memoryless_node(nid);
+
+	/*
+	 * All zonelists will be built later in start_kernel() after per cpu
+	 * areas are initialized.
+	 */
+}
 
 /*
  * A node may exist which has one or more Generic Initiators but no CPUs and no
@@ -722,18 +759,9 @@ void __init init_gi_nodes(void)
 {
 	int nid;
 
-	/*
-	 * Exclude this node from
-	 * bringup_nonboot_cpus
-	 *  cpu_up
-	 *   __try_online_node
-	 *    register_one_node
-	 * because node_subsys is not initialized yet.
-	 * TODO remove dependency on node_online
-	 */
 	for_each_node_state(nid, N_GENERIC_INITIATOR)
 		if (!node_online(nid))
-			node_set_online(nid);
+			init_memory_less_node(nid);
 }
 
 /*
@@ -753,7 +781,7 @@ void __init init_gi_nodes(void)
 void __init init_cpu_to_node(void)
 {
 	int cpu;
-	u32 *cpu_to_apicid = early_per_cpu_ptr(x86_cpu_to_apicid);
+	u16 *cpu_to_apicid = early_per_cpu_ptr(x86_cpu_to_apicid);
 
 	BUG_ON(cpu_to_apicid == NULL);
 
@@ -763,17 +791,8 @@ void __init init_cpu_to_node(void)
 		if (node == NUMA_NO_NODE)
 			continue;
 
-		/*
-		 * Exclude this node from
-		 * bringup_nonboot_cpus
-		 *  cpu_up
-		 *   __try_online_node
-		 *    register_one_node
-		 * because node_subsys is not initialized yet.
-		 * TODO remove dependency on node_online
-		 */
 		if (!node_online(node))
-			node_set_online(node);
+			init_memory_less_node(node);
 
 		numa_set_node(cpu, node);
 	}
@@ -928,83 +947,4 @@ int memory_add_physaddr_to_nid(u64 start)
 	return nid;
 }
 EXPORT_SYMBOL_GPL(memory_add_physaddr_to_nid);
-
-static int __init cmp_memblk(const void *a, const void *b)
-{
-	const struct numa_memblk *ma = *(const struct numa_memblk **)a;
-	const struct numa_memblk *mb = *(const struct numa_memblk **)b;
-
-	return ma->start - mb->start;
-}
-
-static struct numa_memblk *numa_memblk_list[NR_NODE_MEMBLKS] __initdata;
-
-/**
- * numa_fill_memblks - Fill gaps in numa_meminfo memblks
- * @start: address to begin fill
- * @end: address to end fill
- *
- * Find and extend numa_meminfo memblks to cover the @start-@end
- * physical address range, such that the first memblk includes
- * @start, the last memblk includes @end, and any gaps in between
- * are filled.
- *
- * RETURNS:
- * 0		  : Success
- * NUMA_NO_MEMBLK : No memblk exists in @start-@end range
- */
-
-int __init numa_fill_memblks(u64 start, u64 end)
-{
-	struct numa_memblk **blk = &numa_memblk_list[0];
-	struct numa_meminfo *mi = &numa_meminfo;
-	int count = 0;
-	u64 prev_end;
-
-	/*
-	 * Create a list of pointers to numa_meminfo memblks that
-	 * overlap start, end. Exclude (start == bi->end) since
-	 * end addresses in both a CFMWS range and a memblk range
-	 * are exclusive.
-	 *
-	 * This list of pointers is used to make in-place changes
-	 * that fill out the numa_meminfo memblks.
-	 */
-	for (int i = 0; i < mi->nr_blks; i++) {
-		struct numa_memblk *bi = &mi->blk[i];
-
-		if (start < bi->end && end >= bi->start) {
-			blk[count] = &mi->blk[i];
-			count++;
-		}
-	}
-	if (!count)
-		return NUMA_NO_MEMBLK;
-
-	/* Sort the list of pointers in memblk->start order */
-	sort(&blk[0], count, sizeof(blk[0]), cmp_memblk, NULL);
-
-	/* Make sure the first/last memblks include start/end */
-	blk[0]->start = min(blk[0]->start, start);
-	blk[count - 1]->end = max(blk[count - 1]->end, end);
-
-	/*
-	 * Fill any gaps by tracking the previous memblks
-	 * end address and backfilling to it if needed.
-	 */
-	prev_end = blk[0]->end;
-	for (int i = 1; i < count; i++) {
-		struct numa_memblk *curr = blk[i];
-
-		if (prev_end >= curr->start) {
-			if (prev_end < curr->end)
-				prev_end = curr->end;
-		} else {
-			curr->start = prev_end;
-			prev_end = curr->end;
-		}
-	}
-	return 0;
-}
-
 #endif

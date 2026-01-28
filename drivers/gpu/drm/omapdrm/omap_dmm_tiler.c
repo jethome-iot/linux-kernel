@@ -1,10 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * DMM IOMMU driver support functions for TI OMAP processors.
  *
  * Copyright (C) 2011 Texas Instruments Incorporated - https://www.ti.com/
  * Author: Rob Clark <rob@ti.com>
  *         Andy Gross <andy.gross@ti.com>
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation version 2.
+ *
+ * This program is distributed "as is" WITHOUT ANY WARRANTY of any
+ * kind, whether express or implied; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 #include <linux/completion.h>
@@ -17,7 +25,6 @@
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/platform_device.h> /* platform_device() */
 #include <linux/sched.h>
 #include <linux/seq_file.h>
@@ -723,7 +730,7 @@ bool dmm_is_available(void)
 	return omap_dmm ? true : false;
 }
 
-static void omap_dmm_remove(struct platform_device *dev)
+static int omap_dmm_remove(struct platform_device *dev)
 {
 	struct tiler_block *block, *_block;
 	int i;
@@ -763,6 +770,8 @@ static void omap_dmm_remove(struct platform_device *dev)
 		kfree(omap_dmm);
 		omap_dmm = NULL;
 	}
+
+	return 0;
 }
 
 static int omap_dmm_probe(struct platform_device *dev)
@@ -811,8 +820,10 @@ static int omap_dmm_probe(struct platform_device *dev)
 	}
 
 	omap_dmm->irq = platform_get_irq(dev, 0);
-	if (omap_dmm->irq < 0)
+	if (omap_dmm->irq < 0) {
+		dev_err(&dev->dev, "failed to get IRQ resource\n");
 		goto fail;
+	}
 
 	omap_dmm->dev = &dev->dev;
 
@@ -980,7 +991,8 @@ static int omap_dmm_probe(struct platform_device *dev)
 	return 0;
 
 fail:
-	omap_dmm_remove(dev);
+	if (omap_dmm_remove(dev))
+		dev_err(&dev->dev, "cleanup failed\n");
 	return ret;
 }
 
@@ -1210,7 +1222,7 @@ static const struct of_device_id dmm_of_match[] = {
 
 struct platform_driver omap_dmm_driver = {
 	.probe = omap_dmm_probe,
-	.remove_new = omap_dmm_remove,
+	.remove = omap_dmm_remove,
 	.driver = {
 		.owner = THIS_MODULE,
 		.name = DMM_DRIVER_NAME,

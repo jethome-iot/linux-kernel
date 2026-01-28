@@ -41,9 +41,9 @@ configure_stack(void)
 	if (CHECK_FAIL(!fgets(tc_version, sizeof(tc_version), tc)))
 		return false;
 	if (strstr(tc_version, ", libbpf "))
-		prog = "test_sk_assign_libbpf.bpf.o";
+		prog = "test_sk_assign_libbpf.o";
 	else
-		prog = "test_sk_assign.bpf.o";
+		prog = "test_sk_assign.o";
 	if (CHECK_FAIL(pclose(tc)))
 		return false;
 
@@ -64,7 +64,7 @@ configure_stack(void)
 		return false;
 	sprintf(tc_cmd, "%s %s %s %s %s", "tc filter add dev lo ingress bpf",
 		       "direct-action object-file", prog,
-		       "section tc",
+		       "section classifier/sk_assign_test",
 		       (env.verbosity < VERBOSE_VERY) ? " 2>/dev/null" : "verbose");
 	if (CHECK(system(tc_cmd), "BPF load failed;",
 		  "run with -vv for more info\n"))

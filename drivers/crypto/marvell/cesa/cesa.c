@@ -66,7 +66,7 @@ static void mv_cesa_rearm_engine(struct mv_cesa_engine *engine)
 		return;
 
 	if (backlog)
-		crypto_request_complete(backlog, -EINPROGRESS);
+		backlog->complete(backlog, -EINPROGRESS);
 
 	ctx = crypto_tfm_ctx(req->tfm);
 	ctx->ops->step(req);
@@ -106,7 +106,7 @@ mv_cesa_complete_req(struct mv_cesa_ctx *ctx, struct crypto_async_request *req,
 {
 	ctx->ops->cleanup(req);
 	local_bh_disable();
-	crypto_request_complete(req, res);
+	req->complete(req, res);
 	local_bh_enable();
 }
 
@@ -488,7 +488,7 @@ static int mv_cesa_probe(struct platform_device *pdev)
 
 	for (i = 0; i < caps->nengines; i++) {
 		struct mv_cesa_engine *engine = &cesa->engines[i];
-		char res_name[16];
+		char res_name[7];
 
 		engine->id = i;
 		spin_lock_init(&engine->lock);
@@ -509,7 +509,7 @@ static int mv_cesa_probe(struct platform_device *pdev)
 		 * Not all platforms can gate the CESA clocks: do not complain
 		 * if the clock does not exist.
 		 */
-		snprintf(res_name, sizeof(res_name), "cesa%u", i);
+		snprintf(res_name, sizeof(res_name), "cesa%d", i);
 		engine->clk = devm_clk_get(dev, res_name);
 		if (IS_ERR(engine->clk)) {
 			engine->clk = devm_clk_get(dev, NULL);
@@ -517,7 +517,7 @@ static int mv_cesa_probe(struct platform_device *pdev)
 				engine->clk = NULL;
 		}
 
-		snprintf(res_name, sizeof(res_name), "cesaz%u", i);
+		snprintf(res_name, sizeof(res_name), "cesaz%d", i);
 		engine->zclk = devm_clk_get(dev, res_name);
 		if (IS_ERR(engine->zclk))
 			engine->zclk = NULL;
@@ -581,7 +581,7 @@ err_cleanup:
 	return ret;
 }
 
-static void mv_cesa_remove(struct platform_device *pdev)
+static int mv_cesa_remove(struct platform_device *pdev)
 {
 	struct mv_cesa_dev *cesa = platform_get_drvdata(pdev);
 	int i;
@@ -594,6 +594,8 @@ static void mv_cesa_remove(struct platform_device *pdev)
 		mv_cesa_put_sram(pdev, i);
 		irq_set_affinity_hint(cesa->engines[i].irq, NULL);
 	}
+
+	return 0;
 }
 
 static const struct platform_device_id mv_cesa_plat_id_table[] = {
@@ -604,7 +606,7 @@ MODULE_DEVICE_TABLE(platform, mv_cesa_plat_id_table);
 
 static struct platform_driver marvell_cesa = {
 	.probe		= mv_cesa_probe,
-	.remove_new	= mv_cesa_remove,
+	.remove		= mv_cesa_remove,
 	.id_table	= mv_cesa_plat_id_table,
 	.driver		= {
 		.name	= "marvell-cesa",
@@ -613,6 +615,7 @@ static struct platform_driver marvell_cesa = {
 };
 module_platform_driver(marvell_cesa);
 
+MODULE_ALIAS("platform:mv_crypto");
 MODULE_AUTHOR("Boris Brezillon <boris.brezillon@free-electrons.com>");
 MODULE_AUTHOR("Arnaud Ebalard <arno@natisbad.org>");
 MODULE_DESCRIPTION("Support for Marvell's cryptographic engine");

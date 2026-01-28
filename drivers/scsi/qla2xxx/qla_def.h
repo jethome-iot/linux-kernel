@@ -22,6 +22,7 @@
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/firmware.h>
+#include <linux/aer.h>
 #include <linux/mutex.h>
 #include <linux/btree.h>
 
@@ -33,11 +34,6 @@
 #include <scsi/scsi_bsg_fc.h>
 
 #include <uapi/scsi/fc/fc_els.h>
-
-#define QLA_DFS_DEFINE_DENTRY(_debugfs_file_name) \
-	struct dentry *dfs_##_debugfs_file_name
-#define QLA_DFS_ROOT_DEFINE_DENTRY(_debugfs_file_name) \
-	struct dentry *qla_dfs_##_debugfs_file_name
 
 /* Big endian Fibre Channel S_ID (source ID) or D_ID (destination ID). */
 typedef struct {
@@ -82,7 +78,7 @@ typedef union {
 #include "qla_nvme.h"
 #define QLA2XXX_DRIVER_NAME	"qla2xxx"
 #define QLA2XXX_APIDEV		"ql2xapidev"
-#define QLA2XXX_MANUFACTURER	"Marvell Semiconductor, Inc."
+#define QLA2XXX_MANUFACTURER	"QLogic Corporation"
 
 /*
  * We have MAILBOX_REGISTER_COUNT sized arrays in a few places,
@@ -346,12 +342,6 @@ struct name_list_extended {
 	u8			sent;
 };
 
-struct qla_nvme_fc_rjt {
-	struct fcnvme_ls_rjt *c;
-	dma_addr_t  cdma;
-	u16 size;
-};
-
 struct els_reject {
 	struct fc_els_ls_rjt *c;
 	dma_addr_t  cdma;
@@ -389,13 +379,6 @@ struct els_reject {
 struct req_que;
 struct qla_tgt_sess;
 
-struct qla_buf_dsc {
-	u16 tag;
-#define TAG_FREED 0xffff
-	void *buf;
-	dma_addr_t buf_dma;
-};
-
 /*
  * SCSI Request Block
  */
@@ -404,16 +387,14 @@ struct srb_cmd {
 	uint32_t request_sense_length;
 	uint32_t fw_sense_length;
 	uint8_t *request_sense_ptr;
+	struct ct6_dsd *ct6_ctx;
 	struct crc_context *crc_ctx;
-	struct ct6_dsd ct6_ctx;
-	struct qla_buf_dsc buf_dsc;
 };
 
 /*
  * SRB flag definitions
  */
 #define SRB_DMA_VALID			BIT_0	/* Command sent to ISP */
-#define SRB_GOT_BUF			BIT_1
 #define SRB_FCP_CMND_DMA_VALID		BIT_12	/* DIF: DSD List valid */
 #define SRB_CRC_CTX_DMA_VALID		BIT_2	/* DIF: context DMA valid */
 #define SRB_CRC_PROT_DMA_VALID		BIT_4	/* DIF: prot DMA valid */
@@ -507,20 +488,6 @@ struct ct_arg {
 	void		*req;
 	void		*rsp;
 	port_id_t	id;
-};
-
-struct qla_nvme_lsrjt_pt_arg {
-	struct fc_port *fcport;
-	u8 opcode;
-	u8 vp_idx;
-	u8 reason;
-	u8 explanation;
-	__le16 nport_handle;
-	u16 control_flags;
-	__le16 ox_id;
-	__le32 xchg_address;
-	u32 tx_byte_count, rx_byte_count;
-	dma_addr_t tx_addr, rx_addr;
 };
 
 /*
@@ -631,16 +598,13 @@ struct srb_iocb {
 			void *desc;
 
 			/* These are only used with ls4 requests */
-			__le32 cmd_len;
-			__le32 rsp_len;
+			int cmd_len;
+			int rsp_len;
 			dma_addr_t cmd_dma;
 			dma_addr_t rsp_dma;
 			enum nvmefc_fcp_datadir dir;
 			uint32_t dl;
 			uint32_t timeout_sec;
-			__le32 exchange_address;
-			__le16 nport_handle;
-			__le16 ox_id;
 			struct	list_head   entry;
 		} nvme;
 		struct {
@@ -690,9 +654,9 @@ struct qla_els_pt_arg {
 	u8 els_opcode;
 	u8 vp_idx;
 	__le16 nport_handle;
-	u16 control_flags, ox_id;
+	u16 control_flags;
 	__le32 rx_xchg_address;
-	port_id_t did, sid;
+	port_id_t did;
 	u32 tx_len, tx_byte_count, rx_len, rx_byte_count;
 	dma_addr_t tx_addr, rx_addr;
 
@@ -730,10 +694,6 @@ typedef struct srb {
 	struct fc_port *fcport;
 	struct scsi_qla_host *vha;
 	unsigned int start_timer:1;
-	unsigned int abort:1;
-	unsigned int aborted:1;
-	unsigned int completed:1;
-	unsigned int unsol_rsp:1;
 
 	uint32_t handle;
 	uint16_t flags;
@@ -1227,12 +1187,6 @@ static inline bool qla2xxx_is_valid_mbs(unsigned int mbs)
 
 /* ISP mailbox loopback echo diagnostic error code */
 #define MBS_LB_RESET	0x17
-
-/* AEN mailbox Port Diagnostics test */
-#define AEN_START_DIAG_TEST		0x0	/* start the diagnostics */
-#define AEN_DONE_DIAG_TEST_WITH_NOERR	0x1	/* Done with no errors */
-#define AEN_DONE_DIAG_TEST_WITH_ERR	0x2	/* Done with error.*/
-
 /*
  * Firmware options 1, 2, 3.
  */
@@ -2534,6 +2488,7 @@ struct ct_sns_desc {
 
 enum discovery_state {
 	DSC_DELETED,
+	DSC_GNN_ID,
 	DSC_GNL,
 	DSC_LOGIN_PEND,
 	DSC_LOGIN_FAILED,
@@ -2569,7 +2524,6 @@ enum rscn_addr_format {
 typedef struct fc_port {
 	struct list_head list;
 	struct scsi_qla_host *vha;
-	struct list_head unsol_ctx_head;
 
 	unsigned int conf_compl_supported:1;
 	unsigned int deleted:2;
@@ -2644,7 +2598,7 @@ typedef struct fc_port {
 
 	int login_retry;
 
-	struct fc_rport *rport;
+	struct fc_rport *rport, *drport;
 	u32 supported_classes;
 
 	uint8_t fc4_type;
@@ -2690,6 +2644,7 @@ typedef struct fc_port {
 	struct {
 		uint32_t	enable:1;	/* device is edif enabled/req'd */
 		uint32_t	app_stop:2;
+		uint32_t	app_started:1;
 		uint32_t	aes_gmac:1;
 		uint32_t	app_sess_online:1;
 		uint32_t	tx_sa_set:1;
@@ -2700,7 +2655,6 @@ typedef struct fc_port {
 		uint32_t	rx_rekey_cnt;
 		uint64_t	tx_bytes;
 		uint64_t	rx_bytes;
-		uint8_t		sess_down_acked;
 		uint8_t		auth_state;
 		uint16_t	authok:1;
 		uint16_t	rekey_cnt;
@@ -2735,27 +2689,25 @@ struct event_arg {
 /*
  * Fibre channel port/lun states.
  */
-enum {
-	FCS_UNKNOWN,
-	FCS_UNCONFIGURED,
-	FCS_DEVICE_DEAD,
-	FCS_DEVICE_LOST,
-	FCS_ONLINE,
-};
+#define FCS_UNCONFIGURED	1
+#define FCS_DEVICE_DEAD		2
+#define FCS_DEVICE_LOST		3
+#define FCS_ONLINE		4
 
 extern const char *const port_state_str[5];
 
-static const char *const port_dstate_str[] = {
-	[DSC_DELETED]		= "DELETED",
-	[DSC_GNL]		= "GNL",
-	[DSC_LOGIN_PEND]	= "LOGIN_PEND",
-	[DSC_LOGIN_FAILED]	= "LOGIN_FAILED",
-	[DSC_GPDB]		= "GPDB",
-	[DSC_UPD_FCPORT]	= "UPD_FCPORT",
-	[DSC_LOGIN_COMPLETE]	= "LOGIN_COMPLETE",
-	[DSC_ADISC]		= "ADISC",
-	[DSC_DELETE_PEND]	= "DELETE_PEND",
-	[DSC_LOGIN_AUTH_PEND]	= "LOGIN_AUTH_PEND",
+static const char * const port_dstate_str[] = {
+	"DELETED",
+	"GNN_ID",
+	"GNL",
+	"LOGIN_PEND",
+	"LOGIN_FAILED",
+	"GPDB",
+	"UPD_FCPORT",
+	"LOGIN_COMPLETE",
+	"ADISC",
+	"DELETE_PEND",
+	"LOGIN_AUTH_PEND",
 };
 
 /*
@@ -3198,12 +3150,12 @@ struct ct_sns_gpnft_rsp {
 		uint8_t vendor_unique;
 	};
 	/* Assume the largest number of targets for the union */
-	DECLARE_FLEX_ARRAY(struct ct_sns_gpn_ft_data {
+	struct ct_sns_gpn_ft_data {
 		u8 control_byte;
 		u8 port_id[3];
 		u32 reserved;
 		u8 port_name[8];
-	}, entries);
+	} entries[1];
 };
 
 /* CT command response */
@@ -3527,6 +3479,7 @@ enum qla_work_type {
 	QLA_EVT_ASYNC_ADISC,
 	QLA_EVT_UEVENT,
 	QLA_EVT_AENFX,
+	QLA_EVT_GPNID,
 	QLA_EVT_UNMAP,
 	QLA_EVT_NEW_SESS,
 	QLA_EVT_GPDB,
@@ -3540,6 +3493,7 @@ enum qla_work_type {
 	QLA_EVT_GPNFT,
 	QLA_EVT_GPNFT_DONE,
 	QLA_EVT_GNNFT_DONE,
+	QLA_EVT_GNNID,
 	QLA_EVT_GFPNID,
 	QLA_EVT_SP_RETRY,
 	QLA_EVT_IIDMA,
@@ -3582,12 +3536,15 @@ struct qla_work_evt {
 		} iosb;
 		struct {
 			port_id_t id;
+		} gpnid;
+		struct {
+			port_id_t id;
 			u8 port_name[8];
 			u8 node_name[8];
 			void *pla;
 			u8 fc4_type;
 		} new_sess;
-		struct { /*Get PDB, Get Speed, update fcport, gnl */
+		struct { /*Get PDB, Get Speed, update fcport, gnl, gidpn */
 			fc_port_t *fcport;
 			u8 opt;
 		} fcport;
@@ -3782,19 +3739,6 @@ struct qla_fw_res {
 
 #define QLA_IOCB_PCT_LIMIT 95
 
-struct  qla_buf_pool {
-	u16 num_bufs;
-	u16 num_active;
-	u16 max_used;
-	u16 num_alloc;
-	u16 prev_max;
-	u16 pad;
-	uint32_t take_snapshot:1;
-	unsigned long *buf_map;
-	void **buf_array;
-	dma_addr_t *dma_array;
-};
-
 /*Queue pair data structure */
 struct qla_qpair {
 	spinlock_t qp_lock;
@@ -3825,12 +3769,6 @@ struct qla_qpair {
 
 	uint16_t id;			/* qp number used with FW */
 	uint16_t vp_idx;		/* vport ID */
-
-	uint16_t dsd_inuse;
-	uint16_t dsd_avail;
-	struct list_head dsd_list;
-#define NUM_DSD_CHAIN 4096
-
 	mempool_t *srb_mempool;
 
 	struct pci_dev  *pdev;
@@ -3855,7 +3793,6 @@ struct qla_qpair {
 	uint16_t cpuid;
 	bool cpu_mapped;
 	struct qla_fw_resources fwres ____cacheline_aligned;
-	struct  qla_buf_pool buf_pool;
 	u32	cmd_cnt;
 	u32	cmd_completion_cnt;
 	u32	prev_completion_cnt;
@@ -4016,6 +3953,7 @@ struct qlt_hw_data {
 	__le32 __iomem *atio_q_out;
 
 	const struct qla_tgt_func_tmpl *tgt_ops;
+	struct qla_tgt_vp_map *tgt_vp_map;
 
 	int saved_set;
 	__le16	saved_exchange_count;
@@ -4502,6 +4440,7 @@ struct qla_hw_data {
 
 	/* n2n */
 	struct fc_els_flogi plogi_els_payld;
+#define LOGIN_TEMPLATE_SIZE (sizeof(struct fc_els_flogi) - 4)
 
 	void            *swl;
 
@@ -4757,6 +4696,11 @@ struct qla_hw_data {
 	struct fw_blob	*hablob;
 	struct qla82xx_legacy_intr_set nx_legacy_intr;
 
+	uint16_t	gbl_dsd_inuse;
+	uint16_t	gbl_dsd_avail;
+	struct list_head gbl_dsd_list;
+#define NUM_DSD_CHAIN 4096
+
 	uint8_t fw_type;
 	uint32_t file_prd_off;	/* File firmware product offset */
 
@@ -4837,8 +4781,6 @@ struct qla_hw_data {
 	spinlock_t sadb_lock;	/* protects list */
 	struct els_reject elsrej;
 	u8 edif_post_stop_cnt_down;
-	struct qla_vp_map *vp_map;
-	struct qla_nvme_fc_rjt lsrjt;
 	struct qla_fw_res fwres ____cacheline_aligned;
 };
 
@@ -4851,7 +4793,6 @@ struct active_regions {
 		uint8_t vpd_nvram;
 		uint8_t npiv_config_0_1;
 		uint8_t npiv_config_2_3;
-		uint8_t nvme_params;
 	} aux;
 };
 
@@ -4872,7 +4813,6 @@ struct active_regions {
  * is variable) starting at "iocb".
  */
 struct purex_item {
-	void *purls_context;
 	struct list_head list;
 	struct scsi_qla_host *vha;
 	void (*process_item)(struct scsi_qla_host *vha,
@@ -4936,7 +4876,6 @@ typedef struct scsi_qla_host {
 #define LOOP_READY	5
 #define LOOP_DEAD	6
 
-	unsigned long   buf_expired;
 	unsigned long   relogin_jif;
 	unsigned long   dpc_flags;
 #define RESET_MARKER_NEEDED	0	/* Send marker to ISP. */
@@ -4952,6 +4891,7 @@ typedef struct scsi_qla_host {
 #define ISP_ABORT_RETRY		10	/* ISP aborted. */
 #define BEACON_BLINK_NEEDED	11
 #define REGISTER_FDMI_NEEDED	12
+#define FCPORT_UPDATE_NEEDED	13
 #define VP_DPC_NEEDED		14	/* wake up for VP dpc handling */
 #define UNLOADING		15
 #define NPIV_CONFIG_NEEDED	16
@@ -5024,6 +4964,7 @@ typedef struct scsi_qla_host {
 
 	/* list of commands waiting on workqueue */
 	struct list_head	qla_cmd_list;
+	struct list_head	qla_sess_op_cmd_list;
 	struct list_head	unknown_atio_list;
 	spinlock_t		cmd_list_lock;
 	struct delayed_work	unknown_atio_work;
@@ -5101,6 +5042,7 @@ typedef struct scsi_qla_host {
 	uint8_t n2n_port_name[WWN_SIZE];
 	uint16_t	n2n_id;
 	__le16 dport_data[4];
+	struct list_head gpnid_list;
 	struct fab_scan scan;
 	uint8_t	scm_fabric_connection_flags;
 
@@ -5114,10 +5056,6 @@ typedef struct scsi_qla_host {
 	u64 short_link_down_cnt;
 	struct edif_dbell e_dbell;
 	struct pur_core pur_cinfo;
-
-#define DPORT_DIAG_IN_PROGRESS                 BIT_0
-#define DPORT_DIAG_CHIP_RESET_IN_PROGRESS      BIT_1
-	uint16_t dport_status;
 } scsi_qla_host_t;
 
 struct qla27xx_image_status {
@@ -5136,13 +5074,12 @@ struct qla27xx_image_status {
 #define QLA28XX_AUX_IMG_VPD_NVRAM		BIT_1
 #define QLA28XX_AUX_IMG_NPIV_CONFIG_0_1		BIT_2
 #define QLA28XX_AUX_IMG_NPIV_CONFIG_2_3		BIT_3
-#define QLA28XX_AUX_IMG_NVME_PARAMS		BIT_4
 
 #define SET_VP_IDX	1
 #define SET_AL_PA	2
 #define RESET_VP_IDX	3
 #define RESET_AL_PA	4
-struct qla_vp_map {
+struct qla_tgt_vp_map {
 	uint8_t	idx;
 	scsi_qla_host_t *vha;
 };
@@ -5311,6 +5248,8 @@ static inline bool qla_vha_mark_busy(scsi_qla_host_t *vha)
 #define OPTROM_BURST_DWORDS	(OPTROM_BURST_SIZE / 4)
 
 #define	QLA_DSDS_PER_IOCB	37
+
+#define CMD_SP(Cmnd)		((Cmnd)->SCp.ptr)
 
 #define QLA_SG_ALL	1024
 
@@ -5529,7 +5468,7 @@ struct ql_vnd_stat_entry {
 struct ql_vnd_stats {
 	u64 entry_count; /* Num of entries */
 	u64 rservd;
-	struct ql_vnd_stat_entry entry[]; /* Place holder of entries */
+	struct ql_vnd_stat_entry entry[0]; /* Place holder of entries */
 } __packed;
 
 struct ql_vnd_host_stats_resp {

@@ -22,6 +22,7 @@
  */
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/fb.h>
 
 #include "vega12/smu9_driver_if.h"
 #include "vega12_processpptables.h"
@@ -194,6 +195,7 @@ static int init_powerplay_table_information(
 	struct phm_ppt_v3_information *pptable_information =
 		(struct phm_ppt_v3_information *)hwmgr->pptable;
 	uint32_t disable_power_control = 0;
+	int result;
 
 	hwmgr->thermal_controller.ucType = powerplay_table->ucThermalControllerType;
 	pptable_information->uc_thermal_controller_type = powerplay_table->ucThermalControllerType;
@@ -255,7 +257,9 @@ static int init_powerplay_table_information(
 	if (pptable_information->smc_pptable == NULL)
 		return -ENOMEM;
 
-	return append_vbios_pptable(hwmgr, (pptable_information->smc_pptable));
+	result = append_vbios_pptable(hwmgr, (pptable_information->smc_pptable));
+
+	return result;
 }
 
 static int vega12_pp_tables_initialize(struct pp_hwmgr *hwmgr)

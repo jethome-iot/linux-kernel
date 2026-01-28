@@ -140,9 +140,9 @@ static struct pci_epf_header epf_ntb_header = {
 static int epf_ntb_link_up(struct epf_ntb *ntb, bool link_up)
 {
 	enum pci_epc_interface_type type;
+	enum pci_epc_irq_type irq_type;
 	struct epf_ntb_epc *ntb_epc;
 	struct epf_ntb_ctrl *ctrl;
-	unsigned int irq_type;
 	struct pci_epc *epc;
 	u8 func_no, vfunc_no;
 	bool is_msix;
@@ -159,7 +159,7 @@ static int epf_ntb_link_up(struct epf_ntb *ntb, bool link_up)
 			ctrl->link_status |= LINK_STATUS_UP;
 		else
 			ctrl->link_status &= ~LINK_STATUS_UP;
-		irq_type = is_msix ? PCI_IRQ_MSIX : PCI_IRQ_MSI;
+		irq_type = is_msix ? PCI_EPC_IRQ_MSIX : PCI_EPC_IRQ_MSI;
 		ret = pci_epc_raise_irq(epc, func_no, vfunc_no, irq_type, 1);
 		if (ret) {
 			dev_err(&epc->dev,
@@ -1262,7 +1262,7 @@ static void epf_ntb_db_mw_bar_cleanup(struct epf_ntb *ntb,
 }
 
 /**
- * epf_ntb_configure_interrupt() - Configure MSI/MSI-X capability
+ * epf_ntb_configure_interrupt() - Configure MSI/MSI-X capaiblity
  * @ntb: NTB device that facilitates communication between HOST1 and HOST2
  * @type: PRIMARY interface or SECONDARY interface
  *
@@ -1937,7 +1937,7 @@ static ssize_t epf_ntb_##_name##_show(struct config_item *item,		\
 	struct config_group *group = to_config_group(item);		\
 	struct epf_ntb *ntb = to_epf_ntb(group);			\
 									\
-	return sysfs_emit(page, "%d\n", ntb->_name);			\
+	return sprintf(page, "%d\n", ntb->_name);			\
 }
 
 #define EPF_NTB_W(_name)						\
@@ -1947,9 +1947,11 @@ static ssize_t epf_ntb_##_name##_store(struct config_item *item,	\
 	struct config_group *group = to_config_group(item);		\
 	struct epf_ntb *ntb = to_epf_ntb(group);			\
 	u32 val;							\
+	int ret;							\
 									\
-	if (kstrtou32(page, 0, &val) < 0)				\
-		return -EINVAL;						\
+	ret = kstrtou32(page, 0, &val);					\
+	if (ret)							\
+		return ret;						\
 									\
 	ntb->_name = val;						\
 									\
@@ -1966,7 +1968,7 @@ static ssize_t epf_ntb_##_name##_show(struct config_item *item,		\
 									\
 	sscanf(#_name, "mw%d", &win_no);				\
 									\
-	return sysfs_emit(page, "%lld\n", ntb->mws_size[win_no - 1]);	\
+	return sprintf(page, "%lld\n", ntb->mws_size[win_no - 1]);	\
 }
 
 #define EPF_NTB_MW_W(_name)						\
@@ -1978,9 +1980,11 @@ static ssize_t epf_ntb_##_name##_store(struct config_item *item,	\
 	struct device *dev = &ntb->epf->dev;				\
 	int win_no;							\
 	u64 val;							\
+	int ret;							\
 									\
-	if (kstrtou64(page, 0, &val) < 0)				\
-		return -EINVAL;						\
+	ret = kstrtou64(page, 0, &val);					\
+	if (ret)							\
+		return ret;						\
 									\
 	if (sscanf(#_name, "mw%d", &win_no) != 1)			\
 		return -EINVAL;						\
@@ -2001,9 +2005,11 @@ static ssize_t epf_ntb_num_mws_store(struct config_item *item,
 	struct config_group *group = to_config_group(item);
 	struct epf_ntb *ntb = to_epf_ntb(group);
 	u32 val;
+	int ret;
 
-	if (kstrtou32(page, 0, &val) < 0)
-		return -EINVAL;
+	ret = kstrtou32(page, 0, &val);
+	if (ret)
+		return ret;
 
 	if (val > MAX_MW)
 		return -EINVAL;
@@ -2075,13 +2081,11 @@ static struct config_group *epf_ntb_add_cfs(struct pci_epf *epf,
 /**
  * epf_ntb_probe() - Probe NTB function driver
  * @epf: NTB endpoint function device
- * @id: NTB endpoint function device ID
  *
  * Probe NTB function driver when endpoint function bus detects a NTB
  * endpoint function.
  */
-static int epf_ntb_probe(struct pci_epf *epf,
-			 const struct pci_epf_device_id *id)
+static int epf_ntb_probe(struct pci_epf *epf)
 {
 	struct epf_ntb *ntb;
 	struct device *dev;
@@ -2099,7 +2103,7 @@ static int epf_ntb_probe(struct pci_epf *epf,
 	return 0;
 }
 
-static const struct pci_epf_ops epf_ntb_ops = {
+static struct pci_epf_ops epf_ntb_ops = {
 	.bind	= epf_ntb_bind,
 	.unbind	= epf_ntb_unbind,
 	.add_cfs = epf_ntb_add_cfs,

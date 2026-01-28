@@ -13,7 +13,7 @@
 struct iio_dev;
 struct iio_chan_spec;
 struct device;
-struct fwnode_handle;
+struct device_node;
 
 /**
  * struct iio_channel - everything needed for a consumer to use a channel
@@ -99,20 +99,26 @@ void iio_channel_release_all(struct iio_channel *chan);
 struct iio_channel *devm_iio_channel_get_all(struct device *dev);
 
 /**
- * fwnode_iio_channel_get_by_name() - get description of all that is needed to access channel.
- * @fwnode:		Pointer to consumer Firmware node
+ * of_iio_channel_get_by_name() - get description of all that is needed to access channel.
+ * @np:			Pointer to consumer device tree node
  * @consumer_channel:	Unique name to identify the channel on the consumer
  *			side. This typically describes the channels use within
  *			the consumer. E.g. 'battery_voltage'
  */
-struct iio_channel *fwnode_iio_channel_get_by_name(struct fwnode_handle *fwnode,
-						   const char *name);
+#ifdef CONFIG_OF
+struct iio_channel *of_iio_channel_get_by_name(struct device_node *np, const char *name);
+#else
+static inline struct iio_channel *
+of_iio_channel_get_by_name(struct device_node *np, const char *name)
+{
+	return NULL;
+}
+#endif
 
 /**
- * devm_fwnode_iio_channel_get_by_name() - Resource managed version of
- *					   fwnode_iio_channel_get_by_name().
+ * devm_of_iio_channel_get_by_name() - Resource managed version of of_iio_channel_get_by_name().
  * @dev:		Pointer to consumer device.
- * @fwnode:		Pointer to consumer Firmware node
+ * @np:			Pointer to consumer device tree node
  * @consumer_channel:	Unique name to identify the channel on the consumer
  *			side. This typically describes the channels use within
  *			the consumer. E.g. 'battery_voltage'
@@ -123,9 +129,9 @@ struct iio_channel *fwnode_iio_channel_get_by_name(struct fwnode_handle *fwnode,
  * The allocated iio channel is automatically released when the device is
  * unbound.
  */
-struct iio_channel *devm_fwnode_iio_channel_get_by_name(struct device *dev,
-							struct fwnode_handle *fwnode,
-							const char *consumer_channel);
+struct iio_channel *devm_of_iio_channel_get_by_name(struct device *dev,
+						    struct device_node *np,
+						    const char *consumer_channel);
 
 struct iio_cb_buffer;
 /**
@@ -201,9 +207,8 @@ struct iio_dev
  * @chan:		The channel being queried.
  * @val:		Value read back.
  *
- * Note, if standard units are required, raw reads from iio channels
- * need the offset (default 0) and scale (default 1) to be applied
- * as (raw + offset) * scale.
+ * Note raw reads from iio channels are in adc counts and hence
+ * scale will need to be applied if standard units required.
  */
 int iio_read_channel_raw(struct iio_channel *chan,
 			 int *val);
@@ -213,9 +218,8 @@ int iio_read_channel_raw(struct iio_channel *chan,
  * @chan:		The channel being queried.
  * @val:		Value read back.
  *
- * Note, if standard units are required, raw reads from iio channels
- * need the offset (default 0) and scale (default 1) to be applied
- * as (raw + offset) * scale.
+ * Note raw reads from iio channels are in adc counts and hence
+ * scale will need to be applied if standard units required.
  *
  * In opposit to the normal iio_read_channel_raw this function
  * returns the average of multiple reads.
@@ -283,9 +287,8 @@ int iio_read_channel_attribute(struct iio_channel *chan, int *val,
  * @chan:		The channel being queried.
  * @val:		Value being written.
  *
- * Note that for raw writes to iio channels, if the value provided is
- * in standard units, the affect of the scale and offset must be removed
- * as (value / scale) - offset.
+ * Note raw writes to iio channels are in dac counts and hence
+ * scale will need to be applied if standard units required.
  */
 int iio_write_channel_raw(struct iio_channel *chan, int val);
 
@@ -295,23 +298,10 @@ int iio_write_channel_raw(struct iio_channel *chan, int val);
  * @chan:		The channel being queried.
  * @val:		Value read back.
  *
- * Note, if standard units are required, raw reads from iio channels
- * need the offset (default 0) and scale (default 1) to be applied
- * as (raw + offset) * scale.
+ * Note raw reads from iio channels are in adc counts and hence
+ * scale will need to be applied if standard units are required.
  */
 int iio_read_max_channel_raw(struct iio_channel *chan, int *val);
-
-/**
- * iio_read_min_channel_raw() - read minimum available raw value from a given
- *				channel, i.e. the minimum possible value.
- * @chan:		The channel being queried.
- * @val:		Value read back.
- *
- * Note, if standard units are required, raw reads from iio channels
- * need the offset (default 0) and scale (default 1) to be applied
- * as (raw + offset) * scale.
- */
-int iio_read_min_channel_raw(struct iio_channel *chan, int *val);
 
 /**
  * iio_read_avail_channel_raw() - read available raw values from a given channel
@@ -324,9 +314,8 @@ int iio_read_min_channel_raw(struct iio_channel *chan, int *val);
  * For ranges, three vals are always returned; min, step and max.
  * For lists, all the possible values are enumerated.
  *
- * Note, if standard units are required, raw available values from iio
- * channels need the offset (default 0) and scale (default 1) to be applied
- * as (raw + offset) * scale.
+ * Note raw available values from iio channels are in adc counts and
+ * hence scale will need to be applied if standard units are required.
  */
 int iio_read_avail_channel_raw(struct iio_channel *chan,
 			       const int **vals, int *length);

@@ -73,9 +73,12 @@ done:
 /* p->d_lock held */
 static struct dentry *positive_after(struct dentry *p, struct dentry *child)
 {
-	child = child ? d_next_sibling(child) : d_first_child(p);
+	if (child)
+		child = list_next_entry(child, d_child);
+	else
+		child = list_first_entry(&p->d_subdirs, struct dentry, d_child);
 
-	hlist_for_each_entry_from(child, d_sib) {
+	list_for_each_entry_from(child, &p->d_subdirs, d_child) {
 		spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
 		if (simple_positive(child)) {
 			dget_dlock(child);
@@ -368,7 +371,7 @@ static struct dentry *should_expire(struct dentry *dentry,
 		return NULL;
 	}
 
-	if (autofs_empty(ino))
+	if (simple_empty(dentry))
 		return NULL;
 
 	/* Case 2: tree mount, expire iff entire tree is not busy */

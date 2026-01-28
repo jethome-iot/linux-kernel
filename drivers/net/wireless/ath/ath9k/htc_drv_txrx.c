@@ -523,7 +523,7 @@ send_mac80211:
 	}
 
 	/* Send status to mac80211 */
-	ieee80211_tx_status_skb(priv->hw, skb);
+	ieee80211_tx_status(priv->hw, skb);
 }
 
 static inline void ath9k_htc_tx_drainq(struct ath9k_htc_priv *priv,
@@ -814,10 +814,6 @@ int ath9k_tx_init(struct ath9k_htc_priv *priv)
 	skb_queue_head_init(&priv->tx.data_vi_queue);
 	skb_queue_head_init(&priv->tx.data_vo_queue);
 	skb_queue_head_init(&priv->tx.tx_failed);
-
-	/* Allow ath9k_wmi_event_tasklet(WMI_TXSTATUS_EVENTID) to operate. */
-	smp_wmb();
-	priv->tx.initialized = true;
 
 	return 0;
 }

@@ -355,7 +355,7 @@ ip_set_init_comment(struct ip_set *set, struct ip_set_comment *comment,
 	c = kmalloc(sizeof(*c) + len + 1, GFP_ATOMIC);
 	if (unlikely(!c))
 		return;
-	strscpy(c->str, ext->comment, len + 1);
+	strlcpy(c->str, ext->comment, len + 1);
 	set->ext_size += sizeof(*c) + strlen(c->str) + 1;
 	rcu_assign_pointer(comment->c, c);
 }
@@ -744,7 +744,9 @@ ip_set_test(ip_set_id_t index, const struct sk_buff *skb,
 	    !(opt->family == set->family || set->family == NFPROTO_UNSPEC))
 		return 0;
 
+	rcu_read_lock_bh();
 	ret = set->variant->kadt(set, skb, par, IPSET_TEST, opt);
+	rcu_read_unlock_bh();
 
 	if (ret == -EAGAIN) {
 		/* Type requests element to be completed */
@@ -877,7 +879,7 @@ ip_set_name_byindex(struct net *net, ip_set_id_t index, char *name)
 	BUG_ON(!set);
 
 	read_lock_bh(&ip_set_ref_lock);
-	strscpy_pad(name, set->name, IPSET_MAXNAMELEN);
+	strncpy(name, set->name, IPSET_MAXNAMELEN);
 	read_unlock_bh(&ip_set_ref_lock);
 }
 EXPORT_SYMBOL_GPL(ip_set_name_byindex);
@@ -1075,7 +1077,7 @@ static int ip_set_create(struct sk_buff *skb, const struct nfnl_info *info,
 	if (!set)
 		return -ENOMEM;
 	spin_lock_init(&set->lock);
-	strscpy(set->name, name, IPSET_MAXNAMELEN);
+	strlcpy(set->name, name, IPSET_MAXNAMELEN);
 	set->family = family;
 	set->revision = revision;
 
@@ -1154,6 +1156,7 @@ static int ip_set_create(struct sk_buff *skb, const struct nfnl_info *info,
 	return ret;
 
 cleanup:
+	set->variant->cancel_gc(set);
 	set->variant->destroy(set);
 put_out:
 	module_put(set->type->me);
@@ -1350,7 +1353,7 @@ static int ip_set_rename(struct sk_buff *skb, const struct nfnl_info *info,
 			goto out;
 		}
 	}
-	strscpy_pad(set->name, name2, IPSET_MAXNAMELEN);
+	strncpy(set->name, name2, IPSET_MAXNAMELEN);
 
 out:
 	write_unlock_bh(&ip_set_ref_lock);
@@ -1404,9 +1407,9 @@ static int ip_set_swap(struct sk_buff *skb, const struct nfnl_info *info,
 		return -EBUSY;
 	}
 
-	strscpy_pad(from_name, from->name, IPSET_MAXNAMELEN);
-	strscpy_pad(from->name, to->name, IPSET_MAXNAMELEN);
-	strscpy_pad(to->name, from_name, IPSET_MAXNAMELEN);
+	strncpy(from_name, from->name, IPSET_MAXNAMELEN);
+	strncpy(from->name, to->name, IPSET_MAXNAMELEN);
+	strncpy(to->name, from_name, IPSET_MAXNAMELEN);
 
 	swap(from->ref, to->ref);
 	ip_set(inst, from_id) = to;
@@ -1750,13 +1753,11 @@ call_ad(struct net *net, struct sock *ctnl, struct sk_buff *skb,
 		skb2 = nlmsg_new(payload, GFP_KERNEL);
 		if (!skb2)
 			return -ENOMEM;
-		rep = nlmsg_put(skb2, NETLINK_CB(skb).portid,
-				nlh->nlmsg_seq, NLMSG_ERROR, payload, 0);
+		rep = __nlmsg_put(skb2, NETLINK_CB(skb).portid,
+				  nlh->nlmsg_seq, NLMSG_ERROR, payload, 0);
 		errmsg = nlmsg_data(rep);
 		errmsg->error = ret;
-		unsafe_memcpy(&errmsg->msg, nlh, nlh->nlmsg_len,
-			      /* Bounds checked by the skb layer. */);
-
+		memcpy(&errmsg->msg, nlh, nlh->nlmsg_len);
 		cmdattr = (void *)&errmsg->msg + min_len;
 
 		ret = nla_parse(cda, IPSET_ATTR_CMD_MAX, cmdattr,
@@ -2378,6 +2379,7 @@ ip_set_net_exit(struct net *net)
 		set = ip_set(inst, i);
 		if (set) {
 			ip_set(inst, i) = NULL;
+			set->variant->cancel_gc(set);
 			ip_set_destroy_set(set);
 		}
 	}

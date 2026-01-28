@@ -32,7 +32,8 @@ static ssize_t force_power_store(struct device *dev,
 	mode = hex_to_bin(buf[0]);
 	dev_dbg(dev, "force_power: storing %#x\n", mode);
 	if (mode == 0 || mode == 1) {
-		status = wmidev_evaluate_method(to_wmi_device(dev), 0, 1, &input, NULL);
+		status = wmi_evaluate_method(INTEL_WMI_THUNDERBOLT_GUID, 0, 1,
+					     &input, NULL);
 		if (ACPI_FAILURE(status)) {
 			dev_dbg(dev, "force_power: failed to evaluate ACPI method\n");
 			return -ENODEV;
@@ -50,7 +51,26 @@ static struct attribute *tbt_attrs[] = {
 	&dev_attr_force_power.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(tbt);
+
+static const struct attribute_group tbt_attribute_group = {
+	.attrs = tbt_attrs,
+};
+
+static int intel_wmi_thunderbolt_probe(struct wmi_device *wdev,
+				       const void *context)
+{
+	int ret;
+
+	ret = sysfs_create_group(&wdev->dev.kobj, &tbt_attribute_group);
+	kobject_uevent(&wdev->dev.kobj, KOBJ_CHANGE);
+	return ret;
+}
+
+static void intel_wmi_thunderbolt_remove(struct wmi_device *wdev)
+{
+	sysfs_remove_group(&wdev->dev.kobj, &tbt_attribute_group);
+	kobject_uevent(&wdev->dev.kobj, KOBJ_CHANGE);
+}
 
 static const struct wmi_device_id intel_wmi_thunderbolt_id_table[] = {
 	{ .guid_string = INTEL_WMI_THUNDERBOLT_GUID },
@@ -60,8 +80,9 @@ static const struct wmi_device_id intel_wmi_thunderbolt_id_table[] = {
 static struct wmi_driver intel_wmi_thunderbolt_driver = {
 	.driver = {
 		.name = "intel-wmi-thunderbolt",
-		.dev_groups = tbt_groups,
 	},
+	.probe = intel_wmi_thunderbolt_probe,
+	.remove = intel_wmi_thunderbolt_remove,
 	.id_table = intel_wmi_thunderbolt_id_table,
 };
 

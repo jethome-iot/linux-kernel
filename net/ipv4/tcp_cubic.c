@@ -25,8 +25,6 @@
  */
 
 #include <linux/mm.h>
-#include <linux/btf.h>
-#include <linux/btf_ids.h>
 #include <linux/module.h>
 #include <linux/math64.h>
 #include <net/tcp.h>
@@ -126,7 +124,7 @@ static inline void bictcp_hystart_reset(struct sock *sk)
 	ca->sample_cnt = 0;
 }
 
-__bpf_kfunc static void cubictcp_init(struct sock *sk)
+static void cubictcp_init(struct sock *sk)
 {
 	struct bictcp *ca = inet_csk_ca(sk);
 
@@ -139,7 +137,7 @@ __bpf_kfunc static void cubictcp_init(struct sock *sk)
 		tcp_sk(sk)->snd_ssthresh = initial_ssthresh;
 }
 
-__bpf_kfunc static void cubictcp_cwnd_event(struct sock *sk, enum tcp_ca_event event)
+static void cubictcp_cwnd_event(struct sock *sk, enum tcp_ca_event event)
 {
 	if (event == CA_EVENT_TX_START) {
 		struct bictcp *ca = inet_csk_ca(sk);
@@ -321,7 +319,7 @@ tcp_friendliness:
 	ca->cnt = max(ca->cnt, 2U);
 }
 
-__bpf_kfunc static void cubictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
+static void cubictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
@@ -338,7 +336,7 @@ __bpf_kfunc static void cubictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	tcp_cong_avoid_ai(tp, ca->cnt, acked);
 }
 
-__bpf_kfunc static u32 cubictcp_recalc_ssthresh(struct sock *sk)
+static u32 cubictcp_recalc_ssthresh(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
@@ -355,7 +353,7 @@ __bpf_kfunc static u32 cubictcp_recalc_ssthresh(struct sock *sk)
 	return max((tcp_snd_cwnd(tp) * beta) / BICTCP_BETA_SCALE, 2U);
 }
 
-__bpf_kfunc static void cubictcp_state(struct sock *sk, u8 new_state)
+static void cubictcp_state(struct sock *sk, u8 new_state)
 {
 	if (new_state == TCP_CA_Loss) {
 		bictcp_reset(inet_csk_ca(sk));
@@ -372,7 +370,7 @@ __bpf_kfunc static void cubictcp_state(struct sock *sk, u8 new_state)
  * We apply another 100% factor because @rate is doubled at this point.
  * We cap the cushion to 1ms.
  */
-static u32 hystart_ack_delay(const struct sock *sk)
+static u32 hystart_ack_delay(struct sock *sk)
 {
 	unsigned long rate;
 
@@ -380,7 +378,7 @@ static u32 hystart_ack_delay(const struct sock *sk)
 	if (!rate)
 		return 0;
 	return min_t(u64, USEC_PER_MSEC,
-		     div64_ul((u64)sk->sk_gso_max_size * 4 * USEC_PER_SEC, rate));
+		     div64_ul((u64)GSO_MAX_SIZE * 4 * USEC_PER_SEC, rate));
 }
 
 static void hystart_update(struct sock *sk, u32 delay)
@@ -445,7 +443,7 @@ static void hystart_update(struct sock *sk, u32 delay)
 	}
 }
 
-__bpf_kfunc static void cubictcp_acked(struct sock *sk, const struct ack_sample *sample)
+static void cubictcp_acked(struct sock *sk, const struct ack_sample *sample)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct bictcp *ca = inet_csk_ca(sk);
@@ -485,28 +483,8 @@ static struct tcp_congestion_ops cubictcp __read_mostly = {
 	.name		= "cubic",
 };
 
-BTF_SET8_START(tcp_cubic_check_kfunc_ids)
-#ifdef CONFIG_X86
-#ifdef CONFIG_DYNAMIC_FTRACE
-BTF_ID_FLAGS(func, cubictcp_init)
-BTF_ID_FLAGS(func, cubictcp_recalc_ssthresh)
-BTF_ID_FLAGS(func, cubictcp_cong_avoid)
-BTF_ID_FLAGS(func, cubictcp_state)
-BTF_ID_FLAGS(func, cubictcp_cwnd_event)
-BTF_ID_FLAGS(func, cubictcp_acked)
-#endif
-#endif
-BTF_SET8_END(tcp_cubic_check_kfunc_ids)
-
-static const struct btf_kfunc_id_set tcp_cubic_kfunc_set = {
-	.owner = THIS_MODULE,
-	.set   = &tcp_cubic_check_kfunc_ids,
-};
-
 static int __init cubictcp_register(void)
 {
-	int ret;
-
 	BUILD_BUG_ON(sizeof(struct bictcp) > ICSK_CA_PRIV_SIZE);
 
 	/* Precompute a bunch of the scaling factors that are used per-packet
@@ -537,9 +515,6 @@ static int __init cubictcp_register(void)
 	/* divide by bic_scale and by constant Srtt (100ms) */
 	do_div(cube_factor, bic_scale * 10);
 
-	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &tcp_cubic_kfunc_set);
-	if (ret < 0)
-		return ret;
 	return tcp_register_congestion_control(&cubictcp);
 }
 

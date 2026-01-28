@@ -8,8 +8,6 @@
 #include "ecpf.h"
 #include "mlx5_core.h"
 #include "eswitch.h"
-#include "diag/sf_tracepoint.h"
-#include "devlink.h"
 
 struct mlx5_sf_hw {
 	u32 usr_sfnum;
@@ -144,7 +142,6 @@ int mlx5_sf_hw_table_sf_alloc(struct mlx5_core_dev *dev, u32 controller, u32 usr
 			goto vhca_err;
 	}
 
-	trace_mlx5_sf_hwc_alloc(dev, controller, hw_fn_id, usr_sfnum);
 	mutex_unlock(&table->table_lock);
 	return sw_id;
 
@@ -175,7 +172,6 @@ static void mlx5_sf_hw_table_hwc_sf_free(struct mlx5_core_dev *dev,
 	mlx5_cmd_dealloc_sf(dev, hwc->start_fn_id + idx);
 	hwc->sfs[idx].allocated = false;
 	hwc->sfs[idx].pending_delete = false;
-	trace_mlx5_sf_hwc_free(dev, hwc->start_fn_id + idx);
 }
 
 void mlx5_sf_hw_table_sf_deferred_free(struct mlx5_core_dev *dev, u32 controller, u16 id)
@@ -199,7 +195,6 @@ void mlx5_sf_hw_table_sf_deferred_free(struct mlx5_core_dev *dev, u32 controller
 		hwc->sfs[id].allocated = false;
 	} else {
 		hwc->sfs[id].pending_delete = true;
-		trace_mlx5_sf_hwc_deferred_free(dev, hw_fn_id);
 	}
 err:
 	mutex_unlock(&table->table_lock);
@@ -244,61 +239,31 @@ static void mlx5_sf_hw_table_hwc_cleanup(struct mlx5_sf_hwc_table *hwc)
 	kfree(hwc->sfs);
 }
 
-static void mlx5_sf_hw_table_res_unregister(struct mlx5_core_dev *dev)
-{
-	devl_resources_unregister(priv_to_devlink(dev));
-}
-
-static int mlx5_sf_hw_table_res_register(struct mlx5_core_dev *dev, u16 max_fn,
-					 u16 max_ext_fn)
-{
-	struct devlink_resource_size_params size_params;
-	struct devlink *devlink = priv_to_devlink(dev);
-	int err;
-
-	devlink_resource_size_params_init(&size_params, max_fn, max_fn, 1,
-					  DEVLINK_RESOURCE_UNIT_ENTRY);
-	err = devl_resource_register(devlink, "max_local_SFs", max_fn, MLX5_DL_RES_MAX_LOCAL_SFS,
-				     DEVLINK_RESOURCE_ID_PARENT_TOP, &size_params);
-	if (err)
-		return err;
-
-	devlink_resource_size_params_init(&size_params, max_ext_fn, max_ext_fn, 1,
-					  DEVLINK_RESOURCE_UNIT_ENTRY);
-	return devl_resource_register(devlink, "max_external_SFs", max_ext_fn,
-				      MLX5_DL_RES_MAX_EXTERNAL_SFS, DEVLINK_RESOURCE_ID_PARENT_TOP,
-				      &size_params);
-}
-
 int mlx5_sf_hw_table_init(struct mlx5_core_dev *dev)
 {
 	struct mlx5_sf_hw_table *table;
 	u16 max_ext_fn = 0;
-	u16 ext_base_id = 0;
+	u16 ext_base_id;
+	u16 max_fn = 0;
 	u16 base_id;
-	u16 max_fn;
 	int err;
 
 	if (!mlx5_vhca_event_supported(dev))
 		return 0;
 
-	max_fn = mlx5_sf_max_functions(dev);
+	if (mlx5_sf_supported(dev))
+		max_fn = mlx5_sf_max_functions(dev);
 
 	err = mlx5_esw_sf_max_hpf_functions(dev, &max_ext_fn, &ext_base_id);
 	if (err)
 		return err;
 
-	if (mlx5_sf_hw_table_res_register(dev, max_fn, max_ext_fn))
-		mlx5_core_dbg(dev, "failed to register max SFs resources");
-
 	if (!max_fn && !max_ext_fn)
 		return 0;
 
 	table = kzalloc(sizeof(*table), GFP_KERNEL);
-	if (!table) {
-		err = -ENOMEM;
-		goto alloc_err;
-	}
+	if (!table)
+		return -ENOMEM;
 
 	mutex_init(&table->table_lock);
 	table->dev = dev;
@@ -322,8 +287,6 @@ ext_err:
 table_err:
 	mutex_destroy(&table->table_lock);
 	kfree(table);
-alloc_err:
-	mlx5_sf_hw_table_res_unregister(dev);
 	return err;
 }
 
@@ -332,14 +295,12 @@ void mlx5_sf_hw_table_cleanup(struct mlx5_core_dev *dev)
 	struct mlx5_sf_hw_table *table = dev->priv.sf_hw_table;
 
 	if (!table)
-		goto res_unregister;
+		return;
 
+	mutex_destroy(&table->table_lock);
 	mlx5_sf_hw_table_hwc_cleanup(&table->hwc[MLX5_SF_HWC_EXTERNAL]);
 	mlx5_sf_hw_table_hwc_cleanup(&table->hwc[MLX5_SF_HWC_LOCAL]);
-	mutex_destroy(&table->table_lock);
 	kfree(table);
-res_unregister:
-	mlx5_sf_hw_table_res_unregister(dev);
 }
 
 static int mlx5_sf_hw_vhca_event(struct notifier_block *nb, unsigned long opcode, void *data)

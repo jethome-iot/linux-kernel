@@ -24,8 +24,9 @@
 #ifndef __AMDGPU_PM_H__
 #define __AMDGPU_PM_H__
 
-struct cg_flag_name {
-	u64 flag;
+struct cg_flag_name
+{
+	u32 flag;
 	const char *name;
 };
 

@@ -5,14 +5,11 @@
 
 #include <linux/sched.h>
 #include <linux/stacktrace.h>
-#include "messages.h"
 #include "ctree.h"
 #include "disk-io.h"
 #include "locking.h"
 #include "delayed-ref.h"
 #include "ref-verify.h"
-#include "fs.h"
-#include "accessors.h"
 
 /*
  * Used to keep track the roots and number of refs each root has for a given
@@ -438,7 +435,7 @@ static int process_extent_item(struct btrfs_fs_info *fs_info,
 	struct btrfs_extent_data_ref *dref;
 	struct btrfs_shared_data_ref *sref;
 	struct extent_buffer *leaf = path->nodes[0];
-	u32 item_size = btrfs_item_size(leaf, slot);
+	u32 item_size = btrfs_item_size_nr(leaf, slot);
 	unsigned long end, ptr;
 	u64 offset, flags, count;
 	int type, ret;
@@ -484,9 +481,6 @@ static int process_extent_item(struct btrfs_fs_info *fs_info,
 			count = btrfs_shared_data_ref_count(leaf, sref);
 			ret = add_shared_data_ref(fs_info, offset, count,
 						  key->objectid, key->offset);
-			break;
-		case BTRFS_EXTENT_OWNER_REF_KEY:
-			WARN_ON(!btrfs_fs_incompat(fs_info, SIMPLE_QUOTA));
 			break;
 		default:
 			btrfs_err(fs_info, "invalid key type in iref");
@@ -655,7 +649,7 @@ static void dump_block_entry(struct btrfs_fs_info *fs_info,
 }
 
 /*
- * Called when we modify a ref for a bytenr.
+ * btrfs_ref_tree_mod: called when we modify a ref for a bytenr
  *
  * This will add an action item to the given bytenr and do sanity checks to make
  * sure we haven't messed something up.  If we are making a new allocation and
@@ -684,7 +678,7 @@ int btrfs_ref_tree_mod(struct btrfs_fs_info *fs_info,
 
 	if (generic_ref->type == BTRFS_REF_METADATA) {
 		if (!parent)
-			ref_root = generic_ref->tree_ref.ref_root;
+			ref_root = generic_ref->tree_ref.root;
 		owner = generic_ref->tree_ref.level;
 	} else if (!parent) {
 		ref_root = generic_ref->data_ref.ref_root;
@@ -982,7 +976,6 @@ void btrfs_free_ref_tree_range(struct btrfs_fs_info *fs_info, u64 start,
 /* Walk down all roots and build the ref tree, meant to be called at mount */
 int btrfs_build_ref_tree(struct btrfs_fs_info *fs_info)
 {
-	struct btrfs_root *extent_root;
 	struct btrfs_path *path;
 	struct extent_buffer *eb;
 	int tree_block_level = 0;
@@ -996,8 +989,7 @@ int btrfs_build_ref_tree(struct btrfs_fs_info *fs_info)
 	if (!path)
 		return -ENOMEM;
 
-	extent_root = btrfs_extent_root(fs_info, 0);
-	eb = btrfs_read_lock_root_node(extent_root);
+	eb = btrfs_read_lock_root_node(fs_info->extent_root);
 	level = btrfs_header_level(eb);
 	path->nodes[level] = eb;
 	path->slots[level] = 0;
@@ -1010,7 +1002,7 @@ int btrfs_build_ref_tree(struct btrfs_fs_info *fs_info)
 		 * would have had to added a ref key item which may appear on a
 		 * different leaf from the original extent item.
 		 */
-		ret = walk_down_tree(extent_root, path, level,
+		ret = walk_down_tree(fs_info->extent_root, path, level,
 				     &bytenr, &num_bytes, &tree_block_level);
 		if (ret)
 			break;

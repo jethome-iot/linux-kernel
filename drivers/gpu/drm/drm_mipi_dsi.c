@@ -25,17 +25,16 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <drm/drm_mipi_dsi.h>
+
 #include <linux/device.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 
-#include <drm/display/drm_dsc.h>
-#include <drm/drm_mipi_dsi.h>
+#include <drm/drm_dsc.h>
 #include <drm/drm_print.h>
-
 #include <video/mipi_display.h>
 
 /**
@@ -63,9 +62,9 @@ static int mipi_dsi_device_match(struct device *dev, struct device_driver *drv)
 	return 0;
 }
 
-static int mipi_dsi_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int mipi_dsi_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct mipi_dsi_device *dsi = to_mipi_dsi_device(dev);
+	struct mipi_dsi_device *dsi = to_mipi_dsi_device(dev);
 	int err;
 
 	err = of_device_uevent_modalias(dev, env);
@@ -161,7 +160,7 @@ of_mipi_dsi_device_add(struct mipi_dsi_host *host, struct device_node *node)
 	int ret;
 	u32 reg;
 
-	if (of_alias_from_compatible(node, info.type, sizeof(info.type)) < 0) {
+	if (of_modalias_node(node, info.type, sizeof(info.type)) < 0) {
 		drm_err(host, "modalias failure on %pOF\n", node);
 		return ERR_PTR(-EINVAL);
 	}
@@ -224,7 +223,7 @@ mipi_dsi_device_register_full(struct mipi_dsi_host *host,
 
 	device_set_node(&dsi->dev, of_fwnode_handle(info->node));
 	dsi->channel = info->channel;
-	strscpy(dsi->name, info->type, sizeof(dsi->name));
+	strlcpy(dsi->name, info->type, sizeof(dsi->name));
 
 	ret = mipi_dsi_device_add(dsi);
 	if (ret) {
@@ -330,7 +329,7 @@ int mipi_dsi_host_register(struct mipi_dsi_host *host)
 
 	for_each_available_child_of_node(host->dev->of_node, node) {
 		/* skip nodes without reg property */
-		if (!of_property_present(node, "reg"))
+		if (!of_find_property(node, "reg", NULL))
 			continue;
 		of_mipi_dsi_device_add(host, node);
 	}
@@ -347,8 +346,7 @@ static int mipi_dsi_remove_device_fn(struct device *dev, void *priv)
 {
 	struct mipi_dsi_device *dsi = to_mipi_dsi_device(dev);
 
-	if (dsi->attached)
-		mipi_dsi_detach(dsi);
+	mipi_dsi_detach(dsi);
 	mipi_dsi_device_unregister(dsi);
 
 	return 0;
@@ -371,18 +369,11 @@ EXPORT_SYMBOL(mipi_dsi_host_unregister);
 int mipi_dsi_attach(struct mipi_dsi_device *dsi)
 {
 	const struct mipi_dsi_host_ops *ops = dsi->host->ops;
-	int ret;
 
 	if (!ops || !ops->attach)
 		return -ENOSYS;
 
-	ret = ops->attach(dsi->host, dsi);
-	if (ret)
-		return ret;
-
-	dsi->attached = true;
-
-	return 0;
+	return ops->attach(dsi->host, dsi);
 }
 EXPORT_SYMBOL(mipi_dsi_attach);
 
@@ -394,13 +385,8 @@ int mipi_dsi_detach(struct mipi_dsi_device *dsi)
 {
 	const struct mipi_dsi_host_ops *ops = dsi->host->ops;
 
-	if (WARN_ON(!dsi->attached))
-		return -EINVAL;
-
 	if (!ops || !ops->detach)
 		return -ENOSYS;
-
-	dsi->attached = false;
 
 	return ops->detach(dsi->host, dsi);
 }
@@ -620,7 +606,7 @@ int mipi_dsi_turn_on_peripheral(struct mipi_dsi_device *dsi)
 EXPORT_SYMBOL(mipi_dsi_turn_on_peripheral);
 
 /*
- * mipi_dsi_set_maximum_return_packet_size() - specify the maximum size of
+ * mipi_dsi_set_maximum_return_packet_size() - specify the maximum size of the
  *    the payload in a long packet transmitted from the peripheral back to the
  *    host processor
  * @dsi: DSI peripheral device
@@ -1303,9 +1289,7 @@ static int mipi_dsi_drv_remove(struct device *dev)
 	struct mipi_dsi_driver *drv = to_mipi_dsi_driver(dev->driver);
 	struct mipi_dsi_device *dsi = to_mipi_dsi_device(dev);
 
-	drv->remove(dsi);
-
-	return 0;
+	return drv->remove(dsi);
 }
 
 static void mipi_dsi_drv_shutdown(struct device *dev)

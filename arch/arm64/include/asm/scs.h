@@ -45,12 +45,12 @@ static inline bool should_patch_pac_into_scs(void)
 	 * those instructions into something else.
 	 */
 	reg = read_sysreg_s(SYS_ID_AA64ISAR1_EL1);
-	if (SYS_FIELD_GET(ID_AA64ISAR1_EL1, APA, reg) |
-	    SYS_FIELD_GET(ID_AA64ISAR1_EL1, API, reg))
+	if ((reg & (0xf << ID_AA64ISAR1_EL1_APA_SHIFT)) |
+	    (reg & (0xf << ID_AA64ISAR1_EL1_API_SHIFT)))
 		return false;
 
 	reg = read_sysreg_s(SYS_ID_AA64ISAR2_EL1);
-	if (SYS_FIELD_GET(ID_AA64ISAR2_EL1, APA3, reg))
+	if (reg & (0xf << ID_AA64ISAR2_EL1_APA3_SHIFT))
 		return false;
 
 	if (IS_ENABLED(CONFIG_ARM64_BTI_KERNEL)) {
@@ -73,7 +73,6 @@ static inline void dynamic_scs_init(void) {}
 #endif
 
 int scs_patch(const u8 eh_frame[], int size);
-asmlinkage void scs_patch_vmlinux(void);
 
 #endif /* __ASSEMBLY __ */
 

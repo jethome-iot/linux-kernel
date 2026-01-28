@@ -275,12 +275,12 @@ static void carl9170_tx_release(struct kref *ref)
 	if (WARN_ON_ONCE(!ar))
 		return;
 
-	/*
-	 * This does not call ieee80211_tx_info_clear_status() because
-	 * carl9170_tx_fill_rateinfo() has filled the rate information
-	 * before we get to this point.
-	 */
-	memset_after(&txinfo->status, 0, rates);
+	BUILD_BUG_ON(
+	    offsetof(struct ieee80211_tx_info, status.ack_signal) != 20);
+
+	memset(&txinfo->status.ack_signal, 0,
+	       sizeof(struct ieee80211_tx_info) -
+	       offsetof(struct ieee80211_tx_info, status.ack_signal));
 
 	if (atomic_read(&ar->tx_total_queued))
 		ar->tx_schedule = true;
@@ -1628,7 +1628,7 @@ int carl9170_update_beacon(struct ar9170 *ar, const bool submit)
 		goto out_unlock;
 
 	skb = ieee80211_beacon_get_tim(ar->hw, carl9170_get_vif(cvif),
-				       NULL, NULL, 0);
+		NULL, NULL);
 
 	if (!skb) {
 		err = -ENOMEM;

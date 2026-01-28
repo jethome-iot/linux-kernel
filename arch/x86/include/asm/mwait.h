@@ -13,7 +13,6 @@
 #define MWAIT_SUBSTATE_SIZE		4
 #define MWAIT_HINT2CSTATE(hint)		(((hint) >> MWAIT_SUBSTATE_SIZE) & MWAIT_CSTATE_MASK)
 #define MWAIT_HINT2SUBSTATE(hint)	((hint) & MWAIT_CSTATE_MASK)
-#define MWAIT_C1_SUBSTATE_MASK  0xf0
 
 #define CPUID_MWAIT_LEAF		5
 #define CPUID5_ECX_EXTENSIONS_SUPPORTED 0x1
@@ -26,7 +25,7 @@
 #define TPAUSE_C01_STATE		1
 #define TPAUSE_C02_STATE		0
 
-static __always_inline void __monitor(const void *eax, unsigned long ecx,
+static inline void __monitor(const void *eax, unsigned long ecx,
 			     unsigned long edx)
 {
 	/* "monitor %eax, %ecx, %edx;" */
@@ -34,7 +33,7 @@ static __always_inline void __monitor(const void *eax, unsigned long ecx,
 		     :: "a" (eax), "c" (ecx), "d"(edx));
 }
 
-static __always_inline void __monitorx(const void *eax, unsigned long ecx,
+static inline void __monitorx(const void *eax, unsigned long ecx,
 			      unsigned long edx)
 {
 	/* "monitorx %eax, %ecx, %edx;" */
@@ -42,7 +41,7 @@ static __always_inline void __monitorx(const void *eax, unsigned long ecx,
 		     :: "a" (eax), "c" (ecx), "d"(edx));
 }
 
-static __always_inline void __mwait(unsigned long eax, unsigned long ecx)
+static inline void __mwait(unsigned long eax, unsigned long ecx)
 {
 	mds_idle_clear_cpu_buffers();
 
@@ -77,8 +76,8 @@ static __always_inline void __mwait(unsigned long eax, unsigned long ecx)
  * EAX                     (logical) address to monitor
  * ECX                     #GP if not zero
  */
-static __always_inline void __mwaitx(unsigned long eax, unsigned long ebx,
-				     unsigned long ecx)
+static inline void __mwaitx(unsigned long eax, unsigned long ebx,
+			    unsigned long ecx)
 {
 	/* No MDS buffer clear as this is AMD/HYGON only */
 
@@ -87,16 +86,7 @@ static __always_inline void __mwaitx(unsigned long eax, unsigned long ebx,
 		     :: "a" (eax), "b" (ebx), "c" (ecx));
 }
 
-/*
- * Re-enable interrupts right upon calling mwait in such a way that
- * no interrupt can fire _before_ the execution of mwait, ie: no
- * instruction must be placed between "sti" and "mwait".
- *
- * This is necessary because if an interrupt queues a timer before
- * executing mwait, it would otherwise go unnoticed and the next tick
- * would not be reprogrammed accordingly before mwait ever wakes up.
- */
-static __always_inline void __sti_mwait(unsigned long eax, unsigned long ecx)
+static inline void __sti_mwait(unsigned long eax, unsigned long ecx)
 {
 	mds_idle_clear_cpu_buffers();
 	/* "mwait %eax, %ecx;" */
@@ -114,7 +104,7 @@ static __always_inline void __sti_mwait(unsigned long eax, unsigned long ecx)
  * New with Core Duo processors, MWAIT can take some hints based on CPU
  * capability.
  */
-static __always_inline void mwait_idle_with_hints(unsigned long eax, unsigned long ecx)
+static inline void mwait_idle_with_hints(unsigned long eax, unsigned long ecx)
 {
 	if (static_cpu_has_bug(X86_BUG_MONITOR) || !current_set_polling_and_test()) {
 		if (static_cpu_has_bug(X86_BUG_CLFLUSH_MONITOR)) {
@@ -124,15 +114,8 @@ static __always_inline void mwait_idle_with_hints(unsigned long eax, unsigned lo
 		}
 
 		__monitor((void *)&current_thread_info()->flags, 0, 0);
-
-		if (!need_resched()) {
-			if (ecx & 1) {
-				__mwait(eax, ecx);
-			} else {
-				__sti_mwait(eax, ecx);
-				raw_local_irq_disable();
-			}
-		}
+		if (!need_resched())
+			__mwait(eax, ecx);
 	}
 	current_clr_polling();
 }

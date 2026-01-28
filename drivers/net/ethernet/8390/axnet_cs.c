@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: GPL-1.0+
-
 /*======================================================================
 
     A PCMCIA ethernet driver for Asix AX88190-based cards
@@ -19,7 +17,9 @@
 
     Written 1992,1993 by Donald Becker.
     Copyright 1993 United States Government as represented by the
-    Director, National Security Agency.
+    Director, National Security Agency.  This software may be used and
+    distributed according to the terms of the GNU General Public License,
+    incorporated herein by reference.
     Donald Becker may be reached at becker@scyld.com
 
 ======================================================================*/
@@ -187,7 +187,6 @@ static int get_prom(struct pcmcia_device *link)
 {
     struct net_device *dev = link->priv;
     unsigned int ioaddr = dev->base_addr;
-    u8 addr[ETH_ALEN];
     int i, j;
 
     /* This is based on drivers/net/ethernet/8390/ne.c */
@@ -221,11 +220,9 @@ static int get_prom(struct pcmcia_device *link)
 
     for (i = 0; i < 6; i += 2) {
 	j = inw(ioaddr + AXNET_DATAPORT);
-	addr[i] = j & 0xff;
-	addr[i+1] = j >> 8;
+	dev->dev_addr[i] = j & 0xff;
+	dev->dev_addr[i+1] = j >> 8;
     }
-    eth_hw_addr_set(dev, addr);
-
     return 1;
 } /* get_prom */
 
@@ -650,6 +647,7 @@ static void block_input(struct net_device *dev, int count,
 {
     unsigned int nic_base = dev->base_addr;
     struct ei_device *ei_local = netdev_priv(dev);
+    int xfer_count = count;
     char *buf = skb->data;
 
     if ((netif_msg_rx_status(ei_local)) && (count != 4))
@@ -661,7 +659,9 @@ static void block_input(struct net_device *dev, int count,
     insw(nic_base + AXNET_DATAPORT,buf,count>>1);
     if (count & 0x01) {
 	buf[count-1] = inb(nic_base + AXNET_DATAPORT);
+	xfer_count++;
     }
+
 }
 
 /*====================================================================*/

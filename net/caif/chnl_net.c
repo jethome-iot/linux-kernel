@@ -31,7 +31,6 @@
 /*This list is protected by the rtnl lock. */
 static LIST_HEAD(chnl_net_list);
 
-MODULE_DESCRIPTION("ST-Ericsson CAIF modem protocol GPRS network device");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_RTNL_LINK("caif");
 
@@ -100,7 +99,7 @@ static int chnl_recv_cb(struct cflayer *layr, struct cfpkt *pkt)
 	else
 		skb->ip_summed = CHECKSUM_NONE;
 
-	netif_rx(skb);
+	netif_rx_any_context(skb);
 
 	/* Update statistics. */
 	priv->netdev->stats.rx_packets++;

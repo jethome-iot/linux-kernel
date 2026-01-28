@@ -15,7 +15,6 @@
 #include <linux/workqueue.h>
 #include <linux/compat.h>
 #include <linux/sched/deadline.h>
-#include <linux/task_work.h>
 
 #include "posix-timers.h"
 
@@ -35,20 +34,14 @@ void posix_cputimers_group_init(struct posix_cputimers *pct, u64 cpu_limit)
  * tsk->signal->posix_cputimers.bases[clock].nextevt expiration cache if
  * necessary. Needs siglock protection since other code may update the
  * expiration cache as well.
- *
- * Returns 0 on success, -ESRCH on failure.  Can fail if the task is exiting and
- * we cannot lock_task_sighand.  Cannot fail if task is current.
  */
-int update_rlimit_cpu(struct task_struct *task, unsigned long rlim_new)
+void update_rlimit_cpu(struct task_struct *task, unsigned long rlim_new)
 {
 	u64 nsecs = rlim_new * NSEC_PER_SEC;
-	unsigned long irq_fl;
 
-	if (!lock_task_sighand(task, &irq_fl))
-		return -ESRCH;
+	spin_lock_irq(&task->sighand->siglock);
 	set_process_cpu_timer(task, CPUCLOCK_PROF, &nsecs, NULL);
-	unlock_task_sighand(task, &irq_fl);
-	return 0;
+	spin_unlock_irq(&task->sighand->siglock);
 }
 
 /*
@@ -243,12 +236,13 @@ static void proc_sample_cputime_atomic(struct task_cputime_atomic *at,
  */
 static inline void __update_gt_cputime(atomic64_t *cputime, u64 sum_cputime)
 {
-	u64 curr_cputime = atomic64_read(cputime);
-
-	do {
-		if (sum_cputime <= curr_cputime)
-			return;
-	} while (!atomic64_try_cmpxchg(cputime, &curr_cputime, sum_cputime));
+	u64 curr_cputime;
+retry:
+	curr_cputime = atomic64_read(cputime);
+	if (sum_cputime > curr_cputime) {
+		if (atomic64_cmpxchg(cputime, curr_cputime, sum_cputime) != curr_cputime)
+			goto retry;
+	}
 }
 
 static void update_gt_cputime(struct task_cputime_atomic *cputime_atomic,
@@ -871,7 +865,7 @@ static inline void check_dl_overrun(struct task_struct *tsk)
 {
 	if (tsk->dl.dl_overrun) {
 		tsk->dl.dl_overrun = 0;
-		send_signal_locked(SIGXCPU, SEND_SIG_PRIV, tsk, PIDTYPE_TGID);
+		__group_send_sig_info(SIGXCPU, SEND_SIG_PRIV, tsk);
 	}
 }
 
@@ -885,7 +879,7 @@ static bool check_rlimit(u64 time, u64 limit, int signo, bool rt, bool hard)
 			rt ? "RT" : "CPU", hard ? "hard" : "soft",
 			current->comm, task_pid_nr(current));
 	}
-	send_signal_locked(signo, SEND_SIG_PRIV, current, PIDTYPE_TGID);
+	__group_send_sig_info(signo, SEND_SIG_PRIV, current);
 	return true;
 }
 
@@ -959,7 +953,7 @@ static void check_cpu_itimer(struct task_struct *tsk, struct cpu_itimer *it,
 		trace_itimer_expire(signo == SIGPROF ?
 				    ITIMER_PROF : ITIMER_VIRTUAL,
 				    task_tgid(tsk), cur_time);
-		send_signal_locked(signo, SEND_SIG_PRIV, tsk, PIDTYPE_TGID);
+		__group_send_sig_info(signo, SEND_SIG_PRIV, tsk);
 	}
 
 	if (it->expires && it->expires < *expires)

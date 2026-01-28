@@ -9,10 +9,10 @@
 #include <linux/sched/task.h>
 #include <linux/cred.h>
 #include <linux/refcount.h>
-#include <linux/pid.h>
 #include <linux/posix-timers.h>
 #include <linux/mm_types.h>
 #include <asm/ptrace.h>
+#include <linux/android_kabi.h>
 
 /*
  * Types defining task->signal and task->sighand and APIs using them:
@@ -73,17 +73,6 @@ struct multiprocess_signals {
 	struct hlist_node node;
 };
 
-struct core_thread {
-	struct task_struct *task;
-	struct core_thread *next;
-};
-
-struct core_state {
-	atomic_t nr_threads;
-	struct core_thread dumper;
-	struct completion startup;
-};
-
 /*
  * NOTE! "signal_struct" does not have its own
  * locking, because a shared signal_struct always
@@ -95,7 +84,6 @@ struct signal_struct {
 	refcount_t		sigcnt;
 	atomic_t		live;
 	int			nr_threads;
-	int			quick_threads;
 	struct list_head	thread_head;
 
 	wait_queue_head_t	wait_chldexit;	/* for wait4() */
@@ -111,15 +99,17 @@ struct signal_struct {
 
 	/* thread group exit support */
 	int			group_exit_code;
-	/* notify group_exec_task when notify_count is less or equal to 0 */
+	/* overloaded:
+	 * - notify group_exit_task when ->count is equal to notify_count
+	 * - everyone except group_exit_task is stopped during signal delivery
+	 *   of fatal signals, group_exit_task processes the signal.
+	 */
 	int			notify_count;
-	struct task_struct	*group_exec_task;
+	struct task_struct	*group_exit_task;
 
 	/* thread group stop support, overloads group_exit_code too */
 	int			group_stop_count;
 	unsigned int		flags; /* see SIGNAL_* flags below */
-
-	struct core_state *core_state; /* coredumping support */
 
 	/*
 	 * PR_SET_CHILD_SUBREAPER marks a process, like a service
@@ -136,7 +126,7 @@ struct signal_struct {
 #ifdef CONFIG_POSIX_TIMERS
 
 	/* POSIX.1b Interval Timers */
-	unsigned int		next_posix_timer_id;
+	int			posix_timer_id;
 	struct list_head	posix_timers;
 
 	/* ITIMER_REAL timer for the process */
@@ -246,6 +236,11 @@ struct signal_struct {
 						 * and may have inconsistent
 						 * permissions.
 						 */
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 } __randomize_layout;
 
 /*
@@ -254,6 +249,7 @@ struct signal_struct {
 #define SIGNAL_STOP_STOPPED	0x00000001 /* job control stop in effect */
 #define SIGNAL_STOP_CONTINUED	0x00000002 /* SIGCONT since WCONTINUED reap */
 #define SIGNAL_GROUP_EXIT	0x00000004 /* group exit in progress */
+#define SIGNAL_GROUP_COREDUMP	0x00000008 /* coredump in progress */
 /*
  * Pending notifications to parent.
  */
@@ -269,25 +265,31 @@ struct signal_struct {
 static inline void signal_set_stop_flags(struct signal_struct *sig,
 					 unsigned int flags)
 {
-	WARN_ON(sig->flags & SIGNAL_GROUP_EXIT);
+	WARN_ON(sig->flags & (SIGNAL_GROUP_EXIT|SIGNAL_GROUP_COREDUMP));
 	sig->flags = (sig->flags & ~SIGNAL_STOP_MASK) | flags;
+}
+
+/* If true, all threads except ->group_exit_task have pending SIGKILL */
+static inline int signal_group_exit(const struct signal_struct *sig)
+{
+	return	(sig->flags & SIGNAL_GROUP_EXIT) ||
+		(sig->group_exit_task != NULL);
 }
 
 extern void flush_signals(struct task_struct *);
 extern void ignore_signals(struct task_struct *);
 extern void flush_signal_handlers(struct task_struct *, int force_default);
-extern int dequeue_signal(struct task_struct *task, sigset_t *mask,
-			  kernel_siginfo_t *info, enum pid_type *type);
+extern int dequeue_signal(struct task_struct *task,
+			  sigset_t *mask, kernel_siginfo_t *info);
 
 static inline int kernel_dequeue_signal(void)
 {
 	struct task_struct *task = current;
 	kernel_siginfo_t __info;
-	enum pid_type __type;
 	int ret;
 
 	spin_lock_irq(&task->sighand->siglock);
-	ret = dequeue_signal(task, &task->blocked, &__info, &__type);
+	ret = dequeue_signal(task, &task->blocked, &__info);
 	spin_unlock_irq(&task->sighand->siglock);
 
 	return ret;
@@ -296,19 +298,26 @@ static inline int kernel_dequeue_signal(void)
 static inline void kernel_signal_stop(void)
 {
 	spin_lock_irq(&current->sighand->siglock);
-	if (current->jobctl & JOBCTL_STOP_DEQUEUED) {
-		current->jobctl |= JOBCTL_STOPPED;
+	if (current->jobctl & JOBCTL_STOP_DEQUEUED)
 		set_special_state(TASK_STOPPED);
-	}
 	spin_unlock_irq(&current->sighand->siglock);
 
 	schedule();
 }
+#ifdef __ia64__
+# define ___ARCH_SI_IA64(_a1, _a2, _a3) , _a1, _a2, _a3
+#else
+# define ___ARCH_SI_IA64(_a1, _a2, _a3)
+#endif
 
-int force_sig_fault_to_task(int sig, int code, void __user *addr,
-			    struct task_struct *t);
-int force_sig_fault(int sig, int code, void __user *addr);
-int send_sig_fault(int sig, int code, void __user *addr, struct task_struct *t);
+int force_sig_fault_to_task(int sig, int code, void __user *addr
+	___ARCH_SI_IA64(int imm, unsigned int flags, unsigned long isr)
+	, struct task_struct *t);
+int force_sig_fault(int sig, int code, void __user *addr
+	___ARCH_SI_IA64(int imm, unsigned int flags, unsigned long isr));
+int send_sig_fault(int sig, int code, void __user *addr
+	___ARCH_SI_IA64(int imm, unsigned int flags, unsigned long isr)
+	, struct task_struct *t);
 
 int force_sig_mceerr(int code, void __user *, short);
 int send_sig_mceerr(int code, void __user *, short, struct task_struct *);
@@ -343,32 +352,6 @@ extern struct sigqueue *sigqueue_alloc(void);
 extern void sigqueue_free(struct sigqueue *);
 extern int send_sigqueue(struct sigqueue *, struct pid *, enum pid_type);
 extern int do_sigaction(int, struct k_sigaction *, struct k_sigaction *);
-
-static inline void clear_notify_signal(void)
-{
-	clear_thread_flag(TIF_NOTIFY_SIGNAL);
-	smp_mb__after_atomic();
-}
-
-/*
- * Returns 'true' if kick_process() is needed to force a transition from
- * user -> kernel to guarantee expedient run of TWA_SIGNAL based task_work.
- */
-static inline bool __set_notify_signal(struct task_struct *task)
-{
-	return !test_and_set_tsk_thread_flag(task, TIF_NOTIFY_SIGNAL) &&
-	       !wake_up_state(task, TASK_INTERRUPTIBLE);
-}
-
-/*
- * Called to break out of interruptible wait loops, and enter the
- * exit_to_user_mode_loop().
- */
-static inline void set_notify_signal(struct task_struct *task)
-{
-	if (__set_notify_signal(task))
-		kick_process(task);
-}
 
 static inline int restart_syscall(void)
 {
@@ -433,28 +416,19 @@ static inline bool fault_signal_pending(vm_fault_t fault_flags,
  * This is required every time the blocked sigset_t changes.
  * callers must hold sighand->siglock.
  */
+extern void recalc_sigpending_and_wake(struct task_struct *t);
 extern void recalc_sigpending(void);
 extern void calculate_sigpending(void);
 
 extern void signal_wake_up_state(struct task_struct *t, unsigned int state);
 
-static inline void signal_wake_up(struct task_struct *t, bool fatal)
+static inline void signal_wake_up(struct task_struct *t, bool resume)
 {
-	unsigned int state = 0;
-	if (fatal && !(t->jobctl & JOBCTL_PTRACE_FROZEN)) {
-		t->jobctl &= ~(JOBCTL_STOPPED | JOBCTL_TRACED);
-		state = TASK_WAKEKILL | __TASK_TRACED;
-	}
-	signal_wake_up_state(t, state);
+	signal_wake_up_state(t, resume ? TASK_WAKEKILL : 0);
 }
 static inline void ptrace_signal_wake_up(struct task_struct *t, bool resume)
 {
-	unsigned int state = 0;
-	if (resume) {
-		t->jobctl &= ~JOBCTL_TRACED;
-		state = __TASK_TRACED;
-	}
-	signal_wake_up_state(t, state);
+	signal_wake_up_state(t, resume ? __TASK_TRACED : 0);
 }
 
 void task_join_group_stop(struct task_struct *task);
@@ -640,18 +614,17 @@ extern void flush_itimer_signals(void);
 extern bool current_is_single_threaded(void);
 
 /*
- * Without tasklist/siglock it is only rcu-safe if g can't exit/exec,
- * otherwise next_thread(t) will never reach g after list_del_rcu(g).
+ * Careful: do_each_thread/while_each_thread is a double loop so
+ *          'break' will not work as expected - use goto instead.
  */
+#define do_each_thread(g, t) \
+	for (g = t = &init_task ; (g = t = next_task(g)) != &init_task ; ) do
+
 #define while_each_thread(g, t) \
 	while ((t = next_thread(t)) != g)
 
-#define for_other_threads(p, t)	\
-	for (t = p; (t = next_thread(t)) != p; )
-
 #define __for_each_thread(signal, t)	\
-	list_for_each_entry_rcu(t, &(signal)->thread_head, thread_node, \
-		lockdep_is_held(&tasklist_lock))
+	list_for_each_entry_rcu(t, &(signal)->thread_head, thread_node)
 
 #define for_each_thread(p, t)		\
 	__for_each_thread((p)->signal, t)
@@ -710,26 +683,15 @@ bool same_thread_group(struct task_struct *p1, struct task_struct *p2)
 	return p1->signal == p2->signal;
 }
 
-/*
- * returns NULL if p is the last thread in the thread group
- */
-static inline struct task_struct *__next_thread(struct task_struct *p)
+static inline struct task_struct *next_thread(const struct task_struct *p)
 {
-	return list_next_or_null_rcu(&p->signal->thread_head,
-					&p->thread_node,
-					struct task_struct,
-					thread_node);
-}
-
-static inline struct task_struct *next_thread(struct task_struct *p)
-{
-	return __next_thread(p) ?: p->group_leader;
+	return list_entry_rcu(p->thread_group.next,
+			      struct task_struct, thread_group);
 }
 
 static inline int thread_group_empty(struct task_struct *p)
 {
-	return thread_group_leader(p) &&
-	       list_is_last(&p->thread_node, &p->signal->thread_head);
+	return list_empty(&p->thread_group);
 }
 
 #define delay_group_leader(p) \

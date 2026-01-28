@@ -23,8 +23,7 @@ properties:
   interrupts:
     maxItems: 1
 
-  vref-supply:
-    description: Optional supply of the reference voltage
+  spi-max-frequency: true
 
   "#io-channel-cells":
     const: 1
@@ -41,7 +40,7 @@ required:
 
 patternProperties:
   "^channel@[0-7]$":
-    $ref: adc.yaml
+    $ref: "adc.yaml"
     type: object
 
     properties:
@@ -60,10 +59,7 @@ patternProperties:
 
     additionalProperties: false
 
-allOf:
-  - $ref: /schemas/spi/spi-peripheral-props.yaml#
-
-unevaluatedProperties: false
+additionalProperties: false
 
 examples:
   - |
@@ -83,36 +79,36 @@ examples:
             #size-cells = <0>;
 
             channel@0 {
-                reg = <0>;
+              reg = <0>;
             };
             channel@1 {
-                reg = <1>;
-                settling-time-us = <700>;
-                oversampling-ratio = <5>;
+              reg = <1>;
+              settling-time-us = <700>;
+              oversampling-ratio = <5>;
             };
             channel@2 {
-                reg = <2>;
+              reg = <2>;
             };
             channel@3 {
-                reg = <3>;
-                settling-time-us = <700>;
-                oversampling-ratio = <5>;
+              reg = <3>;
+              settling-time-us = <700>;
+              oversampling-ratio = <5>;
             };
             channel@4 {
-                reg = <4>;
-                settling-time-us = <700>;
-                oversampling-ratio = <5>;
+              reg = <4>;
+              settling-time-us = <700>;
+              oversampling-ratio = <5>;
             };
             channel@5 {
-                reg = <5>;
-                settling-time-us = <700>;
-                oversampling-ratio = <5>;
+              reg = <5>;
+              settling-time-us = <700>;
+              oversampling-ratio = <5>;
             };
             channel@6 {
-                reg = <6>;
+              reg = <6>;
             };
             channel@7 {
-                reg = <7>;
+              reg = <7>;
             };
         };
     };

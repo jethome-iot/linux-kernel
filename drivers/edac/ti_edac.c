@@ -245,8 +245,11 @@ static int ti_edac_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	reg = devm_ioremap_resource(dev, res);
-	if (IS_ERR(reg))
+	if (IS_ERR(reg)) {
+		edac_printk(KERN_ERR, EDAC_MOD_NAME,
+			    "EMIF controller regs not defined\n");
 		return PTR_ERR(reg);
+	}
 
 	layers[0].type = EDAC_MC_LAYER_ALL_MEM;
 	layers[0].size = 1;
@@ -278,6 +281,8 @@ static int ti_edac_probe(struct platform_device *pdev)
 	error_irq = platform_get_irq(pdev, 0);
 	if (error_irq < 0) {
 		ret = error_irq;
+		edac_printk(KERN_ERR, EDAC_MOD_NAME,
+			    "EMIF irq number not defined.\n");
 		goto err;
 	}
 
@@ -312,17 +317,19 @@ err:
 	return ret;
 }
 
-static void ti_edac_remove(struct platform_device *pdev)
+static int ti_edac_remove(struct platform_device *pdev)
 {
 	struct mem_ctl_info *mci = platform_get_drvdata(pdev);
 
 	edac_mc_del_mc(&pdev->dev);
 	edac_mc_free(mci);
+
+	return 0;
 }
 
 static struct platform_driver ti_edac_driver = {
 	.probe = ti_edac_probe,
-	.remove_new = ti_edac_remove,
+	.remove = ti_edac_remove,
 	.driver = {
 		   .name = EDAC_MOD_NAME,
 		   .of_match_table = ti_edac_of_match,

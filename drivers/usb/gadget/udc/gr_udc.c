@@ -23,7 +23,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/errno.h>
@@ -37,7 +36,9 @@
 #include <linux/dmapool.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
-#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/of_irq.h>
+#include <linux/of_address.h>
 
 #include <asm/byteorder.h>
 
@@ -1689,7 +1690,7 @@ static int gr_queue_ext(struct usb_ep *_ep, struct usb_request *_req,
 /* Dequeue JUST ONE request */
 static int gr_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 {
-	struct gr_request *req = NULL, *iter;
+	struct gr_request *req;
 	struct gr_ep *ep;
 	struct gr_udc *dev;
 	int ret = 0;
@@ -1709,13 +1710,11 @@ static int gr_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 	spin_lock_irqsave(&dev->lock, flags);
 
 	/* Make sure it's actually queued on this endpoint */
-	list_for_each_entry(iter, &ep->queue, queue) {
-		if (&iter->req != _req)
-			continue;
-		req = iter;
-		break;
+	list_for_each_entry(req, &ep->queue, queue) {
+		if (&req->req == _req)
+			break;
 	}
-	if (!req) {
+	if (&req->req != _req) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -1905,6 +1904,7 @@ static int gr_udc_start(struct usb_gadget *gadget,
 	spin_lock(&dev->lock);
 
 	/* Hook up the driver */
+	driver->driver.bus = NULL;
 	dev->driver = driver;
 
 	/* Get ready for host detection */
@@ -2089,18 +2089,15 @@ static void gr_ep_remove(struct gr_udc *dev, int num, int is_in)
 				  ep->tailbuf, ep->tailbuf_paddr);
 }
 
-static void gr_remove(struct platform_device *pdev)
+static int gr_remove(struct platform_device *pdev)
 {
 	struct gr_udc *dev = platform_get_drvdata(pdev);
 	int i;
 
 	if (dev->added)
 		usb_del_gadget_udc(&dev->gadget); /* Shuts everything down */
-	if (dev->driver) {
-		dev_err(&pdev->dev,
-			"Driver still in use but removing anyhow\n");
-		return;
-	}
+	if (dev->driver)
+		return -EBUSY;
 
 	gr_dfs_delete(dev);
 	dma_pool_destroy(dev->desc_pool);
@@ -2113,6 +2110,8 @@ static void gr_remove(struct platform_device *pdev)
 		gr_ep_remove(dev, i, 0);
 	for (i = 0; i < dev->nepi; i++)
 		gr_ep_remove(dev, i, 1);
+
+	return 0;
 }
 static int gr_request_irq(struct gr_udc *dev, int irq)
 {
@@ -2137,15 +2136,15 @@ static int gr_probe(struct platform_device *pdev)
 		return PTR_ERR(regs);
 
 	dev->irq = platform_get_irq(pdev, 0);
-	if (dev->irq < 0)
-		return dev->irq;
+	if (dev->irq <= 0)
+		return -ENODEV;
 
 	/* Some core configurations has separate irqs for IN and OUT events */
 	dev->irqi = platform_get_irq(pdev, 1);
 	if (dev->irqi > 0) {
 		dev->irqo = platform_get_irq(pdev, 2);
-		if (dev->irqo < 0)
-			return dev->irqo;
+		if (dev->irqo <= 0)
+			return -ENODEV;
 	} else {
 		dev->irqi = 0;
 	}
@@ -2249,7 +2248,7 @@ static struct platform_driver gr_driver = {
 		.of_match_table = gr_match,
 	},
 	.probe = gr_probe,
-	.remove_new = gr_remove,
+	.remove = gr_remove,
 };
 module_platform_driver(gr_driver);
 

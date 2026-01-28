@@ -4,7 +4,6 @@
  */
 
 #include "mt8183-kukui.dtsi"
-#include "mt8183-kukui-audio-max98357a.dtsi"
 
 / {
 	ppvarn_lcd: ppvarn-lcd {
@@ -54,7 +53,8 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&open_touch>;
 
-		interrupts-extended = <&pio 155 IRQ_TYPE_EDGE_FALLING>;
+		interrupt-parent = <&pio>;
+		interrupts = <155 IRQ_TYPE_EDGE_FALLING>;
 
 		post-power-on-delay-ms = <10>;
 		hid-descr-addr = <0x0001>;
@@ -343,6 +343,10 @@
 };
 
 &cros_ec {
+	cbas {
+		compatible = "google,cros-cbas";
+	};
+
 	keyboard-controller {
 		compatible = "google,cros-ec-keyb-switches";
 	};
@@ -350,8 +354,4 @@
 
 &qca_wifi {
 	qcom,ath10k-calibration-variant = "LE_Krane";
-};
-
-&sound {
-	compatible = "mediatek,mt8183_mt6358_ts3a227_max98357";
 };

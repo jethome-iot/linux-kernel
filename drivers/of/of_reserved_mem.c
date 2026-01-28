@@ -9,7 +9,9 @@
  * Author: Josh Cartwright <joshc@codeaurora.org>
  */
 
+#ifndef CONFIG_AMLOGIC_MEMORY_EXTEND /* save print time */
 #define pr_fmt(fmt)	"OF: reserved mem: " fmt
+#endif
 
 #include <linux/err.h>
 #include <linux/of.h>
@@ -22,11 +24,10 @@
 #include <linux/slab.h>
 #include <linux/memblock.h>
 #include <linux/kmemleak.h>
-#include <linux/cma.h>
 
 #include "of_private.h"
 
-#define MAX_RESERVED_REGIONS	64
+#define MAX_RESERVED_REGIONS	128
 static struct reserved_mem reserved_mem[MAX_RESERVED_REGIONS];
 static int reserved_mem_count;
 
@@ -47,7 +48,7 @@ static int __init early_init_dt_alloc_reserved_memory_arch(phys_addr_t size,
 	if (nomap) {
 		err = memblock_mark_nomap(base, size);
 		if (err)
-			memblock_phys_free(base, size);
+			memblock_free(base, size);
 	}
 
 	kmemleak_ignore_phys(base);
@@ -75,57 +76,6 @@ void __init fdt_reserved_mem_save_node(unsigned long node, const char *uname,
 
 	reserved_mem_count++;
 	return;
-}
-
-/*
- * __reserved_mem_alloc_in_range() - allocate reserved memory described with
- *	'alloc-ranges'. Choose bottom-up/top-down depending on nearby existing
- *	reserved regions to keep the reserved memory contiguous if possible.
- */
-static int __init __reserved_mem_alloc_in_range(phys_addr_t size,
-	phys_addr_t align, phys_addr_t start, phys_addr_t end, bool nomap,
-	phys_addr_t *res_base)
-{
-	bool prev_bottom_up = memblock_bottom_up();
-	bool bottom_up = false, top_down = false;
-	int ret, i;
-
-	for (i = 0; i < reserved_mem_count; i++) {
-		struct reserved_mem *rmem = &reserved_mem[i];
-
-		/* Skip regions that were not reserved yet */
-		if (rmem->size == 0)
-			continue;
-
-		/*
-		 * If range starts next to an existing reservation, use bottom-up:
-		 *	|....RRRR................RRRRRRRR..............|
-		 *	       --RRRR------
-		 */
-		if (start >= rmem->base && start <= (rmem->base + rmem->size))
-			bottom_up = true;
-
-		/*
-		 * If range ends next to an existing reservation, use top-down:
-		 *	|....RRRR................RRRRRRRR..............|
-		 *	              -------RRRR-----
-		 */
-		if (end >= rmem->base && end <= (rmem->base + rmem->size))
-			top_down = true;
-	}
-
-	/* Change setting only if either bottom-up or top-down was selected */
-	if (bottom_up != top_down)
-		memblock_set_bottom_up(bottom_up);
-
-	ret = early_init_dt_alloc_reserved_memory_arch(size, align,
-			start, end, nomap, res_base);
-
-	/* Restore old setting if needed */
-	if (bottom_up != top_down)
-		memblock_set_bottom_up(prev_bottom_up);
-
-	return ret;
 }
 
 /*
@@ -169,8 +119,12 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 	if (IS_ENABLED(CONFIG_CMA)
 	    && of_flat_dt_is_compatible(node, "shared-dma-pool")
 	    && of_get_flat_dt_prop(node, "reusable", NULL)
-	    && !nomap)
-		align = max_t(phys_addr_t, align, CMA_MIN_ALIGNMENT_BYTES);
+	    && !nomap) {
+		unsigned long order =
+			max_t(unsigned long, MAX_ORDER - 1, pageblock_order);
+
+		align = max(align, (phys_addr_t)PAGE_SIZE << order);
+	}
 
 	prop = of_get_flat_dt_prop(node, "alloc-ranges", &len);
 	if (prop) {
@@ -188,8 +142,8 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 			end = start + dt_mem_next_cell(dt_root_size_cells,
 						       &prop);
 
-			ret = __reserved_mem_alloc_in_range(size, align,
-					start, end, nomap, &base);
+			ret = early_init_dt_alloc_reserved_memory_arch(size,
+					align, start, end, nomap, &base);
 			if (ret == 0) {
 				pr_debug("allocated memory for '%s' node: base %pa, size %lu MiB\n",
 					uname, &base,
@@ -208,8 +162,7 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 	}
 
 	if (base == 0) {
-		pr_err("failed to allocate memory for node '%s': size %lu MiB\n",
-		       uname, (unsigned long)(size / SZ_1M));
+		pr_info("failed to allocate memory for node '%s'\n", uname);
 		return -ENOMEM;
 	}
 
@@ -240,8 +193,16 @@ static int __init __reserved_mem_init_node(struct reserved_mem *rmem)
 
 		ret = initfn(rmem);
 		if (ret == 0) {
+		#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+			pr_emerg("\t%08lx - %08lx, %8ld KB, %s\n",
+				 (unsigned long)rmem->base,
+				 (unsigned long)(rmem->base + rmem->size),
+				 (unsigned long)(rmem->size >> 10),
+				 rmem->name);
+		#else
 			pr_info("initialized node %s, compatible id %s\n",
 				rmem->name, compat);
+		#endif
 			break;
 		}
 	}
@@ -266,11 +227,6 @@ static int __init __rmem_cmp(const void *a, const void *b)
 	if (ra->size < rb->size)
 		return -1;
 	if (ra->size > rb->size)
-		return 1;
-
-	if (ra->fdt_node < rb->fdt_node)
-		return -1;
-	if (ra->fdt_node > rb->fdt_node)
 		return 1;
 
 	return 0;
@@ -339,8 +295,7 @@ void __init fdt_init_reserved_mem(void)
 				if (nomap)
 					memblock_clear_nomap(rmem->base, rmem->size);
 				else
-					memblock_phys_free(rmem->base,
-							   rmem->size);
+					memblock_free(rmem->base, rmem->size);
 			} else {
 				phys_addr_t end = rmem->base + rmem->size - 1;
 				bool reusable =
@@ -351,6 +306,11 @@ void __init fdt_init_reserved_mem(void)
 					nomap ? "nomap" : "map",
 					reusable ? "reusable" : "non-reusable",
 					rmem->name ? rmem->name : "unknown");
+			#if defined(CONFIG_ARM) && defined(CONFIG_AMLOGIC_MEMORY_EXTEND)
+				if (memblock_end_of_DRAM() > 0x30000000 &&
+					rmem->size / SZ_1M > 100 && end < 0x30000000)
+					pr_info("=== notice: This cma pool in low memory. ===\n");
+			#endif
 			}
 		}
 	}

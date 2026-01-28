@@ -1106,11 +1106,9 @@ static int dvb_get_stc(struct dmx_demux *demux, unsigned int num,
 	struct av7110 *av7110;
 
 	/* pointer casting paranoia... */
-	if (WARN_ON(!demux))
-		return -EIO;
+	BUG_ON(!demux);
 	dvbdemux = demux->priv;
-	if (WARN_ON(!dvbdemux))
-		return -EIO;
+	BUG_ON(!dvbdemux);
 	av7110 = dvbdemux->priv;
 
 	dprintk(4, "%p\n", av7110);
@@ -2366,7 +2364,7 @@ static int av7110_attach(struct saa7146_dev* dev,
 		budgetpatch = 0;
 		/* autodetect the presence of budget patch
 		 * this only works if saa7146 has been recently
-		 * reset with MASK_31 to MC1
+		 * reset with with MASK_31 to MC1
 		 *
 		 * will wait for VBI_B event (vertical blank at port B)
 		 * and will reset GPIO3 after VBI_B is detected.

@@ -189,7 +189,7 @@ static void ark3116_port_remove(struct usb_serial_port *port)
 
 static void ark3116_set_termios(struct tty_struct *tty,
 				struct usb_serial_port *port,
-				const struct ktermios *old_termios)
+				struct ktermios *old_termios)
 {
 	struct usb_serial *serial = port->serial;
 	struct ark3116_private *priv = usb_get_serial_port_data(port);
@@ -200,17 +200,31 @@ static void ark3116_set_termios(struct tty_struct *tty,
 	__u8 lcr, hcr, eval;
 
 	/* set data bit count */
-	lcr = UART_LCR_WLEN(tty_get_char_size(cflag));
-
+	switch (cflag & CSIZE) {
+	case CS5:
+		lcr = UART_LCR_WLEN5;
+		break;
+	case CS6:
+		lcr = UART_LCR_WLEN6;
+		break;
+	case CS7:
+		lcr = UART_LCR_WLEN7;
+		break;
+	default:
+	case CS8:
+		lcr = UART_LCR_WLEN8;
+		break;
+	}
 	if (cflag & CSTOPB)
 		lcr |= UART_LCR_STOP;
 	if (cflag & PARENB)
 		lcr |= UART_LCR_PARITY;
 	if (!(cflag & PARODD))
 		lcr |= UART_LCR_EPAR;
+#ifdef CMSPAR
 	if (cflag & CMSPAR)
 		lcr |= UART_LCR_SPAR;
-
+#endif
 	/* handshake control */
 	hcr = (cflag & CRTSCTS) ? 0x03 : 0x00;
 
@@ -433,11 +447,10 @@ static int ark3116_tiocmset(struct tty_struct *tty,
 	return 0;
 }
 
-static int ark3116_break_ctl(struct tty_struct *tty, int break_state)
+static void ark3116_break_ctl(struct tty_struct *tty, int break_state)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct ark3116_private *priv = usb_get_serial_port_data(port);
-	int ret;
 
 	/* LCR is also used for other things: protect access */
 	mutex_lock(&priv->hw_lock);
@@ -447,11 +460,9 @@ static int ark3116_break_ctl(struct tty_struct *tty, int break_state)
 	else
 		priv->lcr &= ~UART_LCR_SBC;
 
-	ret = ark3116_write_reg(port->serial, UART_LCR, priv->lcr);
+	ark3116_write_reg(port->serial, UART_LCR, priv->lcr);
 
 	mutex_unlock(&priv->hw_lock);
-
-	return ret;
 }
 
 static void ark3116_update_msr(struct usb_serial_port *port, __u8 msr)

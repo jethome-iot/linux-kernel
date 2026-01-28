@@ -1260,14 +1260,11 @@ static int emac_tso_csum(struct emac_adapter *adpt,
 		if (skb->protocol == htons(ETH_P_IP)) {
 			u32 pkt_len = ((unsigned char *)ip_hdr(skb) - skb->data)
 				       + ntohs(ip_hdr(skb)->tot_len);
-			if (skb->len > pkt_len) {
-				ret = pskb_trim(skb, pkt_len);
-				if (unlikely(ret))
-					return ret;
-			}
+			if (skb->len > pkt_len)
+				pskb_trim(skb, pkt_len);
 		}
 
-		hdr_len = skb_tcp_all_headers(skb);
+		hdr_len = skb_transport_offset(skb) + tcp_hdrlen(skb);
 		if (unlikely(skb->len == hdr_len)) {
 			/* we only need to do csum */
 			netif_warn(adpt, tx_err, adpt->netdev,
@@ -1342,7 +1339,7 @@ static void emac_tx_fill_tpd(struct emac_adapter *adpt,
 
 	/* if Large Segment Offload is (in TCP Segmentation Offload struct) */
 	if (TPD_LSO(tpd)) {
-		mapped_len = skb_tcp_all_headers(skb);
+		mapped_len = skb_transport_offset(skb) + tcp_hdrlen(skb);
 
 		tpbuf = GET_TPD_BUFFER(tx_q, tx_q->tpd.produce_idx);
 		tpbuf->length = mapped_len;
@@ -1468,7 +1465,7 @@ netdev_tx_t emac_mac_tx_buf_send(struct emac_adapter *adpt,
 	/* Make sure the are enough free descriptors to hold one
 	 * maximum-sized SKB.  We need one desc for each fragment,
 	 * one for the checksum (emac_tso_csum), one for TSO, and
-	 * one for the SKB header.
+	 * and one for the SKB header.
 	 */
 	if (emac_tpd_num_free_descs(tx_q) < (MAX_SKB_FRAGS + 3))
 		netif_stop_queue(adpt->netdev);

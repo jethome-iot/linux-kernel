@@ -41,12 +41,16 @@ struct device *grudev = &gru_device;
  */
 int gru_cpu_fault_map_id(void)
 {
+#ifdef CONFIG_IA64
+	return uv_blade_processor_id() % GRU_NUM_TFM;
+#else
 	int cpu = smp_processor_id();
 	int id, core;
 
 	core = uv_cpu_core_number(cpu);
 	id = core + UV_MAX_INT_CORES * uv_cpu_socket_number(cpu);
 	return id;
+#endif
 }
 
 /*--------- ASID Management -------------------------------------------
@@ -148,7 +152,7 @@ static int gru_assign_asid(struct gru_state *gru)
  * Optionally, build an array of chars that contain the bit numbers allocated.
  */
 static unsigned long reserve_resources(unsigned long *p, int n, int mmax,
-				       signed char *idx)
+				       char *idx)
 {
 	unsigned long bits = 0;
 	int i;
@@ -166,14 +170,14 @@ static unsigned long reserve_resources(unsigned long *p, int n, int mmax,
 }
 
 unsigned long gru_reserve_cb_resources(struct gru_state *gru, int cbr_au_count,
-				       signed char *cbmap)
+				       char *cbmap)
 {
 	return reserve_resources(&gru->gs_cbr_map, cbr_au_count, GRU_CBR_AU,
 				 cbmap);
 }
 
 unsigned long gru_reserve_ds_resources(struct gru_state *gru, int dsr_au_count,
-				       signed char *dsmap)
+				       char *dsmap)
 {
 	return reserve_resources(&gru->gs_dsr_map, dsr_au_count, GRU_DSR_AU,
 				 dsmap);

@@ -14,6 +14,7 @@
 #define OCXL_NUM_MINORS 256 /* Total to reserve */
 
 static dev_t ocxl_dev;
+static struct class *ocxl_class;
 static DEFINE_MUTEX(minors_idr_lock);
 static struct idr minors_idr;
 
@@ -73,6 +74,7 @@ static long afu_ioctl_attach(struct ocxl_context *ctx,
 {
 	struct ocxl_ioctl_attach arg;
 	u64 amr = 0;
+	int rc;
 
 	pr_debug("%s for context %d\n", __func__, ctx->pasid);
 
@@ -84,7 +86,8 @@ static long afu_ioctl_attach(struct ocxl_context *ctx,
 		return -EINVAL;
 
 	amr = arg.amr & mfspr(SPRN_UAMOR);
-	return ocxl_context_attach(ctx, amr, current->mm);
+	rc = ocxl_context_attach(ctx, amr, current->mm);
+	return rc;
 }
 
 static long afu_ioctl_get_metadata(struct ocxl_context *ctx,
@@ -184,7 +187,7 @@ static irqreturn_t irq_handler(void *private)
 {
 	struct eventfd_ctx *ev_ctx = private;
 
-	eventfd_signal(ev_ctx);
+	eventfd_signal(ev_ctx, 1);
 	return IRQ_HANDLED;
 }
 
@@ -508,16 +511,6 @@ static void ocxl_file_make_invisible(struct ocxl_file_info *info)
 	cdev_del(&info->cdev);
 }
 
-static char *ocxl_devnode(const struct device *dev, umode_t *mode)
-{
-	return kasprintf(GFP_KERNEL, "ocxl/%s", dev_name(dev));
-}
-
-static const struct class ocxl_class = {
-	.name =		"ocxl",
-	.devnode =	ocxl_devnode,
-};
-
 int ocxl_file_register_afu(struct ocxl_afu *afu)
 {
 	int minor;
@@ -538,7 +531,7 @@ int ocxl_file_register_afu(struct ocxl_afu *afu)
 
 	info->dev.parent = &fn->dev;
 	info->dev.devt = MKDEV(MAJOR(ocxl_dev), minor);
-	info->dev.class = &ocxl_class;
+	info->dev.class = ocxl_class;
 	info->dev.release = info_release;
 
 	info->afu = afu;
@@ -593,6 +586,11 @@ void ocxl_file_unregister_afu(struct ocxl_afu *afu)
 	device_unregister(&info->dev);
 }
 
+static char *ocxl_devnode(struct device *dev, umode_t *mode)
+{
+	return kasprintf(GFP_KERNEL, "ocxl/%s", dev_name(dev));
+}
+
 int ocxl_file_init(void)
 {
 	int rc;
@@ -605,19 +603,20 @@ int ocxl_file_init(void)
 		return rc;
 	}
 
-	rc = class_register(&ocxl_class);
-	if (rc) {
+	ocxl_class = class_create(THIS_MODULE, "ocxl");
+	if (IS_ERR(ocxl_class)) {
 		pr_err("Unable to create ocxl class\n");
 		unregister_chrdev_region(ocxl_dev, OCXL_NUM_MINORS);
-		return rc;
+		return PTR_ERR(ocxl_class);
 	}
 
+	ocxl_class->devnode = ocxl_devnode;
 	return 0;
 }
 
 void ocxl_file_exit(void)
 {
-	class_unregister(&ocxl_class);
+	class_destroy(ocxl_class);
 	unregister_chrdev_region(ocxl_dev, OCXL_NUM_MINORS);
 	idr_destroy(&minors_idr);
 }

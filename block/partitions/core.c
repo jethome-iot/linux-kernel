@@ -8,11 +8,13 @@
 #include <linux/major.h>
 #include <linux/slab.h>
 #include <linux/ctype.h>
+#include <linux/genhd.h>
 #include <linux/vmalloc.h>
+#include <linux/blktrace_api.h>
 #include <linux/raid/detect.h>
 #include "check.h"
 
-static int (*const check_part[])(struct parsed_partitions *) = {
+static int (*check_part[])(struct parsed_partitions *) = {
 	/*
 	 * Probe partition formats with tables at disk address 0
 	 * that also have an ADFS boot block at 0xdc0.
@@ -85,15 +87,23 @@ static int (*const check_part[])(struct parsed_partitions *) = {
 	NULL
 };
 
+static void bdev_set_nr_sectors(struct block_device *bdev, sector_t sectors)
+{
+	spin_lock(&bdev->bd_size_lock);
+	i_size_write(bdev->bd_inode, (loff_t)sectors << SECTOR_SHIFT);
+	spin_unlock(&bdev->bd_size_lock);
+}
+
 static struct parsed_partitions *allocate_partitions(struct gendisk *hd)
 {
 	struct parsed_partitions *state;
-	int nr = DISK_MAX_PARTS;
+	int nr;
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return NULL;
 
+	nr = disk_max_parts(hd);
 	state->parts = vzalloc(array_size(nr, sizeof(state->parts[0])));
 	if (!state->parts) {
 		kfree(state);
@@ -191,13 +201,21 @@ static ssize_t part_ro_show(struct device *dev,
 static ssize_t part_alignment_offset_show(struct device *dev,
 					  struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u\n", bdev_alignment_offset(dev_to_bdev(dev)));
+	struct block_device *bdev = dev_to_bdev(dev);
+
+	return sprintf(buf, "%u\n",
+		queue_limit_alignment_offset(&bdev->bd_disk->queue->limits,
+				bdev->bd_start_sect));
 }
 
 static ssize_t part_discard_alignment_show(struct device *dev,
 					   struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u\n", bdev_discard_alignment(dev_to_bdev(dev)));
+	struct block_device *bdev = dev_to_bdev(dev);
+
+	return sprintf(buf, "%u\n",
+		queue_limit_discard_alignment(&bdev->bd_disk->queue->limits,
+				bdev->bd_start_sect));
 }
 
 static DEVICE_ATTR(partition, 0444, part_partition_show, NULL);
@@ -228,7 +246,7 @@ static struct attribute *part_attrs[] = {
 	NULL
 };
 
-static const struct attribute_group part_attr_group = {
+static struct attribute_group part_attr_group = {
 	.attrs = part_attrs,
 };
 
@@ -246,9 +264,9 @@ static void part_release(struct device *dev)
 	iput(dev_to_bdev(dev)->bd_inode);
 }
 
-static int part_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int part_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct block_device *part = dev_to_bdev(dev);
+	struct block_device *part = dev_to_bdev(dev);
 
 	add_uevent_var(env, "PARTN=%u", part->bd_partno);
 	if (part->bd_meta_info && part->bd_meta_info->volname[0])
@@ -256,21 +274,30 @@ static int part_uevent(const struct device *dev, struct kobj_uevent_env *env)
 	return 0;
 }
 
-const struct device_type part_type = {
+struct device_type part_type = {
 	.name		= "partition",
 	.groups		= part_attr_groups,
 	.release	= part_release,
 	.uevent		= part_uevent,
 };
 
-void drop_partition(struct block_device *part)
+static void delete_partition(struct block_device *part)
 {
 	lockdep_assert_held(&part->bd_disk->open_mutex);
 
+	fsync_bdev(part);
+	__invalidate_device(part, true);
+
 	xa_erase(&part->bd_disk->part_tbl, part->bd_partno);
 	kobject_put(part->bd_holder_dir);
-
 	device_del(&part->bd_device);
+
+	/*
+	 * Remove the block device from the inode hash, so that it cannot be
+	 * looked up any more even when openers still hold references.
+	 */
+	remove_inode_hash(part->bd_inode);
+
 	put_device(&part->bd_device);
 }
 
@@ -279,7 +306,7 @@ static ssize_t whole_disk_show(struct device *dev,
 {
 	return 0;
 }
-static const DEVICE_ATTR(whole_disk, 0444, whole_disk_show, NULL);
+static DEVICE_ATTR(whole_disk, 0444, whole_disk_show, NULL);
 
 /*
  * Must be called either with open_mutex held, before a disk can be opened or
@@ -298,17 +325,25 @@ static struct block_device *add_partition(struct gendisk *disk, int partno,
 
 	lockdep_assert_held(&disk->open_mutex);
 
-	if (partno >= DISK_MAX_PARTS)
+	if (partno >= disk_max_parts(disk))
 		return ERR_PTR(-EINVAL);
 
 	/*
 	 * Partitions are not supported on zoned block devices that are used as
 	 * such.
 	 */
-	if (bdev_is_zoned(disk->part0)) {
+	switch (disk->queue->limits.zoned) {
+	case BLK_ZONED_HM:
 		pr_warn("%s: partitions not supported on host managed zoned block device\n",
 			disk->disk_name);
 		return ERR_PTR(-ENXIO);
+	case BLK_ZONED_HA:
+		pr_info("%s: disabling host aware zoned block device support due to partitions\n",
+			disk->disk_name);
+		blk_queue_set_zoned(disk, BLK_ZONED_NONE);
+		break;
+	case BLK_ZONED_NONE:
+		break;
 	}
 
 	if (xa_load(&disk->part_tbl, partno))
@@ -419,21 +454,10 @@ static bool partition_overlaps(struct gendisk *disk, sector_t start,
 int bdev_add_partition(struct gendisk *disk, int partno, sector_t start,
 		sector_t length)
 {
-	sector_t capacity = get_capacity(disk), end;
 	struct block_device *part;
 	int ret;
 
 	mutex_lock(&disk->open_mutex);
-	if (check_add_overflow(start, length, &end)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (start >= capacity || end > capacity) {
-		ret = -EINVAL;
-		goto out;
-	}
-
 	if (!disk_live(disk)) {
 		ret = -ENXIO;
 		goto out;
@@ -468,21 +492,10 @@ int bdev_del_partition(struct gendisk *disk, int partno)
 		goto out_unlock;
 
 	ret = -EBUSY;
-	if (atomic_read(&part->bd_openers))
+	if (part->bd_openers)
 		goto out_unlock;
 
-	/*
-	 * We verified that @part->bd_openers is zero above and so
-	 * @part->bd_holder{_ops} can't be set. And since we hold
-	 * @disk->open_mutex the device can't be claimed by anyone.
-	 *
-	 * So no need to call @part->bd_holder_ops->mark_dead() here.
-	 * Just delete the partition and invalidate it.
-	 */
-
-	remove_inode_hash(part->bd_inode);
-	invalidate_bdev(part);
-	drop_partition(part);
+	delete_partition(part);
 	ret = 0;
 out_unlock:
 	mutex_unlock(&disk->open_mutex);
@@ -529,6 +542,17 @@ static bool disk_unlock_native_capacity(struct gendisk *disk)
 	return true;
 }
 
+void blk_drop_partitions(struct gendisk *disk)
+{
+	struct block_device *part;
+	unsigned long idx;
+
+	lockdep_assert_held(&disk->open_mutex);
+
+	xa_for_each_start(&disk->part_tbl, idx, part, 1)
+		delete_partition(part);
+}
+
 static bool blk_add_partition(struct gendisk *disk,
 		struct parsed_partitions *state, int p)
 {
@@ -567,8 +591,8 @@ static bool blk_add_partition(struct gendisk *disk,
 	part = add_partition(disk, p, from, size, state->parts[p].flags,
 			     &state->parts[p].info);
 	if (IS_ERR(part) && PTR_ERR(part) != -ENXIO) {
-		printk(KERN_ERR " %s: p%d could not be added: %pe\n",
-		       disk->disk_name, p, part);
+		printk(KERN_ERR " %s: p%d could not be added: %ld\n",
+		       disk->disk_name, p, -PTR_ERR(part));
 		return true;
 	}
 
@@ -584,10 +608,7 @@ static int blk_add_partitions(struct gendisk *disk)
 	struct parsed_partitions *state;
 	int ret = -EAGAIN, p;
 
-	if (disk->flags & GENHD_FL_NO_PART)
-		return 0;
-
-	if (test_bit(GD_SUPPRESS_PART_SCAN, &disk->state))
+	if (!disk_part_scan_enabled(disk))
 		return 0;
 
 	state = check_partition(disk);
@@ -610,7 +631,7 @@ static int blk_add_partitions(struct gendisk *disk)
 	/*
 	 * Partitions are not supported on host managed zoned block devices.
 	 */
-	if (bdev_is_zoned(disk->part0)) {
+	if (disk->queue->limits.zoned == BLK_ZONED_HM) {
 		pr_warn("%s: ignoring partition table on host managed zoned block device\n",
 			disk->disk_name);
 		ret = 0;
@@ -645,8 +666,6 @@ out_free_state:
 
 int bdev_disk_changed(struct gendisk *disk, bool invalidate)
 {
-	struct block_device *part;
-	unsigned long idx;
 	int ret = 0;
 
 	lockdep_assert_held(&disk->open_mutex);
@@ -659,24 +678,8 @@ rescan:
 		return -EBUSY;
 	sync_blockdev(disk->part0);
 	invalidate_bdev(disk->part0);
+	blk_drop_partitions(disk);
 
-	xa_for_each_start(&disk->part_tbl, idx, part, 1) {
-		/*
-		 * Remove the block device from the inode hash, so that
-		 * it cannot be looked up any more even when openers
-		 * still hold references.
-		 */
-		remove_inode_hash(part->bd_inode);
-
-		/*
-		 * If @disk->open_partitions isn't elevated but there's
-		 * still an active holder of that block device things
-		 * are broken.
-		 */
-		WARN_ON_ONCE(atomic_read(&part->bd_openers));
-		invalidate_bdev(part);
-		drop_partition(part);
-	}
 	clear_bit(GD_NEED_PART_SCAN, &disk->state);
 
 	/*
@@ -688,7 +691,7 @@ rescan:
 	 * userspace for this particular setup.
 	 */
 	if (invalidate) {
-		if (!(disk->flags & GENHD_FL_NO_PART) ||
+		if (disk_part_scan_enabled(disk) ||
 		    !(disk->flags & GENHD_FL_REMOVABLE))
 			set_capacity(disk, 0);
 	}
@@ -716,19 +719,25 @@ EXPORT_SYMBOL_GPL(bdev_disk_changed);
 void *read_part_sector(struct parsed_partitions *state, sector_t n, Sector *p)
 {
 	struct address_space *mapping = state->disk->part0->bd_inode->i_mapping;
-	struct folio *folio;
+	struct page *page;
 
 	if (n >= get_capacity(state->disk)) {
 		state->access_beyond_eod = true;
-		goto out;
+		return NULL;
 	}
 
-	folio = read_mapping_folio(mapping, n >> PAGE_SECTORS_SHIFT, NULL);
-	if (IS_ERR(folio))
+	page = read_mapping_page(mapping,
+			(pgoff_t)(n >> (PAGE_SHIFT - 9)), NULL);
+	if (IS_ERR(page))
 		goto out;
+	if (PageError(page))
+		goto out_put_page;
 
-	p->v = folio;
-	return folio_address(folio) + offset_in_folio(folio, n * SECTOR_SIZE);
+	p->v = page;
+	return (unsigned char *)page_address(page) +
+			((n & ((1 << (PAGE_SHIFT - 9)) - 1)) << SECTOR_SHIFT);
+out_put_page:
+	put_page(page);
 out:
 	p->v = NULL;
 	return NULL;

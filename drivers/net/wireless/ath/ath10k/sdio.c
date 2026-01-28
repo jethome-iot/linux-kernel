@@ -3,7 +3,6 @@
  * Copyright (c) 2004-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2012,2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2016-2017 Erik Stromdahl <erik.stromdahl@gmail.com>
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -1058,7 +1057,7 @@ static int ath10k_sdio_mbox_proc_pending_irqs(struct ath10k *ar,
 
 out:
 	/* An optimization to bypass reading the IRQ status registers
-	 * unnecessarily which can re-wake the target, if upper layers
+	 * unecessarily which can re-wake the target, if upper layers
 	 * determine that we are in a low-throughput mode, we can rely on
 	 * taking another interrupt rather than re-checking the status
 	 * registers which can re-wake the target.
@@ -1634,7 +1633,7 @@ static void ath10k_sdio_hif_power_down(struct ath10k *ar)
 		return;
 	}
 
-	ret = mmc_hw_reset(ar_sdio->func->card);
+	ret = mmc_hw_reset(ar_sdio->func->card->host);
 	if (ret)
 		ath10k_warn(ar, "unable to reset sdio: %d\n", ret);
 
@@ -2390,7 +2389,7 @@ static int ath10k_sdio_dump_memory_generic(struct ath10k *ar,
 						      buf,
 						      current_region->len);
 
-	/* No individual memory sections defined so we can
+	/* No individiual memory sections defined so we can
 	 * copy the entire memory region.
 	 */
 	if (fast_dump)
@@ -2532,7 +2531,8 @@ static int ath10k_sdio_probe(struct sdio_func *func,
 		return -ENOMEM;
 	}
 
-	netif_napi_add(&ar->napi_dev, &ar->napi, ath10k_sdio_napi_poll);
+	netif_napi_add(&ar->napi_dev, &ar->napi, ath10k_sdio_napi_poll,
+		       ATH10K_NAPI_BUDGET);
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT,
 		   "sdio new func %d vendor 0x%x device 0x%x block 0x%x/0x%x\n",

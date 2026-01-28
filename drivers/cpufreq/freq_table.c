@@ -9,6 +9,7 @@
 
 #include <linux/cpufreq.h>
 #include <linux/module.h>
+#include <trace/hooks/cpufreq.h>
 
 /*********************************************************************
  *                     FREQUENCY TABLE HELPERS                       *
@@ -51,6 +52,7 @@ int cpufreq_frequency_table_cpuinfo(struct cpufreq_policy *policy,
 			max_freq = freq;
 	}
 
+	trace_android_vh_freq_table_limits(policy, min_freq, max_freq);
 	policy->min = policy->cpuinfo.min_freq = min_freq;
 	policy->max = max_freq;
 	/*
@@ -355,13 +357,8 @@ int cpufreq_table_validate_and_sort(struct cpufreq_policy *policy)
 {
 	int ret;
 
-	if (!policy->freq_table) {
-		/* Freq table must be passed by drivers with target_index() */
-		if (has_target_index())
-			return -EINVAL;
-
+	if (!policy->freq_table)
 		return 0;
-	}
 
 	ret = cpufreq_frequency_table_cpuinfo(policy, policy->freq_table);
 	if (ret)
@@ -372,3 +369,4 @@ int cpufreq_table_validate_and_sort(struct cpufreq_policy *policy)
 
 MODULE_AUTHOR("Dominik Brodowski <linux@brodo.de>");
 MODULE_DESCRIPTION("CPUfreq frequency table helpers");
+MODULE_LICENSE("GPL");

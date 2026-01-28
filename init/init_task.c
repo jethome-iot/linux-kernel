@@ -12,7 +12,6 @@
 #include <linux/audit.h>
 #include <linux/numa.h>
 #include <linux/scs.h>
-#include <linux/plist.h>
 
 #include <linux/uaccess.h>
 
@@ -52,7 +51,8 @@ static struct sighand_struct init_sighand = {
 };
 
 #ifdef CONFIG_SHADOW_CALL_STACK
-unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] = {
+unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)]
+		__init_task_data = {
 	[(SCS_SIZE / sizeof(long)) - 1] = SCS_END_MAGIC
 };
 #endif
@@ -61,7 +61,12 @@ unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] = {
  * Set up the first task table, touch at your own risk!. Base=0,
  * limit=0x1fffff (=2MB)
  */
-struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
+struct task_struct init_task
+#ifdef CONFIG_ARCH_TASK_STRUCT_ON_STACK
+	__init_task_data
+#endif
+	__aligned(L1_CACHE_BYTES)
+= {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	.thread_info	= INIT_THREAD_INFO(init_task),
 	.stack_refcount	= REFCOUNT_INIT(1),
@@ -80,7 +85,6 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.nr_cpus_allowed= NR_CPUS,
 	.mm		= NULL,
 	.active_mm	= &init_mm,
-	.faults_disabled_mapping = NULL,
 	.restart_block	= {
 		.fn = do_no_restart_syscall,
 	},
@@ -128,6 +132,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.pi_lock	= __RAW_SPIN_LOCK_UNLOCKED(init_task.pi_lock),
 	.timer_slack_ns = 50000, /* 50 usec default slack */
 	.thread_pid	= &init_struct_pid,
+	.thread_group	= LIST_HEAD_INIT(init_task.thread_group),
 	.thread_node	= LIST_HEAD_INIT(init_signals.thread_head),
 #ifdef CONFIG_AUDIT
 	.loginuid	= INVALID_UID,
@@ -152,7 +157,6 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.trc_reader_nesting = 0,
 	.trc_reader_special.s = 0,
 	.trc_holdout_list = LIST_HEAD_INIT(init_task.trc_holdout_list),
-	.trc_blkd_node = LIST_HEAD_INIT(init_task.trc_blkd_node),
 #endif
 #ifdef CONFIG_CPUSETS
 	.mems_allowed_seq = SEQCNT_SPINLOCK_ZERO(init_task.mems_allowed_seq,
@@ -178,6 +182,11 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 #endif
 #ifdef CONFIG_KCSAN
 	.kcsan_ctx = {
+		.disable_count		= 0,
+		.atomic_next		= 0,
+		.atomic_nest_count	= 0,
+		.in_flat_atomic		= false,
+		.access_mask		= 0,
 		.scoped_accesses	= {LIST_POISON1, NULL},
 	},
 #endif
@@ -204,6 +213,12 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 #endif
 #ifdef CONFIG_SECCOMP_FILTER
 	.seccomp	= { .filter_count = ATOMIC_INIT(0) },
+#endif
+#ifndef CONFIG_AMLOGIC_MEMORY_OPT
+#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
+	.android_vendor_data1 = {0, },
+	.android_oem_data1 = {0, },
+#endif
 #endif
 };
 EXPORT_SYMBOL(init_task);

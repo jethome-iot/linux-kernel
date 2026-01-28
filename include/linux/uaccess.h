@@ -10,27 +10,45 @@
 
 #include <asm/uaccess.h>
 
+#ifdef CONFIG_SET_FS
 /*
- * Architectures that support memory tagging (assigning tags to memory regions,
- * embedding these tags into addresses that point to these memory regions, and
- * checking that the memory and the pointer tags match on memory accesses)
- * redefine this macro to strip tags from pointers.
- *
- * Passing down mm_struct allows to define untagging rules on per-process
- * basis.
- *
- * It's defined as noop for architectures that don't support memory tagging.
+ * Force the uaccess routines to be wired up for actual userspace access,
+ * overriding any possible set_fs(KERNEL_DS) still lingering around.  Undone
+ * using force_uaccess_end below.
  */
-#ifndef untagged_addr
-#define untagged_addr(addr) (addr)
+static inline mm_segment_t force_uaccess_begin(void)
+{
+	mm_segment_t fs = get_fs();
+
+	set_fs(USER_DS);
+	return fs;
+}
+
+static inline void force_uaccess_end(mm_segment_t oldfs)
+{
+	set_fs(oldfs);
+}
+#else /* CONFIG_SET_FS */
+typedef struct {
+	/* empty dummy */
+} mm_segment_t;
+
+#ifndef TASK_SIZE_MAX
+#define TASK_SIZE_MAX			TASK_SIZE
 #endif
 
-#ifndef untagged_addr_remote
-#define untagged_addr_remote(mm, addr)	({		\
-	mmap_assert_locked(mm);				\
-	untagged_addr(addr);				\
-})
-#endif
+#define uaccess_kernel()		(false)
+#define user_addr_max()			(TASK_SIZE_MAX)
+
+static inline mm_segment_t force_uaccess_begin(void)
+{
+	return (mm_segment_t) { };
+}
+
+static inline void force_uaccess_end(mm_segment_t oldfs)
+{
+}
+#endif /* CONFIG_SET_FS */
 
 /*
  * Architectures should provide two primitives (raw_copy_{to,from}_user())
@@ -80,28 +98,20 @@
 static __always_inline __must_check unsigned long
 __copy_from_user_inatomic(void *to, const void __user *from, unsigned long n)
 {
-	unsigned long res;
-
-	instrument_copy_from_user_before(to, from, n);
+	instrument_copy_from_user(to, from, n);
 	check_object_size(to, n, false);
-	res = raw_copy_from_user(to, from, n);
-	instrument_copy_from_user_after(to, from, n, res);
-	return res;
+	return raw_copy_from_user(to, from, n);
 }
 
 static __always_inline __must_check unsigned long
 __copy_from_user(void *to, const void __user *from, unsigned long n)
 {
-	unsigned long res;
-
 	might_fault();
-	instrument_copy_from_user_before(to, from, n);
 	if (should_fail_usercopy())
 		return n;
+	instrument_copy_from_user(to, from, n);
 	check_object_size(to, n, false);
-	res = raw_copy_from_user(to, from, n);
-	instrument_copy_from_user_after(to, from, n, res);
-	return res;
+	return raw_copy_from_user(to, from, n);
 }
 
 /**
@@ -145,9 +155,8 @@ _copy_from_user(void *to, const void __user *from, unsigned long n)
 	unsigned long res = n;
 	might_fault();
 	if (!should_fail_usercopy() && likely(access_ok(from, n))) {
-		instrument_copy_from_user_before(to, from, n);
+		instrument_copy_from_user(to, from, n);
 		res = raw_copy_from_user(to, from, n);
-		instrument_copy_from_user_after(to, from, n, res);
 	}
 	if (unlikely(res))
 		memset(to + (n - res), 0, res);
@@ -179,7 +188,7 @@ _copy_to_user(void __user *, const void *, unsigned long);
 static __always_inline unsigned long __must_check
 copy_from_user(void *to, const void __user *from, unsigned long n)
 {
-	if (check_copy_size(to, n, false))
+	if (likely(check_copy_size(to, n, false)))
 		n = _copy_from_user(to, from, n);
 	return n;
 }
@@ -187,7 +196,7 @@ copy_from_user(void *to, const void __user *from, unsigned long n)
 static __always_inline unsigned long __must_check
 copy_to_user(void __user *to, const void *from, unsigned long n)
 {
-	if (check_copy_size(from, n, true))
+	if (likely(check_copy_size(from, n, true)))
 		n = _copy_to_user(to, from, n);
 	return n;
 }
@@ -385,25 +394,6 @@ long strncpy_from_user_nofault(char *dst, const void __user *unsafe_addr,
 		long count);
 long strnlen_user_nofault(const void __user *unsafe_addr, long count);
 
-#ifndef __get_kernel_nofault
-#define __get_kernel_nofault(dst, src, type, label)	\
-do {							\
-	type __user *p = (type __force __user *)(src);	\
-	type data;					\
-	if (__get_user(data, p))			\
-		goto label;				\
-	*(type *)dst = data;				\
-} while (0)
-
-#define __put_kernel_nofault(dst, src, type, label)	\
-do {							\
-	type __user *p = (type __force __user *)(dst);	\
-	type data = *(type *)src;			\
-	if (__put_user(data, p))			\
-		goto label;				\
-} while (0)
-#endif
-
 /**
  * get_kernel_nofault(): safely attempt to read from a location
  * @val: read into this variable
@@ -437,6 +427,8 @@ static inline void user_access_restore(unsigned long flags) { }
 #endif
 
 #ifdef CONFIG_HARDENED_USERCOPY
+void usercopy_warn(const char *name, const char *detail, bool to_user,
+		   unsigned long offset, unsigned long len);
 void __noreturn usercopy_abort(const char *name, const char *detail,
 			       bool to_user, unsigned long offset,
 			       unsigned long len);

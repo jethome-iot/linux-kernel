@@ -32,6 +32,7 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_net.h>
 #include <linux/sched.h>
 #include <linux/serdev.h>
@@ -58,8 +59,9 @@ struct qcauart {
 	unsigned char *tx_buffer;
 };
 
-static ssize_t
-qca_tty_receive(struct serdev_device *serdev, const u8 *data, size_t count)
+static int
+qca_tty_receive(struct serdev_device *serdev, const unsigned char *data,
+		size_t count)
 {
 	struct qcauart *qca = serdev_device_get_drvdata(serdev);
 	struct net_device *netdev = qca->net_dev;
@@ -106,7 +108,7 @@ qca_tty_receive(struct serdev_device *serdev, const u8 *data, size_t count)
 			qca->rx_skb->protocol = eth_type_trans(
 						qca->rx_skb, qca->rx_skb->dev);
 			skb_checksum_none_assert(qca->rx_skb);
-			netif_rx(qca->rx_skb);
+			netif_rx_ni(qca->rx_skb);
 			qca->rx_skb = netdev_alloc_skb_ip_align(netdev,
 								netdev->mtu +
 								VLAN_ETH_HLEN);
@@ -402,7 +404,7 @@ static struct serdev_device_driver qca_uart_driver = {
 	.remove = qca_uart_remove,
 	.driver = {
 		.name = QCAUART_DRV_NAME,
-		.of_match_table = qca_uart_of_match,
+		.of_match_table = of_match_ptr(qca_uart_of_match),
 	},
 };
 

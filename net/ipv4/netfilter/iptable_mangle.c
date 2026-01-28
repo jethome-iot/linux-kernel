@@ -34,14 +34,14 @@ static const struct xt_table packet_mangler = {
 };
 
 static unsigned int
-ipt_mangle_out(void *priv, struct sk_buff *skb, const struct nf_hook_state *state)
+ipt_mangle_out(struct sk_buff *skb, const struct nf_hook_state *state, void *priv)
 {
-	unsigned int ret, verdict;
+	unsigned int ret;
 	const struct iphdr *iph;
+	u_int8_t tos;
 	__be32 saddr, daddr;
-	u32 mark;
+	u_int32_t mark;
 	int err;
-	u8 tos;
 
 	/* Save things which could affect route */
 	mark = skb->mark;
@@ -50,10 +50,9 @@ ipt_mangle_out(void *priv, struct sk_buff *skb, const struct nf_hook_state *stat
 	daddr = iph->daddr;
 	tos = iph->tos;
 
-	ret = ipt_do_table(priv, skb, state);
-	verdict = ret & NF_VERDICT_MASK;
+	ret = ipt_do_table(skb, state, priv);
 	/* Reroute for ANY change. */
-	if (verdict != NF_DROP && verdict != NF_STOLEN) {
+	if (ret != NF_DROP && ret != NF_STOLEN) {
 		iph = ip_hdr(skb);
 
 		if (iph->saddr != saddr ||
@@ -76,8 +75,8 @@ iptable_mangle_hook(void *priv,
 		     const struct nf_hook_state *state)
 {
 	if (state->hook == NF_INET_LOCAL_OUT)
-		return ipt_mangle_out(priv, skb, state);
-	return ipt_do_table(priv, skb, state);
+		return ipt_mangle_out(skb, state, priv);
+	return ipt_do_table(skb, state, priv);
 }
 
 static struct nf_hook_ops *mangle_ops __read_mostly;

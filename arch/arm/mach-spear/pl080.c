@@ -14,9 +14,8 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/spinlock_types.h>
-#include "spear.h"
-#include "misc_regs.h"
-#include "pl080.h"
+#include <mach/spear.h>
+#include <mach/misc_regs.h>
 
 static spinlock_t lock = __SPIN_LOCK_UNLOCKED(x);
 

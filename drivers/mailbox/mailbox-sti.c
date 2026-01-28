@@ -17,8 +17,8 @@
 #include <linux/mailbox_controller.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/slab.h>
 
 #include "mailbox.h"
@@ -403,18 +403,21 @@ MODULE_DEVICE_TABLE(of, sti_mailbox_match);
 
 static int sti_mbox_probe(struct platform_device *pdev)
 {
+	const struct of_device_id *match;
 	struct mbox_controller *mbox;
 	struct sti_mbox_device *mdev;
 	struct device_node *np = pdev->dev.of_node;
 	struct mbox_chan *chans;
+	struct resource *res;
 	int irq;
 	int ret;
 
-	pdev->dev.platform_data = (struct sti_mbox_pdata *)device_get_match_data(&pdev->dev);
-	if (!pdev->dev.platform_data) {
+	match = of_match_device(sti_mailbox_match, &pdev->dev);
+	if (!match) {
 		dev_err(&pdev->dev, "No configuration found\n");
 		return -ENODEV;
 	}
+	pdev->dev.platform_data = (struct sti_mbox_pdata *) match->data;
 
 	mdev = devm_kzalloc(&pdev->dev, sizeof(*mdev), GFP_KERNEL);
 	if (!mdev)
@@ -422,7 +425,8 @@ static int sti_mbox_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, mdev);
 
-	mdev->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	mdev->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(mdev->base))
 		return PTR_ERR(mdev->base);
 

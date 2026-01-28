@@ -113,7 +113,7 @@ static int dso__data_fd(struct dso *dso, struct machine *machine)
 	return fd;
 }
 
-static int test__dso_data(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
+int test__dso_data(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	struct machine machine;
 	struct dso *dso;
@@ -248,7 +248,7 @@ static int set_fd_limit(int n)
 	return setrlimit(RLIMIT_NOFILE, &rlim);
 }
 
-static int test__dso_data_cache(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
+int test__dso_data_cache(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	struct machine machine;
 	long nr_end, nr = open_files_cnt();
@@ -318,7 +318,7 @@ static long new_limit(int count)
 	return ret;
 }
 
-static int test__dso_data_reopen(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
+int test__dso_data_reopen(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	struct machine machine;
 	long nr_end, nr = open_files_cnt(), lim = new_limit(3);
@@ -393,16 +393,3 @@ static int test__dso_data_reopen(struct test_suite *test __maybe_unused, int sub
 	TEST_ASSERT_VAL("failed leaking files", nr == nr_end);
 	return 0;
 }
-
-
-static struct test_case tests__dso_data[] = {
-	TEST_CASE("read", dso_data),
-	TEST_CASE("cache", dso_data_cache),
-	TEST_CASE("reopen", dso_data_reopen),
-	{	.name = NULL, }
-};
-
-struct test_suite suite__dso_data = {
-	.desc = "DSO data tests",
-	.test_cases = tests__dso_data,
-};

@@ -46,7 +46,7 @@ void test_cgroup_v1v2(void)
 {
 	struct network_helper_opts opts = {};
 	int server_fd, client_fd, cgroup_fd;
-	static const int port = 60120;
+	static const int port = 60123;
 
 	/* Step 1: Check base connectivity works without any BPF. */
 	server_fd = start_server(AF_INET, SOCK_STREAM, NULL, port, 0);
@@ -71,7 +71,7 @@ void test_cgroup_v1v2(void)
 	}
 	ASSERT_OK(run_test(cgroup_fd, server_fd, false), "cgroup-v2-only");
 	setup_classid_environment();
-	set_classid();
+	set_classid(42);
 	ASSERT_OK(run_test(cgroup_fd, server_fd, true), "cgroup-v1v2");
 	cleanup_classid_environment();
 	close(server_fd);

@@ -11,7 +11,6 @@
  *  Code is based on s3fb
  */
 
-#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -318,6 +317,14 @@ struct dac_info
 	void *data;
 };
 
+
+static inline u8 dac_read_reg(struct dac_info *info, u8 reg)
+{
+	u8 code[2] = {reg, 0};
+	info->dac_read_regs(info->data, code, 1);
+	return code[1];
+}
+
 static inline void dac_read_regs(struct dac_info *info, u8 *code, int count)
 {
 	info->dac_read_regs(info->data, code, count);
@@ -558,9 +565,6 @@ static int arkfb_release(struct fb_info *info, int user)
 static int arkfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	int rv, mem, step;
-
-	if (!var->pixclock)
-		return -EINVAL;
 
 	/* Find appropriate format */
 	rv = svga_match_format (arkfb_formats, var, NULL);
@@ -924,7 +928,6 @@ static const struct fb_ops arkfb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= arkfb_open,
 	.fb_release	= arkfb_release,
-	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= arkfb_check_var,
 	.fb_set_par	= arkfb_set_par,
 	.fb_setcolreg	= arkfb_setcolreg,
@@ -933,7 +936,6 @@ static const struct fb_ops arkfb_ops = {
 	.fb_fillrect	= arkfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= arkfb_imageblit,
-	__FB_DEFAULT_IOMEM_OPS_MMAP,
 	.fb_get_caps    = svga_get_caps,
 };
 
@@ -950,10 +952,6 @@ static int ark_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct arkfb_info *par;
 	int rc;
 	u8 regval;
-
-	rc = aperture_remove_conflicting_pci_devices(dev, "arkfb");
-	if (rc < 0)
-		return rc;
 
 	/* Ignore secondary VGA device because there is no VGA arbitration */
 	if (! svga_primary_device(dev)) {
@@ -1189,12 +1187,7 @@ static int __init arkfb_init(void)
 
 #ifndef MODULE
 	char *option = NULL;
-#endif
 
-	if (fb_modesetting_disabled("arkfb"))
-		return -ENODEV;
-
-#ifndef MODULE
 	if (fb_get_options("arkfb", &option))
 		return -ENODEV;
 

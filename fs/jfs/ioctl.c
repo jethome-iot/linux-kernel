@@ -70,7 +70,7 @@ int jfs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 	return 0;
 }
 
-int jfs_fileattr_set(struct mnt_idmap *idmap,
+int jfs_fileattr_set(struct user_namespace *mnt_userns,
 		     struct dentry *dentry, struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -96,7 +96,7 @@ int jfs_fileattr_set(struct mnt_idmap *idmap,
 	jfs_inode->mode2 = flags;
 
 	jfs_set_inode_flags(inode);
-	inode_set_ctime_current(inode);
+	inode->i_ctime = current_time(inode);
 	mark_inode_dirty(inode);
 
 	return 0;
@@ -110,13 +110,14 @@ long jfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case FITRIM:
 	{
 		struct super_block *sb = inode->i_sb;
+		struct request_queue *q = bdev_get_queue(sb->s_bdev);
 		struct fstrim_range range;
 		s64 ret = 0;
 
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
 
-		if (!bdev_max_discard_sectors(sb->s_bdev)) {
+		if (!blk_queue_discard(q)) {
 			jfs_warn("FITRIM not supported on device");
 			return -EOPNOTSUPP;
 		}
@@ -126,7 +127,7 @@ long jfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 
 		range.minlen = max_t(unsigned int, range.minlen,
-				     bdev_discard_granularity(sb->s_bdev));
+			q->limits.discard_granularity);
 
 		ret = jfs_ioc_trim(inode, &range);
 		if (ret < 0)

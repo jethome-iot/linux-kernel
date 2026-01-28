@@ -6,8 +6,7 @@ Supported chips:
 
   * Maxim ds18*20 based temperature sensors.
   * Maxim ds1825 based temperature sensors.
-  * GXCAS GX20MH01 temperature sensor.
-  * Maxim MAX31850 thermoelement interface.
+  * GXCAS GC20MH01 temperature sensor.
 
 Author: Evgeniy Polyakov <johnpol@2ka.mipt.ru>
 
@@ -16,7 +15,7 @@ Description
 -----------
 
 w1_therm provides basic temperature conversion for ds18*20, ds28ea00, GX20MH01
-and MAX31850 devices.
+devices.
 
 Supported family codes:
 
@@ -58,7 +57,7 @@ A strong pullup will be applied during the conversion if required.
 
 ``conv_time`` is used to get current conversion time (read), and
 adjust it (write). A temperature conversion time depends on the device type and
-its current resolution. Default conversion time is set by the driver according
+it's current resolution. Default conversion time is set by the driver according
 to the device datasheet. A conversion time for many original device clones
 deviate from datasheet specs. There are three options: 1) manually set the
 correct conversion time by writing a value in milliseconds to ``conv_time``; 2)
@@ -138,7 +137,3 @@ bits in Config register; R2 bit in Config register enabling 13 and 14 bit
 resolutions. The device is powered up in 14-bit resolution mode. The conversion
 times specified in the datasheet are too low and have to be increased. The
 device supports driver features ``1`` and ``2``.
-
-MAX31850 device shares family number 0x3B with DS1825. The device is generally
-compatible with DS1825. The higher 4 bits of Config register read all 1,
-indicating 15, but the device is always operating in 14-bit resolution mode.

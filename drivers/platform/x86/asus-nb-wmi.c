@@ -16,8 +16,6 @@
 #include <linux/dmi.h>
 #include <linux/i8042.h>
 
-#include <acpi/video.h>
-
 #include "asus-wmi.h"
 
 #define	ASUS_NB_WMI_FILE	"asus-nb-wmi"
@@ -45,46 +43,28 @@ MODULE_PARM_DESC(wapf, "WAPF value");
 
 static int tablet_mode_sw = -1;
 module_param(tablet_mode_sw, uint, 0444);
-MODULE_PARM_DESC(tablet_mode_sw, "Tablet mode detect: -1:auto 0:disable 1:kbd-dock 2:lid-flip 3:lid-flip-rog");
+MODULE_PARM_DESC(tablet_mode_sw, "Tablet mode detect: -1:auto 0:disable 1:kbd-dock 2:lid-flip");
 
 static struct quirk_entry *quirks;
-static bool atkbd_reports_vol_keys;
 
-static bool asus_i8042_filter(unsigned char data, unsigned char str, struct serio *port)
+static bool asus_q500a_i8042_filter(unsigned char data, unsigned char str,
+			      struct serio *port)
 {
-	static bool extended_e0;
-	static bool extended_e1;
+	static bool extended;
+	bool ret = false;
 
 	if (str & I8042_STR_AUXDATA)
 		return false;
 
-	if (quirks->filter_i8042_e1_extended_codes) {
-		if (data == 0xe1) {
-			extended_e1 = true;
-			return true;
-		}
-
-		if (extended_e1) {
-			extended_e1 = false;
-			return true;
-		}
+	if (unlikely(data == 0xe1)) {
+		extended = true;
+		ret = true;
+	} else if (unlikely(extended)) {
+		extended = false;
+		ret = true;
 	}
 
-	if (data == 0xe0) {
-		extended_e0 = true;
-	} else if (extended_e0) {
-		extended_e0 = false;
-
-		switch (data & 0x7f) {
-		case 0x20: /* e0 20 / e0 a0, Volume Mute press / release */
-		case 0x2e: /* e0 2e / e0 ae, Volume Down press / release */
-		case 0x30: /* e0 30 / e0 b0, Volume Up press / release */
-			atkbd_reports_vol_keys = true;
-			break;
-		}
-	}
-
-	return false;
+	return ret;
 }
 
 static struct quirk_entry quirk_asus_unknown = {
@@ -93,16 +73,18 @@ static struct quirk_entry quirk_asus_unknown = {
 };
 
 static struct quirk_entry quirk_asus_q500a = {
-	.filter_i8042_e1_extended_codes = true,
+	.i8042_filter = asus_q500a_i8042_filter,
 	.wmi_backlight_set_devstate = true,
 };
 
 /*
  * For those machines that need software to control bt/wifi status
+ * and can't adjust brightness through ACPI interface
  * and have duplicate events(ACPI and WMI) for display toggle
  */
 static struct quirk_entry quirk_asus_x55u = {
 	.wapf = 4,
+	.wmi_backlight_power = true,
 	.wmi_backlight_set_devstate = true,
 	.no_display_toggle = true,
 };
@@ -114,6 +96,11 @@ static struct quirk_entry quirk_asus_wapf4 = {
 
 static struct quirk_entry quirk_asus_x200ca = {
 	.wapf = 2,
+	.wmi_backlight_set_devstate = true,
+};
+
+static struct quirk_entry quirk_asus_ux303ub = {
+	.wmi_backlight_native = true,
 	.wmi_backlight_set_devstate = true,
 };
 
@@ -141,10 +128,6 @@ static struct quirk_entry quirk_asus_tablet_mode = {
 	.tablet_switch_mode = asus_wmi_lid_flip_rog_devid,
 };
 
-static struct quirk_entry quirk_asus_ignore_fan = {
-	.wmi_ignore_fan = true,
-};
-
 static int dmi_matched(const struct dmi_system_id *dmi)
 {
 	pr_info("Identified laptop model '%s'\n", dmi->ident);
@@ -169,6 +152,11 @@ static const struct dmi_system_id asus_quirks[] = {
 			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK Computer Inc."),
 			DMI_MATCH(DMI_PRODUCT_NAME, "U32U"),
 		},
+		/*
+		 * Note this machine has a Brazos APU, and most Brazos Asus
+		 * machines need quirk_asus_x55u / wmi_backlight_power but
+		 * here acpi-video seems to work fine for backlight control.
+		 */
 		.driver_data = &quirk_asus_wapf4,
 	},
 	{
@@ -398,6 +386,15 @@ static const struct dmi_system_id asus_quirks[] = {
 	},
 	{
 		.callback = dmi_matched,
+		.ident = "ASUSTeK COMPUTER INC. UX303UB",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "UX303UB"),
+		},
+		.driver_data = &quirk_asus_ux303ub,
+	},
+	{
+		.callback = dmi_matched,
 		.ident = "ASUSTeK COMPUTER INC. UX330UAK",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
@@ -484,37 +481,9 @@ static const struct dmi_system_id asus_quirks[] = {
 		.ident = "ASUS ROG FLOW X13",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			/* Match GV301** */
-			DMI_MATCH(DMI_PRODUCT_NAME, "GV301"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "GV301Q"),
 		},
 		.driver_data = &quirk_asus_tablet_mode,
-	},
-	{
-		.callback = dmi_matched,
-		.ident = "ASUS ROG FLOW X16",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "GV601R"),
-		},
-		.driver_data = &quirk_asus_tablet_mode,
-	},
-	{
-		.callback = dmi_matched,
-		.ident = "ASUS ROG FLOW X16",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "GV601V"),
-		},
-		.driver_data = &quirk_asus_tablet_mode,
-	},
-	{
-		.callback = dmi_matched,
-		.ident = "ASUS VivoBook E410MA",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "E410MA"),
-		},
-		.driver_data = &quirk_asus_ignore_fan,
 	},
 	{},
 };
@@ -548,7 +517,6 @@ static const struct key_entry asus_nb_wmi_keymap[] = {
 	{ KE_KEY, 0x32, { KEY_MUTE } },
 	{ KE_KEY, 0x33, { KEY_SCREENLOCK } },
 	{ KE_KEY, 0x35, { KEY_SCREENLOCK } },
-	{ KE_KEY, 0x38, { KEY_PROG3 } }, /* Armoury Crate */
 	{ KE_KEY, 0x40, { KEY_PREVIOUSSONG } },
 	{ KE_KEY, 0x41, { KEY_NEXTSONG } },
 	{ KE_KEY, 0x43, { KEY_STOPCD } }, /* Stop/Eject */
@@ -581,8 +549,6 @@ static const struct key_entry asus_nb_wmi_keymap[] = {
 	{ KE_KEY, 0x7D, { KEY_BLUETOOTH } }, /* Bluetooth Enable */
 	{ KE_KEY, 0x7E, { KEY_BLUETOOTH } }, /* Bluetooth Disable */
 	{ KE_KEY, 0x82, { KEY_CAMERA } },
-	{ KE_KEY, 0x85, { KEY_CAMERA } },
-	{ KE_KEY, 0x86, { KEY_PROG1 } }, /* MyASUS Key */
 	{ KE_KEY, 0x88, { KEY_RFKILL  } }, /* Radio Toggle Key */
 	{ KE_KEY, 0x8A, { KEY_PROG1 } }, /* Color enhancement mode */
 	{ KE_KEY, 0x8C, { KEY_SWITCHVIDEOMODE } }, /* SDSP DVI only */
@@ -603,8 +569,6 @@ static const struct key_entry asus_nb_wmi_keymap[] = {
 	{ KE_KEY, 0xA5, { KEY_SWITCHVIDEOMODE } }, /* SDSP LCD + TV + HDMI */
 	{ KE_KEY, 0xA6, { KEY_SWITCHVIDEOMODE } }, /* SDSP CRT + TV + HDMI */
 	{ KE_KEY, 0xA7, { KEY_SWITCHVIDEOMODE } }, /* SDSP LCD + CRT + TV + HDMI */
-	{ KE_KEY, 0xAE, { KEY_FN_F5 } }, /* Fn+F5 fan mode on 2020+ */
-	{ KE_KEY, 0xB3, { KEY_PROG4 } }, /* AURA */
 	{ KE_KEY, 0xB5, { KEY_CALC } },
 	{ KE_IGNORE, 0xC0, }, /* External display connect/disconnect notification */
 	{ KE_KEY, 0xC4, { KEY_KBDILLUMUP } },
@@ -615,26 +579,6 @@ static const struct key_entry asus_nb_wmi_keymap[] = {
 	{ KE_END, 0},
 };
 
-static void asus_nb_wmi_key_filter(struct asus_wmi_driver *asus_wmi, int *code,
-				   unsigned int *value, bool *autorelease)
-{
-	switch (*code) {
-	case ASUS_WMI_BRN_DOWN:
-	case ASUS_WMI_BRN_UP:
-		if (acpi_video_handles_brightness_key_presses())
-			*code = ASUS_WMI_KEY_IGNORE;
-
-		break;
-	case 0x30: /* Volume Up */
-	case 0x31: /* Volume Down */
-	case 0x32: /* Volume Mute */
-		if (atkbd_reports_vol_keys)
-			*code = ASUS_WMI_KEY_IGNORE;
-
-		break;
-	}
-}
-
 static struct asus_wmi_driver asus_nb_wmi_driver = {
 	.name = ASUS_NB_WMI_FILE,
 	.owner = THIS_MODULE,
@@ -643,8 +587,6 @@ static struct asus_wmi_driver asus_nb_wmi_driver = {
 	.input_name = "Asus WMI hotkeys",
 	.input_phys = ASUS_NB_WMI_FILE "/input0",
 	.detect_quirks = asus_nb_wmi_quirks,
-	.key_filter = asus_nb_wmi_key_filter,
-	.i8042_filter = asus_i8042_filter,
 };
 
 

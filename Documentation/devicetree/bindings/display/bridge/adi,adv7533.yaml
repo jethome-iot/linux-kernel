@@ -9,9 +9,6 @@ title: Analog Devices ADV7533/35 HDMI Encoders
 maintainers:
   - Laurent Pinchart <laurent.pinchart@ideasonboard.com>
 
-allOf:
-  - $ref: /schemas/sound/dai-common.yaml#
-
 description: |
   The ADV7533 and ADV7535 are HDMI audio and video transmitters
   compatible with HDMI 1.4 and DVI 1.0. They support color space
@@ -92,28 +89,27 @@ properties:
     $ref: /schemas/types.yaml#/definitions/uint32
     enum: [ 1, 2, 3, 4 ]
 
-  "#sound-dai-cells":
-    const: 0
-
   ports:
     description:
-      The ADV7533/35 has two video ports and one audio port.
-    $ref: /schemas/graph.yaml#/properties/ports
-
+      The ADV7533/35 has two video ports and one audio port. This node
+      models their connections as documented in
+      Documentation/devicetree/bindings/media/video-interfaces.txt
+      Documentation/devicetree/bindings/graph.txt
+    type: object
     properties:
       port@0:
         description:
           Video port for the DSI input. The remote endpoint phandle
           should be a reference to a valid mipi_dsi_host_device.
-        $ref: /schemas/graph.yaml#/properties/port
+        type: object
 
       port@1:
         description: Video port for the HDMI output.
-        $ref: /schemas/graph.yaml#/properties/port
+        type: object
 
       port@2:
         description: Audio port for the HDMI output.
-        $ref: /schemas/graph.yaml#/properties/port
+        type: object
 
 required:
   - compatible

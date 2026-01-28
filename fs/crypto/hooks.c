@@ -143,7 +143,15 @@ EXPORT_SYMBOL_GPL(fscrypt_prepare_lookup_partial);
 
 int __fscrypt_prepare_readdir(struct inode *dir)
 {
+#if IS_ENABLED(CONFIG_AMLOGIC_LINUX_FBE_RDK)
+	int ret = fscrypt_get_encryption_info(dir, true);
+
+	if (fscrypt_check_accessibility(dir))
+		return -EPERM;
+	return ret;
+#else
 	return fscrypt_get_encryption_info(dir, true);
+#endif
 }
 EXPORT_SYMBOL_GPL(__fscrypt_prepare_readdir);
 
@@ -169,7 +177,7 @@ EXPORT_SYMBOL_GPL(__fscrypt_prepare_setattr);
 int fscrypt_prepare_setflags(struct inode *inode,
 			     unsigned int oldflags, unsigned int flags)
 {
-	struct fscrypt_inode_info *ci;
+	struct fscrypt_info *ci;
 	struct fscrypt_master_key *mk;
 	int err;
 
@@ -187,7 +195,7 @@ int fscrypt_prepare_setflags(struct inode *inode,
 			return -EINVAL;
 		mk = ci->ci_master_key;
 		down_read(&mk->mk_sem);
-		if (mk->mk_present)
+		if (is_master_key_secret_present(&mk->mk_secret))
 			err = fscrypt_derive_dirhash_key(ci, mk);
 		else
 			err = -ENOKEY;
@@ -255,10 +263,10 @@ int fscrypt_prepare_symlink(struct inode *dir, const char *target,
 	 * for now since filesystems will assume it is there and subtract it.
 	 */
 	if (!__fscrypt_fname_encrypted_size(policy, len,
-					    max_len - sizeof(struct fscrypt_symlink_data) - 1,
+					    max_len - sizeof(struct fscrypt_symlink_data),
 					    &disk_link->len))
 		return -ENAMETOOLONG;
-	disk_link->len += sizeof(struct fscrypt_symlink_data) + 1;
+	disk_link->len += sizeof(struct fscrypt_symlink_data);
 
 	disk_link->name = NULL;
 	return 0;
@@ -289,7 +297,7 @@ int __fscrypt_encrypt_symlink(struct inode *inode, const char *target,
 		if (!sd)
 			return -ENOMEM;
 	}
-	ciphertext_len = disk_link->len - sizeof(*sd) - 1;
+	ciphertext_len = disk_link->len - sizeof(*sd);
 	sd->len = cpu_to_le16(ciphertext_len);
 
 	err = fscrypt_fname_encrypt(inode, &iname, sd->encrypted_path,
@@ -367,7 +375,7 @@ const char *fscrypt_get_symlink(struct inode *inode, const void *caddr,
 	 * the ciphertext length, even though this is redundant with i_size.
 	 */
 
-	if (max_size < sizeof(*sd) + 1)
+	if (max_size < sizeof(*sd))
 		return ERR_PTR(-EUCLEAN);
 	sd = caddr;
 	cstr.name = (unsigned char *)sd->encrypted_path;
@@ -376,7 +384,7 @@ const char *fscrypt_get_symlink(struct inode *inode, const void *caddr,
 	if (cstr.len == 0)
 		return ERR_PTR(-EUCLEAN);
 
-	if (cstr.len + sizeof(*sd) > max_size)
+	if (cstr.len + sizeof(*sd) - 1 > max_size)
 		return ERR_PTR(-EUCLEAN);
 
 	err = fscrypt_fname_alloc_buffer(cstr.len, &pstr);

@@ -7,7 +7,6 @@
  * Contacts: Andrzej Hajda <a.hajda@samsung.com>
 */
 
-#include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/regulator/consumer.h>
 
@@ -101,7 +100,7 @@ static int exynos_dpi_create_connector(struct drm_encoder *encoder)
 
 	ret = drm_connector_init(encoder->dev, connector,
 				 &exynos_dpi_connector_funcs,
-				 DRM_MODE_CONNECTOR_DPI);
+				 DRM_MODE_CONNECTOR_VGA);
 	if (ret) {
 		DRM_DEV_ERROR(ctx->dev,
 			      "failed to initialize connector with drm\n");

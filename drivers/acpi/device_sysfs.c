@@ -53,7 +53,6 @@ static struct attribute *acpi_data_node_default_attrs[] = {
 	&data_node_path.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(acpi_data_node_default);
 
 #define to_data_node(k) container_of(k, struct acpi_data_node, kobj)
 #define to_attr(a) container_of(a, struct acpi_data_node_attr, attr)
@@ -78,9 +77,9 @@ static void acpi_data_node_release(struct kobject *kobj)
 	complete(&dn->kobj_done);
 }
 
-static const struct kobj_type acpi_data_node_ktype = {
+static struct kobj_type acpi_data_node_ktype = {
 	.sysfs_ops = &acpi_data_node_sysfs_ops,
-	.default_groups = acpi_data_node_default_groups,
+	.default_attrs = acpi_data_node_default_attrs,
 	.release = acpi_data_node_release,
 };
 
@@ -133,7 +132,7 @@ static void acpi_hide_nondev_subnodes(struct acpi_device_data *data)
  *         -EINVAL: output error
  *         -ENOMEM: output is truncated
  */
-static int create_pnp_modalias(const struct acpi_device *acpi_dev, char *modalias,
+static int create_pnp_modalias(struct acpi_device *acpi_dev, char *modalias,
 			       int size)
 {
 	int len;
@@ -168,6 +167,8 @@ static int create_pnp_modalias(const struct acpi_device *acpi_dev, char *modalia
 			continue;
 
 		count = snprintf(&modalias[len], size, "%s:", id->id);
+		if (count < 0)
+			return -EINVAL;
 
 		if (count >= size)
 			return -ENOMEM;
@@ -175,7 +176,7 @@ static int create_pnp_modalias(const struct acpi_device *acpi_dev, char *modalia
 		len += count;
 		size -= count;
 	}
-
+	modalias[len] = '\0';
 	return len;
 }
 
@@ -189,7 +190,7 @@ static int create_pnp_modalias(const struct acpi_device *acpi_dev, char *modalia
  * only be called for devices having ACPI_DT_NAMESPACE_HID in their list of
  * ACPI/PNP IDs.
  */
-static int create_of_modalias(const struct acpi_device *acpi_dev, char *modalias,
+static int create_of_modalias(struct acpi_device *acpi_dev, char *modalias,
 			      int size)
 {
 	struct acpi_buffer buf = { ACPI_ALLOCATE_BUFFER };
@@ -226,6 +227,8 @@ static int create_of_modalias(const struct acpi_device *acpi_dev, char *modalias
 	for (i = 0; i < nval; i++, obj++) {
 		count = snprintf(&modalias[len], size, "C%s",
 				 obj->string.pointer);
+		if (count < 0)
+			return -EINVAL;
 
 		if (count >= size)
 			return -ENOMEM;
@@ -233,11 +236,11 @@ static int create_of_modalias(const struct acpi_device *acpi_dev, char *modalias
 		len += count;
 		size -= count;
 	}
-
+	modalias[len] = '\0';
 	return len;
 }
 
-int __acpi_device_uevent_modalias(const struct acpi_device *adev,
+int __acpi_device_uevent_modalias(struct acpi_device *adev,
 				  struct kobj_uevent_env *env)
 {
 	int len;
@@ -275,13 +278,13 @@ int __acpi_device_uevent_modalias(const struct acpi_device *adev,
  * Because other buses do not support ACPI HIDs & CIDs, e.g. for a device with
  * hid:IBM0001 and cid:ACPI0001 you get: "acpi:IBM0001:ACPI0001".
  */
-int acpi_device_uevent_modalias(const struct device *dev, struct kobj_uevent_env *env)
+int acpi_device_uevent_modalias(struct device *dev, struct kobj_uevent_env *env)
 {
 	return __acpi_device_uevent_modalias(acpi_companion_match(dev), env);
 }
 EXPORT_SYMBOL_GPL(acpi_device_uevent_modalias);
 
-static int __acpi_device_modalias(const struct acpi_device *adev, char *buf, int size)
+static int __acpi_device_modalias(struct acpi_device *adev, char *buf, int size)
 {
 	int len, count;
 
@@ -374,7 +377,7 @@ eject_store(struct device *d, struct device_attribute *attr,
 		return -EINVAL;
 
 	if ((!acpi_device->handler || !acpi_device->handler->hotplug.enabled)
-	    && !d->driver)
+	    && !acpi_device->driver)
 		return -ENODEV;
 
 	status = acpi_get_type(acpi_device->handle, &not_used);
@@ -408,7 +411,7 @@ static ssize_t uid_show(struct device *dev,
 {
 	struct acpi_device *acpi_dev = to_acpi_device(dev);
 
-	return sprintf(buf, "%s\n", acpi_device_uid(acpi_dev));
+	return sprintf(buf, "%s\n", acpi_dev->pnp.unique_id);
 }
 static DEVICE_ATTR_RO(uid);
 
@@ -552,7 +555,7 @@ int acpi_device_setup_files(struct acpi_device *dev)
 
 	if (dev->pnp.type.bus_address)
 		result = device_create_file(&dev->dev, &dev_attr_adr);
-	if (acpi_device_uid(dev))
+	if (dev->pnp.unique_id)
 		result = device_create_file(&dev->dev, &dev_attr_uid);
 
 	if (acpi_has_method(dev->handle, "_SUN")) {
@@ -633,7 +636,7 @@ void acpi_device_remove_files(struct acpi_device *dev)
 	if (acpi_has_method(dev->handle, "_HRV"))
 		device_remove_file(&dev->dev, &dev_attr_hrv);
 
-	if (acpi_device_uid(dev))
+	if (dev->pnp.unique_id)
 		device_remove_file(&dev->dev, &dev_attr_uid);
 	if (dev->pnp.type.bus_address)
 		device_remove_file(&dev->dev, &dev_attr_adr);

@@ -32,7 +32,7 @@ enum psample_nl_multicast_groups {
 static const struct genl_multicast_group psample_nl_mcgrps[] = {
 	[PSAMPLE_NL_MCGRP_CONFIG] = { .name = PSAMPLE_NL_MCGRP_CONFIG_NAME },
 	[PSAMPLE_NL_MCGRP_SAMPLE] = { .name = PSAMPLE_NL_MCGRP_SAMPLE_NAME,
-				      .flags = GENL_MCAST_CAP_NET_ADMIN, },
+				      .flags = GENL_UNS_ADMIN_PERM },
 };
 
 static struct genl_family psample_nl_family __ro_after_init;
@@ -116,7 +116,6 @@ static struct genl_family psample_nl_family __ro_after_init = {
 	.mcgrps		= psample_nl_mcgrps,
 	.small_ops	= psample_nl_ops,
 	.n_small_ops	= ARRAY_SIZE(psample_nl_ops),
-	.resv_start_op	= PSAMPLE_CMD_GET_GROUP + 1,
 	.n_mcgrps	= ARRAY_SIZE(psample_nl_mcgrps),
 };
 

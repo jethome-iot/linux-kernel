@@ -232,7 +232,7 @@ static int dm9601_mdio_read(struct net_device *netdev, int phy_id, int loc)
 	err = dm_read_shared_word(dev, 1, loc, &res);
 	if (err < 0) {
 		netdev_err(dev->net, "MDIO read error: %d\n", err);
-		return err;
+		return 0;
 	}
 
 	netdev_dbg(dev->net,
@@ -337,7 +337,7 @@ static int dm9601_set_mac_address(struct net_device *net, void *p)
 		return -EINVAL;
 	}
 
-	eth_hw_addr_set(net, addr->sa_data);
+	memcpy(net->dev_addr, addr->sa_data, net->addr_len);
 	__dm9601_set_mac_address(dev);
 
 	return 0;
@@ -397,7 +397,7 @@ static int dm9601_bind(struct usbnet *dev, struct usb_interface *intf)
 	 * Overwrite the auto-generated address only with good ones.
 	 */
 	if (is_valid_ether_addr(mac))
-		eth_hw_addr_set(dev->net, mac);
+		memcpy(dev->net->dev_addr, mac, ETH_ALEN);
 	else {
 		printk(KERN_WARNING
 			"dm9601: No valid MAC address in EEPROM, using %pM\n",

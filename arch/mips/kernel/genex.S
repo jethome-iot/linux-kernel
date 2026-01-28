@@ -19,6 +19,7 @@
 #include <asm/mipsregs.h>
 #include <asm/stackframe.h>
 #include <asm/sync.h>
+#include <asm/war.h>
 #include <asm/thread_info.h>
 
 	__INIT
@@ -162,7 +163,7 @@ NESTED(handle_int, PT_SIZE, sp)
 	.set	push
 	.set	noat
 	mfc0	k0, CP0_STATUS
-#if defined(CONFIG_CPU_R3000)
+#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
 	and	k0, ST0_IEP
 	bnez	k0, 1f
 
@@ -272,17 +273,18 @@ NESTED(except_vec_vi, 0, sp)
 	.set	push
 	.set	noreorder
 	PTR_LA	v1, except_vec_vi_handler
+FEXPORT(except_vec_vi_lui)
+	lui	v0, 0		/* Patched */
 	jr	v1
 FEXPORT(except_vec_vi_ori)
-	 ori	v0, zero, 0		/* Offset in vi_handlers[] */
+	 ori	v0, 0		/* Patched */
 	.set	pop
 	END(except_vec_vi)
 EXPORT(except_vec_vi_end)
 
 /*
  * Common Vectored Interrupt code
- * Complete the register saves and invoke the handler, $v0 holds
- * offset into vi_handlers[]
+ * Complete the register saves and invoke the handler which is passed in $v0
  */
 NESTED(except_vec_vi_handler, 0, sp)
 	SAVE_TEMP
@@ -330,7 +332,6 @@ NESTED(except_vec_vi_handler, 0, sp)
 	/* Save task's sp on IRQ stack so that unwinding can follow it */
 	LONG_S	s1, 0(sp)
 2:
-	PTR_L	v0, vi_handlers(v0)
 	jalr	v0
 
 	/* Restore sp */
@@ -480,7 +481,7 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	.set	push
 	/* gas fails to assemble cfc1 for some archs (octeon).*/ \
 	.set	mips1
-	.set	hardfloat
+	SET_HARDFLOAT
 	cfc1	a1, fcr31
 	.set	pop
 	.endm
@@ -644,7 +645,7 @@ isrdhwr:
 	get_saved_sp	/* k1 := current_thread_info */
 	.set	noreorder
 	MFC0	k0, CP0_EPC
-#if defined(CONFIG_CPU_R3000)
+#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
 	ori	k1, _THREAD_MASK
 	xori	k1, _THREAD_MASK
 	LONG_L	v1, TI_TP_VALUE(k1)

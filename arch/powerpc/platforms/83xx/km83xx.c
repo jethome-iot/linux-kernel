@@ -20,8 +20,8 @@
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/initrd.h>
-#include <linux/of.h>
-#include <linux/of_address.h>
+#include <linux/of_platform.h>
+#include <linux/of_device.h>
 
 #include <linux/atomic.h>
 #include <linux/time.h>
@@ -29,6 +29,7 @@
 #include <asm/machdep.h>
 #include <asm/ipic.h>
 #include <asm/irq.h>
+#include <asm/prom.h>
 #include <asm/udbg.h>
 #include <sysdev/fsl_soc.h>
 #include <sysdev/fsl_pci.h>
@@ -38,7 +39,7 @@
 
 #define SVR_REV(svr)    (((svr) >>  0) & 0xFFFF) /* Revision field */
 
-static void __init quirk_mpc8360e_qe_enet10(void)
+static void quirk_mpc8360e_qe_enet10(void)
 {
 	/*
 	 * handle mpc8360E Erratum QE_ENET10:
@@ -184,5 +185,6 @@ define_machine(mpc83xx_km) {
 	.get_irq	= ipic_get_irq,
 	.restart	= mpc83xx_restart,
 	.time_init	= mpc83xx_time_init,
+	.calibrate_decr	= generic_calibrate_decr,
 	.progress	= udbg_progress,
 };

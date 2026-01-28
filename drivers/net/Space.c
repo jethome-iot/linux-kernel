@@ -68,7 +68,7 @@ static int netdev_boot_setup_add(char *name, struct ifmap *map)
 	for (i = 0; i < NETDEV_BOOT_SETUP_MAX; i++) {
 		if (s[i].name[0] == '\0' || s[i].name[0] == ' ') {
 			memset(s[i].name, 0, sizeof(s[i].name));
-			strscpy(s[i].name, name, IFNAMSIZ);
+			strlcpy(s[i].name, name, IFNAMSIZ);
 			memcpy(&s[i].map, map, sizeof(s[i].map));
 			break;
 		}
@@ -222,6 +222,9 @@ static struct devprobe2 isa_probes[] __initdata = {
 #ifdef CONFIG_CS89x0_ISA
 	{cs89x0_probe, 0},
 #endif
+#ifdef CONFIG_NI65
+	{ni65_probe, 0},
+#endif
 	{NULL, 0},
 };
 
@@ -246,6 +249,12 @@ static int __init net_olddevs_init(void)
 
 	for (num = 0; num < 8; ++num)
 		ethif_probe2(num);
+
+#ifdef CONFIG_COPS
+	cops_probe(0);
+	cops_probe(1);
+	cops_probe(2);
+#endif
 
 	return 0;
 }

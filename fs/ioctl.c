@@ -109,6 +109,9 @@ static int ioctl_fibmap(struct file *filp, int __user *p)
  * Returns 0 on success, -errno on error, 1 if this was the last
  * extent that will fit in user array.
  */
+#define SET_UNKNOWN_FLAGS	(FIEMAP_EXTENT_DELALLOC)
+#define SET_NO_UNMOUNTED_IO_FLAGS	(FIEMAP_EXTENT_DATA_ENCRYPTED)
+#define SET_NOT_ALIGNED_FLAGS	(FIEMAP_EXTENT_DATA_TAIL|FIEMAP_EXTENT_DATA_INLINE)
 int fiemap_fill_next_extent(struct fiemap_extent_info *fieinfo, u64 logical,
 			    u64 phys, u64 len, u32 flags)
 {
@@ -123,10 +126,6 @@ int fiemap_fill_next_extent(struct fiemap_extent_info *fieinfo, u64 logical,
 
 	if (fieinfo->fi_extents_mapped >= fieinfo->fi_extents_max)
 		return 1;
-
-#define SET_UNKNOWN_FLAGS	(FIEMAP_EXTENT_DELALLOC)
-#define SET_NO_UNMOUNTED_IO_FLAGS	(FIEMAP_EXTENT_DATA_ENCRYPTED)
-#define SET_NOT_ALIGNED_FLAGS	(FIEMAP_EXTENT_DATA_TAIL|FIEMAP_EXTENT_DATA_INLINE)
 
 	if (flags & SET_UNKNOWN_FLAGS)
 		flags |= FIEMAP_EXTENT_UNKNOWN;
@@ -150,7 +149,7 @@ int fiemap_fill_next_extent(struct fiemap_extent_info *fieinfo, u64 logical,
 		return 1;
 	return (flags & FIEMAP_EXTENT_LAST) ? 1 : 0;
 }
-EXPORT_SYMBOL(fiemap_fill_next_extent);
+EXPORT_SYMBOL_NS(fiemap_fill_next_extent, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 /**
  * fiemap_prep - check validity of requested flags for fiemap
@@ -195,7 +194,7 @@ int fiemap_prep(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		ret = filemap_write_and_wait(inode->i_mapping);
 	return ret;
 }
-EXPORT_SYMBOL(fiemap_prep);
+EXPORT_SYMBOL_NS(fiemap_prep, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 static int ioctl_fiemap(struct file *filp, struct fiemap __user *ufiemap)
 {
@@ -237,6 +236,9 @@ static long ioctl_file_clone(struct file *dst_file, unsigned long srcfd,
 
 	if (!src_file.file)
 		return -EBADF;
+	ret = -EXDEV;
+	if (src_file.file->f_path.mnt != dst_file->f_path.mnt)
+		goto fdput;
 	cloned = vfs_clone_file_range(src_file.file, off, dst_file, destoff,
 				      olen, 0);
 	if (cloned < 0)
@@ -245,6 +247,7 @@ static long ioctl_file_clone(struct file *dst_file, unsigned long srcfd,
 		ret = -EINVAL;
 	else
 		ret = 0;
+fdput:
 	fdput(src_file);
 	return ret;
 }
@@ -397,8 +400,8 @@ static int ioctl_fsfreeze(struct file *filp)
 
 	/* Freeze */
 	if (sb->s_op->freeze_super)
-		return sb->s_op->freeze_super(sb, FREEZE_HOLDER_USERSPACE);
-	return freeze_super(sb, FREEZE_HOLDER_USERSPACE);
+		return sb->s_op->freeze_super(sb);
+	return freeze_super(sb);
 }
 
 static int ioctl_fsthaw(struct file *filp)
@@ -410,8 +413,8 @@ static int ioctl_fsthaw(struct file *filp)
 
 	/* Thaw */
 	if (sb->s_op->thaw_super)
-		return sb->s_op->thaw_super(sb, FREEZE_HOLDER_USERSPACE);
-	return thaw_super(sb, FREEZE_HOLDER_USERSPACE);
+		return sb->s_op->thaw_super(sb);
+	return thaw_super(sb);
 }
 
 static int ioctl_file_dedupe_range(struct file *file,
@@ -427,7 +430,7 @@ static int ioctl_file_dedupe_range(struct file *file,
 		goto out;
 	}
 
-	size = offsetof(struct file_dedupe_range, info[count]);
+	size = offsetof(struct file_dedupe_range __user, info[count]);
 	if (size > PAGE_SIZE) {
 		ret = -ENOMEM;
 		goto out;
@@ -652,7 +655,7 @@ static int fileattr_set_prepare(struct inode *inode,
 
 /**
  * vfs_fileattr_set - change miscellaneous file attributes
- * @idmap:	idmap of the mount
+ * @mnt_userns:	user namespace of the mount
  * @dentry:	the object to change
  * @fa:		fileattr pointer
  *
@@ -666,7 +669,7 @@ static int fileattr_set_prepare(struct inode *inode,
  *
  * Return: 0 on success, or a negative error on failure.
  */
-int vfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
+int vfs_fileattr_set(struct user_namespace *mnt_userns, struct dentry *dentry,
 		     struct fileattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -676,7 +679,7 @@ int vfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (!inode->i_op->fileattr_set)
 		return -ENOIOCTLCMD;
 
-	if (!inode_owner_or_capable(idmap, inode))
+	if (!inode_owner_or_capable(mnt_userns, inode))
 		return -EPERM;
 
 	inode_lock(inode);
@@ -694,7 +697,7 @@ int vfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
 		}
 		err = fileattr_set_prepare(inode, &old_ma, fa);
 		if (!err)
-			err = inode->i_op->fileattr_set(idmap, dentry, fa);
+			err = inode->i_op->fileattr_set(mnt_userns, dentry, fa);
 	}
 	inode_unlock(inode);
 
@@ -715,7 +718,7 @@ static int ioctl_getflags(struct file *file, unsigned int __user *argp)
 
 static int ioctl_setflags(struct file *file, unsigned int __user *argp)
 {
-	struct mnt_idmap *idmap = file_mnt_idmap(file);
+	struct user_namespace *mnt_userns = file_mnt_user_ns(file);
 	struct dentry *dentry = file->f_path.dentry;
 	struct fileattr fa;
 	unsigned int flags;
@@ -726,7 +729,7 @@ static int ioctl_setflags(struct file *file, unsigned int __user *argp)
 		err = mnt_want_write_file(file);
 		if (!err) {
 			fileattr_fill_flags(&fa, flags);
-			err = vfs_fileattr_set(idmap, dentry, &fa);
+			err = vfs_fileattr_set(mnt_userns, dentry, &fa);
 			mnt_drop_write_file(file);
 		}
 	}
@@ -747,7 +750,7 @@ static int ioctl_fsgetxattr(struct file *file, void __user *argp)
 
 static int ioctl_fssetxattr(struct file *file, void __user *argp)
 {
-	struct mnt_idmap *idmap = file_mnt_idmap(file);
+	struct user_namespace *mnt_userns = file_mnt_user_ns(file);
 	struct dentry *dentry = file->f_path.dentry;
 	struct fileattr fa;
 	int err;
@@ -756,7 +759,7 @@ static int ioctl_fssetxattr(struct file *file, void __user *argp)
 	if (!err) {
 		err = mnt_want_write_file(file);
 		if (!err) {
-			err = vfs_fileattr_set(idmap, dentry, &fa);
+			err = vfs_fileattr_set(mnt_userns, dentry, &fa);
 			mnt_drop_write_file(file);
 		}
 	}
@@ -878,9 +881,6 @@ out:
 #ifdef CONFIG_COMPAT
 /**
  * compat_ptr_ioctl - generic implementation of .compat_ioctl file operation
- * @file: The file to operate on.
- * @cmd: The ioctl command number.
- * @arg: The argument to the ioctl.
  *
  * This is not normally called as a function, but instead set in struct
  * file_operations as

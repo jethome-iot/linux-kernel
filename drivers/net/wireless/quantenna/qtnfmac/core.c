@@ -179,7 +179,7 @@ static int qtnf_netdev_set_mac_address(struct net_device *ndev, void *addr)
 					     sa->sa_data);
 
 	if (ret)
-		eth_hw_addr_set(ndev, old_addr);
+		memcpy(ndev->dev_addr, old_addr, ETH_ALEN);
 
 	return ret;
 }
@@ -478,7 +478,7 @@ int qtnf_core_net_attach(struct qtnf_wmac *mac, struct qtnf_vif *vif,
 	dev->needs_free_netdev = true;
 	dev_net_set(dev, wiphy_net(wiphy));
 	dev->ieee80211_ptr = &vif->wdev;
-	eth_hw_addr_set(dev, vif->mac_addr);
+	ether_addr_copy(dev->dev_addr, vif->mac_addr);
 	dev->flags |= IFF_BROADCAST | IFF_MULTICAST;
 	dev->watchdog_timeo = QTNF_DEF_WDOG_TIMEOUT;
 	dev->tx_queue_len = 100;
@@ -535,7 +535,7 @@ static void qtnf_core_mac_detach(struct qtnf_bus *bus, unsigned int macid)
 		if (!wiphy->bands[band])
 			continue;
 
-		kfree((__force void *)wiphy->bands[band]->iftype_data);
+		kfree(wiphy->bands[band]->iftype_data);
 		wiphy->bands[band]->n_iftype_data = 0;
 
 		kfree(wiphy->bands[band]->channels);

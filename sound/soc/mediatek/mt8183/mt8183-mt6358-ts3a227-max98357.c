@@ -7,7 +7,7 @@
 // Author: Shunli Wang <shunli.wang@mediatek.com>
 
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
 #include <sound/jack.h>
 #include <sound/pcm_params.h>
@@ -15,7 +15,6 @@
 
 #include "../../codecs/rt1015.h"
 #include "../../codecs/ts3a227e.h"
-#include "../common/mtk-afe-platform-driver.h"
 #include "mt8183-afe-common.h"
 
 #define RT1015_CODEC_DAI "rt1015-aif"
@@ -43,12 +42,12 @@ struct mt8183_mt6358_ts3a227_max98357_priv {
 static int mt8183_mt6358_i2s_hw_params(struct snd_pcm_substream *substream,
 				       struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	unsigned int rate = params_rate(params);
 	unsigned int mclk_fs_ratio = 128;
 	unsigned int mclk_fs = rate * mclk_fs_ratio;
 
-	return snd_soc_dai_set_sysclk(snd_soc_rtd_to_cpu(rtd, 0),
+	return snd_soc_dai_set_sysclk(asoc_rtd_to_cpu(rtd, 0),
 				      0, mclk_fs, SND_SOC_CLOCK_OUT);
 }
 
@@ -60,7 +59,7 @@ static int
 mt8183_mt6358_rt1015_i2s_hw_params(struct snd_pcm_substream *substream,
 				   struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	unsigned int rate = params_rate(params);
 	unsigned int mclk_fs_ratio = 128;
 	unsigned int mclk_fs = rate * mclk_fs_ratio;
@@ -84,7 +83,7 @@ mt8183_mt6358_rt1015_i2s_hw_params(struct snd_pcm_substream *substream,
 		}
 	}
 
-	return snd_soc_dai_set_sysclk(snd_soc_rtd_to_cpu(rtd, 0),
+	return snd_soc_dai_set_sysclk(asoc_rtd_to_cpu(rtd, 0),
 				      0, mclk_fs, SND_SOC_CLOCK_OUT);
 }
 
@@ -95,11 +94,11 @@ static const struct snd_soc_ops mt8183_mt6358_rt1015_i2s_ops = {
 static int mt8183_i2s_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 				      struct snd_pcm_hw_params *params)
 {
-	dev_dbg(rtd->dev, "%s(), fix format to S32_LE\n", __func__);
+	dev_dbg(rtd->dev, "%s(), fix format to 32bit\n", __func__);
 
-	/* fix BE i2s format to S32_LE, clean param mask first */
+	/* fix BE i2s format to 32bit, clean param mask first */
 	snd_mask_reset_range(hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT),
-			     0, (__force unsigned int)SNDRV_PCM_FORMAT_LAST);
+			     0, SNDRV_PCM_FORMAT_LAST);
 
 	params_set_format(params, SNDRV_PCM_FORMAT_S32_LE);
 	return 0;
@@ -108,11 +107,11 @@ static int mt8183_i2s_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 static int mt8183_rt1015_i2s_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					     struct snd_pcm_hw_params *params)
 {
-	dev_dbg(rtd->dev, "%s(), fix format to S24_LE\n", __func__);
+	dev_dbg(rtd->dev, "%s(), fix format to 32bit\n", __func__);
 
-	/* fix BE i2s format to S24_LE, clean param mask first */
+	/* fix BE i2s format to 32bit, clean param mask first */
 	snd_mask_reset_range(hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT),
-			     0, (__force unsigned int)SNDRV_PCM_FORMAT_LAST);
+			     0, SNDRV_PCM_FORMAT_LAST);
 
 	params_set_format(params, SNDRV_PCM_FORMAT_S24_LE);
 	return 0;
@@ -261,7 +260,7 @@ SND_SOC_DAILINK_DEFS(pcm2,
 
 SND_SOC_DAILINK_DEFS(i2s0,
 	DAILINK_COMP_ARRAY(COMP_CPU("I2S0")),
-	DAILINK_COMP_ARRAY(COMP_CODEC("bt-sco", "bt-sco-pcm-wb")),
+	DAILINK_COMP_ARRAY(COMP_CODEC("bt-sco", "bt-sco-pcm")),
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
 SND_SOC_DAILINK_DEFS(i2s1,
@@ -292,7 +291,7 @@ SND_SOC_DAILINK_DEFS(i2s3_rt1015p,
 
 SND_SOC_DAILINK_DEFS(i2s5,
 	DAILINK_COMP_ARRAY(COMP_CPU("I2S5")),
-	DAILINK_COMP_ARRAY(COMP_CODEC("bt-sco", "bt-sco-pcm-wb")),
+	DAILINK_COMP_ARRAY(COMP_CODEC("bt-sco", "bt-sco-pcm")),
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
 SND_SOC_DAILINK_DEFS(tdm,
@@ -302,7 +301,7 @@ SND_SOC_DAILINK_DEFS(tdm,
 
 static int mt8183_mt6358_tdm_startup(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct mt8183_mt6358_ts3a227_max98357_priv *priv =
 		snd_soc_card_get_drvdata(rtd->card);
 	int ret;
@@ -321,7 +320,7 @@ static int mt8183_mt6358_tdm_startup(struct snd_pcm_substream *substream)
 
 static void mt8183_mt6358_tdm_shutdown(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct mt8183_mt6358_ts3a227_max98357_priv *priv =
 		snd_soc_card_get_drvdata(rtd->card);
 	int ret;
@@ -336,7 +335,7 @@ static void mt8183_mt6358_tdm_shutdown(struct snd_pcm_substream *substream)
 			__func__, ret);
 }
 
-static const struct snd_soc_ops mt8183_mt6358_tdm_ops = {
+static struct snd_soc_ops mt8183_mt6358_tdm_ops = {
 	.startup = mt8183_mt6358_tdm_startup,
 	.shutdown = mt8183_mt6358_tdm_shutdown,
 };
@@ -345,7 +344,7 @@ static int
 mt8183_mt6358_ts3a227_max98357_wov_startup(
 	struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct snd_soc_card *card = rtd->card;
 	struct mt8183_mt6358_ts3a227_max98357_priv *priv =
 			snd_soc_card_get_drvdata(card);
@@ -358,7 +357,7 @@ static void
 mt8183_mt6358_ts3a227_max98357_wov_shutdown(
 	struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct snd_soc_card *card = rtd->card;
 	struct mt8183_mt6358_ts3a227_max98357_priv *priv =
 			snd_soc_card_get_drvdata(card);
@@ -384,42 +383,12 @@ mt8183_mt6358_ts3a227_max98357_hdmi_init(struct snd_soc_pcm_runtime *rtd)
 	int ret;
 
 	ret = snd_soc_card_jack_new(rtd->card, "HDMI Jack", SND_JACK_LINEOUT,
-				    &priv->hdmi_jack);
+				    &priv->hdmi_jack, NULL, 0);
 	if (ret)
 		return ret;
 
-	return snd_soc_component_set_jack(snd_soc_rtd_to_codec(rtd, 0)->component,
+	return snd_soc_component_set_jack(asoc_rtd_to_codec(rtd, 0)->component,
 					  &priv->hdmi_jack, NULL);
-}
-
-static int mt8183_bt_init(struct snd_soc_pcm_runtime *rtd)
-{
-	struct snd_soc_component *cmpnt_afe =
-		snd_soc_rtdcom_lookup(rtd, AFE_PCM_NAME);
-	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt_afe);
-	int ret;
-
-	ret = mt8183_dai_i2s_set_share(afe, "I2S5", "I2S0");
-	if (ret) {
-		dev_err(rtd->dev, "Failed to set up shared clocks\n");
-		return ret;
-	}
-	return 0;
-}
-
-static int mt8183_i2s2_init(struct snd_soc_pcm_runtime *rtd)
-{
-	struct snd_soc_component *cmpnt_afe =
-		snd_soc_rtdcom_lookup(rtd, AFE_PCM_NAME);
-	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt_afe);
-	int ret;
-
-	ret = mt8183_dai_i2s_set_share(afe, "I2S2", "I2S3");
-	if (ret) {
-		dev_err(rtd->dev, "Failed to set up shared clocks\n");
-		return ret;
-	}
-	return 0;
 }
 
 static struct snd_soc_dai_link mt8183_mt6358_ts3a227_dai_links[] = {
@@ -539,6 +508,7 @@ static struct snd_soc_dai_link mt8183_mt6358_ts3a227_dai_links[] = {
 		.no_pcm = 1,
 		.dpcm_capture = 1,
 		.ignore_suspend = 1,
+		.be_hw_params_fixup = mt8183_i2s_hw_params_fixup,
 		.ops = &mt8183_mt6358_i2s_ops,
 		SND_SOC_DAILINK_REG(i2s0),
 	},
@@ -558,7 +528,6 @@ static struct snd_soc_dai_link mt8183_mt6358_ts3a227_dai_links[] = {
 		.ignore_suspend = 1,
 		.be_hw_params_fixup = mt8183_i2s_hw_params_fixup,
 		.ops = &mt8183_mt6358_i2s_ops,
-		.init = &mt8183_i2s2_init,
 		SND_SOC_DAILINK_REG(i2s2),
 	},
 	{
@@ -572,8 +541,8 @@ static struct snd_soc_dai_link mt8183_mt6358_ts3a227_dai_links[] = {
 		.no_pcm = 1,
 		.dpcm_playback = 1,
 		.ignore_suspend = 1,
+		.be_hw_params_fixup = mt8183_i2s_hw_params_fixup,
 		.ops = &mt8183_mt6358_i2s_ops,
-		.init = &mt8183_bt_init,
 		SND_SOC_DAILINK_REG(i2s5),
 	},
 	{
@@ -592,38 +561,11 @@ static struct snd_soc_dai_link mt8183_mt6358_ts3a227_dai_links[] = {
 	},
 };
 
-static const
-struct snd_kcontrol_new mt8183_mt6358_ts3a227_max98357_snd_controls[] = {
-	SOC_DAPM_PIN_SWITCH("Headphone"),
-	SOC_DAPM_PIN_SWITCH("Headset Mic"),
-};
-
-static const
-struct snd_soc_dapm_widget mt8183_mt6358_ts3a227_max98357_dapm_widgets[] = {
-	SND_SOC_DAPM_HP("Headphone", NULL),
-	SND_SOC_DAPM_MIC("Headset Mic", NULL),
-};
-
-static struct snd_soc_jack_pin mt8183_mt6358_ts3a227_max98357_jack_pins[] = {
-	{
-		.pin	= "Headphone",
-		.mask	= SND_JACK_HEADPHONE,
-	},
-	{
-		.pin	= "Headset Mic",
-		.mask	= SND_JACK_MICROPHONE,
-	},
-};
-
 static struct snd_soc_card mt8183_mt6358_ts3a227_max98357_card = {
 	.name = "mt8183_mt6358_ts3a227_max98357",
 	.owner = THIS_MODULE,
 	.dai_link = mt8183_mt6358_ts3a227_dai_links,
 	.num_links = ARRAY_SIZE(mt8183_mt6358_ts3a227_dai_links),
-	.controls = mt8183_mt6358_ts3a227_max98357_snd_controls,
-	.num_controls = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_snd_controls),
-	.dapm_widgets = mt8183_mt6358_ts3a227_max98357_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_dapm_widgets),
 };
 
 static struct snd_soc_card mt8183_mt6358_ts3a227_max98357b_card = {
@@ -631,10 +573,6 @@ static struct snd_soc_card mt8183_mt6358_ts3a227_max98357b_card = {
 	.owner = THIS_MODULE,
 	.dai_link = mt8183_mt6358_ts3a227_dai_links,
 	.num_links = ARRAY_SIZE(mt8183_mt6358_ts3a227_dai_links),
-	.controls = mt8183_mt6358_ts3a227_max98357_snd_controls,
-	.num_controls = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_snd_controls),
-	.dapm_widgets = mt8183_mt6358_ts3a227_max98357_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_dapm_widgets),
 };
 
 static struct snd_soc_codec_conf mt8183_mt6358_ts3a227_rt1015_amp_conf[] = {
@@ -655,10 +593,6 @@ static struct snd_soc_card mt8183_mt6358_ts3a227_rt1015_card = {
 	.num_links = ARRAY_SIZE(mt8183_mt6358_ts3a227_dai_links),
 	.codec_conf = mt8183_mt6358_ts3a227_rt1015_amp_conf,
 	.num_configs = ARRAY_SIZE(mt8183_mt6358_ts3a227_rt1015_amp_conf),
-	.controls = mt8183_mt6358_ts3a227_max98357_snd_controls,
-	.num_controls = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_snd_controls),
-	.dapm_widgets = mt8183_mt6358_ts3a227_max98357_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_dapm_widgets),
 };
 
 static struct snd_soc_card mt8183_mt6358_ts3a227_rt1015p_card = {
@@ -666,10 +600,6 @@ static struct snd_soc_card mt8183_mt6358_ts3a227_rt1015p_card = {
 	.owner = THIS_MODULE,
 	.dai_link = mt8183_mt6358_ts3a227_dai_links,
 	.num_links = ARRAY_SIZE(mt8183_mt6358_ts3a227_dai_links),
-	.controls = mt8183_mt6358_ts3a227_max98357_snd_controls,
-	.num_controls = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_snd_controls),
-	.dapm_widgets = mt8183_mt6358_ts3a227_max98357_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_dapm_widgets),
 };
 
 static int
@@ -680,14 +610,13 @@ mt8183_mt6358_ts3a227_max98357_headset_init(struct snd_soc_component *component)
 			snd_soc_card_get_drvdata(component->card);
 
 	/* Enable Headset and 4 Buttons Jack detection */
-	ret = snd_soc_card_jack_new_pins(component->card,
-					 "Headset Jack",
-					 SND_JACK_HEADSET |
-					 SND_JACK_BTN_0 | SND_JACK_BTN_1 |
-					 SND_JACK_BTN_2 | SND_JACK_BTN_3,
-					 &priv->headset_jack,
-					 mt8183_mt6358_ts3a227_max98357_jack_pins,
-					 ARRAY_SIZE(mt8183_mt6358_ts3a227_max98357_jack_pins));
+	ret = snd_soc_card_jack_new(component->card,
+				    "Headset Jack",
+				    SND_JACK_HEADSET |
+				    SND_JACK_BTN_0 | SND_JACK_BTN_1 |
+				    SND_JACK_BTN_2 | SND_JACK_BTN_3,
+				    &priv->headset_jack,
+				    NULL, 0);
 	if (ret)
 		return ret;
 
@@ -882,7 +811,6 @@ static const struct of_device_id mt8183_mt6358_ts3a227_max98357_dt_match[] = {
 	},
 	{}
 };
-MODULE_DEVICE_TABLE(of, mt8183_mt6358_ts3a227_max98357_dt_match);
 #endif
 
 static struct platform_driver mt8183_mt6358_ts3a227_max98357_driver = {

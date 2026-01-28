@@ -18,10 +18,11 @@
 #include <linux/regulator/consumer.h>
 #include <linux/types.h>
 
-#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_crtc_helper.h>
+#include <drm/drm_dp_helper.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_of.h>
 #include <drm/drm_panel.h>
@@ -691,7 +692,8 @@ static bool anx6345_get_chip_id(struct anx6345 *anx6345)
 	return false;
 }
 
-static int anx6345_i2c_probe(struct i2c_client *client)
+static int anx6345_i2c_probe(struct i2c_client *client,
+			     const struct i2c_device_id *id)
 {
 	struct anx6345 *anx6345;
 	struct device *dev;
@@ -785,7 +787,7 @@ err_unregister_i2c:
 	return err;
 }
 
-static void anx6345_i2c_remove(struct i2c_client *client)
+static int anx6345_i2c_remove(struct i2c_client *client)
 {
 	struct anx6345 *anx6345 = i2c_get_clientdata(client);
 
@@ -796,6 +798,8 @@ static void anx6345_i2c_remove(struct i2c_client *client)
 	kfree(anx6345->edid);
 
 	mutex_destroy(&anx6345->lock);
+
+	return 0;
 }
 
 static const struct i2c_device_id anx6345_id[] = {
@@ -813,7 +817,7 @@ MODULE_DEVICE_TABLE(of, anx6345_match_table);
 static struct i2c_driver anx6345_driver = {
 	.driver = {
 		   .name = "anx6345",
-		   .of_match_table = anx6345_match_table,
+		   .of_match_table = of_match_ptr(anx6345_match_table),
 		  },
 	.probe = anx6345_i2c_probe,
 	.remove = anx6345_i2c_remove,

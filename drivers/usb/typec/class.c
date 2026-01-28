@@ -12,17 +12,15 @@
 #include <linux/slab.h>
 #include <linux/usb/pd_vdo.h>
 #include <linux/usb/typec_mux.h>
-#include <linux/usb/typec_retimer.h>
-#include <linux/usb.h>
 
 #include "bus.h"
 #include "class.h"
-#include "pd.h"
 
 static DEFINE_IDA(typec_index_ida);
 
 struct class typec_class = {
 	.name = "typec",
+	.owner = THIS_MODULE,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -478,7 +476,7 @@ static int altmode_id_get(struct device *dev)
 	else
 		ids = &to_typec_port(dev)->mode_ids;
 
-	return ida_alloc(ids, GFP_KERNEL);
+	return ida_simple_get(ids, 0, 0, GFP_KERNEL);
 }
 
 static void altmode_id_remove(struct device *dev, int id)
@@ -492,7 +490,7 @@ static void altmode_id_remove(struct device *dev, int id)
 	else
 		ids = &to_typec_port(dev)->mode_ids;
 
-	ida_free(ids, id);
+	ida_simple_remove(ids, id);
 }
 
 static void typec_altmode_release(struct device *dev)
@@ -586,7 +584,6 @@ void typec_unregister_altmode(struct typec_altmode *adev)
 {
 	if (IS_ERR_OR_NULL(adev))
 		return;
-	typec_retimer_put(to_altmode(adev)->retimer);
 	typec_mux_put(to_altmode(adev)->mux);
 	device_unregister(&adev->dev);
 }
@@ -685,33 +682,6 @@ const struct device_type typec_partner_dev_type = {
 	.release = typec_partner_release,
 };
 
-static void typec_partner_link_device(struct typec_partner *partner, struct device *dev)
-{
-	int ret;
-
-	ret = sysfs_create_link(&dev->kobj, &partner->dev.kobj, "typec");
-	if (ret)
-		return;
-
-	ret = sysfs_create_link(&partner->dev.kobj, &dev->kobj, dev_name(dev));
-	if (ret) {
-		sysfs_remove_link(&dev->kobj, "typec");
-		return;
-	}
-
-	if (partner->attach)
-		partner->attach(partner, dev);
-}
-
-static void typec_partner_unlink_device(struct typec_partner *partner, struct device *dev)
-{
-	sysfs_remove_link(&partner->dev.kobj, dev_name(dev));
-	sysfs_remove_link(&dev->kobj, "typec");
-
-	if (partner->deattach)
-		partner->deattach(partner, dev);
-}
-
 /**
  * typec_partner_set_identity - Report result from Discover Identity command
  * @partner: The partner updated identity values
@@ -752,39 +722,6 @@ void typec_partner_set_pd_revision(struct typec_partner *partner, u16 pd_revisio
 	kobject_uevent(&partner->dev.kobj, KOBJ_CHANGE);
 }
 EXPORT_SYMBOL_GPL(typec_partner_set_pd_revision);
-
-/**
- * typec_partner_set_usb_power_delivery - Declare USB Power Delivery Contract.
- * @partner: The partner device.
- * @pd: The USB PD instance.
- *
- * This routine can be used to declare USB Power Delivery Contract with @partner
- * by linking @partner to @pd which contains the objects that were used during the
- * negotiation of the contract.
- *
- * If @pd is NULL, the link is removed and the contract with @partner has ended.
- */
-int typec_partner_set_usb_power_delivery(struct typec_partner *partner,
-					 struct usb_power_delivery *pd)
-{
-	int ret;
-
-	if (IS_ERR_OR_NULL(partner) || partner->pd == pd)
-		return 0;
-
-	if (pd) {
-		ret = usb_power_delivery_link_device(pd, &partner->dev);
-		if (ret)
-			return ret;
-	} else {
-		usb_power_delivery_unlink_device(partner->pd, &partner->dev);
-	}
-
-	partner->pd = pd;
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(typec_partner_set_usb_power_delivery);
 
 /**
  * typec_partner_set_num_altmodes - Set the number of available partner altmodes
@@ -853,25 +790,6 @@ void typec_partner_set_svdm_version(struct typec_partner *partner,
 EXPORT_SYMBOL_GPL(typec_partner_set_svdm_version);
 
 /**
- * typec_partner_usb_power_delivery_register - Register Type-C partner USB Power Delivery Support
- * @partner: Type-C partner device.
- * @desc: Description of the USB PD contract.
- *
- * This routine is a wrapper around usb_power_delivery_register(). It registers
- * USB Power Delivery Capabilities for a Type-C partner device. Specifically,
- * it sets the Type-C partner device as a parent for the resulting USB Power Delivery object.
- *
- * Returns handle to struct usb_power_delivery or ERR_PTR.
- */
-struct usb_power_delivery *
-typec_partner_usb_power_delivery_register(struct typec_partner *partner,
-					  struct usb_power_delivery_desc *desc)
-{
-	return usb_power_delivery_register(&partner->dev, desc);
-}
-EXPORT_SYMBOL_GPL(typec_partner_usb_power_delivery_register);
-
-/**
  * typec_register_partner - Register a USB Type-C Partner
  * @port: The USB Type-C Port the partner is connected to
  * @desc: Description of the partner
@@ -896,8 +814,6 @@ struct typec_partner *typec_register_partner(struct typec_port *port,
 	partner->num_altmodes = -1;
 	partner->pd_revision = desc->pd_revision;
 	partner->svdm_version = port->cap->svdm_version;
-	partner->attach = desc->attach;
-	partner->deattach = desc->deattach;
 
 	if (desc->identity) {
 		/*
@@ -920,11 +836,6 @@ struct typec_partner *typec_register_partner(struct typec_port *port,
 		return ERR_PTR(ret);
 	}
 
-	if (port->usb2_dev)
-		typec_partner_link_device(partner, port->usb2_dev);
-	if (port->usb3_dev)
-		typec_partner_link_device(partner, port->usb3_dev);
-
 	return partner;
 }
 EXPORT_SYMBOL_GPL(typec_register_partner);
@@ -937,19 +848,8 @@ EXPORT_SYMBOL_GPL(typec_register_partner);
  */
 void typec_unregister_partner(struct typec_partner *partner)
 {
-	struct typec_port *port;
-
-	if (IS_ERR_OR_NULL(partner))
-		return;
-
-	port = to_typec_port(partner->dev.parent);
-
-	if (port->usb2_dev)
-		typec_partner_unlink_device(partner, port->usb2_dev);
-	if (port->usb3_dev)
-		typec_partner_unlink_device(partner, port->usb3_dev);
-
-	device_unregister(&partner->dev);
+	if (!IS_ERR_OR_NULL(partner))
+		device_unregister(&partner->dev);
 }
 EXPORT_SYMBOL_GPL(typec_unregister_partner);
 
@@ -1272,103 +1172,6 @@ EXPORT_SYMBOL_GPL(typec_unregister_cable);
 
 /* ------------------------------------------------------------------------- */
 /* USB Type-C ports */
-
-/**
- * typec_port_set_usb_power_delivery - Assign USB PD for port.
- * @port: USB Type-C port.
- * @pd: USB PD instance.
- *
- * This routine can be used to set the USB Power Delivery Capabilities for @port
- * that it will advertise to the partner.
- *
- * If @pd is NULL, the assignment is removed.
- */
-int typec_port_set_usb_power_delivery(struct typec_port *port, struct usb_power_delivery *pd)
-{
-	int ret;
-
-	if (IS_ERR_OR_NULL(port) || port->pd == pd)
-		return 0;
-
-	if (pd) {
-		ret = usb_power_delivery_link_device(pd, &port->dev);
-		if (ret)
-			return ret;
-	} else {
-		usb_power_delivery_unlink_device(port->pd, &port->dev);
-	}
-
-	port->pd = pd;
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(typec_port_set_usb_power_delivery);
-
-static ssize_t select_usb_power_delivery_store(struct device *dev,
-					       struct device_attribute *attr,
-					       const char *buf, size_t size)
-{
-	struct typec_port *port = to_typec_port(dev);
-	struct usb_power_delivery *pd;
-
-	if (!port->ops || !port->ops->pd_set)
-		return -EOPNOTSUPP;
-
-	pd = usb_power_delivery_find(buf);
-	if (!pd)
-		return -EINVAL;
-
-	return port->ops->pd_set(port, pd);
-}
-
-static ssize_t select_usb_power_delivery_show(struct device *dev,
-					      struct device_attribute *attr, char *buf)
-{
-	struct typec_port *port = to_typec_port(dev);
-	struct usb_power_delivery **pds;
-	int i, ret = 0;
-
-	if (!port->ops || !port->ops->pd_get)
-		return -EOPNOTSUPP;
-
-	pds = port->ops->pd_get(port);
-	if (!pds)
-		return 0;
-
-	for (i = 0; pds[i]; i++) {
-		if (pds[i] == port->pd)
-			ret += sysfs_emit_at(buf, ret, "[%s] ", dev_name(&pds[i]->dev));
-		else
-			ret += sysfs_emit_at(buf, ret, "%s ", dev_name(&pds[i]->dev));
-	}
-
-	buf[ret - 1] = '\n';
-
-	return ret;
-}
-static DEVICE_ATTR_RW(select_usb_power_delivery);
-
-static struct attribute *port_attrs[] = {
-	&dev_attr_select_usb_power_delivery.attr,
-	NULL
-};
-
-static umode_t port_attr_is_visible(struct kobject *kobj, struct attribute *attr, int n)
-{
-	struct typec_port *port = to_typec_port(kobj_to_dev(kobj));
-
-	if (!port->pd || !port->ops || !port->ops->pd_get)
-		return 0;
-	if (!port->ops->pd_set)
-		return 0444;
-
-	return attr->mode;
-}
-
-static const struct attribute_group pd_group = {
-	.is_visible = port_attr_is_visible,
-	.attrs = port_attrs,
-};
 
 static const char * const typec_orientations[] = {
 	[TYPEC_ORIENTATION_NONE]	= "unknown",
@@ -1781,11 +1584,10 @@ static const struct attribute_group typec_group = {
 
 static const struct attribute_group *typec_groups[] = {
 	&typec_group,
-	&pd_group,
 	NULL
 };
 
-static int typec_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int typec_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	int ret;
 
@@ -1800,11 +1602,10 @@ static void typec_release(struct device *dev)
 {
 	struct typec_port *port = to_typec_port(dev);
 
-	ida_free(&typec_index_ida, port->id);
+	ida_simple_remove(&typec_index_ida, port->id);
 	ida_destroy(&port->mode_ids);
 	typec_switch_put(port->sw);
 	typec_mux_put(port->mux);
-	typec_retimer_put(port->retimer);
 	kfree(port->cap);
 	kfree(port);
 }
@@ -1824,50 +1625,6 @@ static int partner_match(struct device *dev, void *data)
 	return is_typec_partner(dev);
 }
 
-static struct typec_partner *typec_get_partner(struct typec_port *port)
-{
-	struct device *dev;
-
-	dev = device_find_child(&port->dev, NULL, partner_match);
-	if (!dev)
-		return NULL;
-
-	return to_typec_partner(dev);
-}
-
-static void typec_partner_attach(struct typec_connector *con, struct device *dev)
-{
-	struct typec_port *port = container_of(con, struct typec_port, con);
-	struct typec_partner *partner = typec_get_partner(port);
-	struct usb_device *udev = to_usb_device(dev);
-
-	if (udev->speed < USB_SPEED_SUPER)
-		port->usb2_dev = dev;
-	else
-		port->usb3_dev = dev;
-
-	if (partner) {
-		typec_partner_link_device(partner, dev);
-		put_device(&partner->dev);
-	}
-}
-
-static void typec_partner_deattach(struct typec_connector *con, struct device *dev)
-{
-	struct typec_port *port = container_of(con, struct typec_port, con);
-	struct typec_partner *partner = typec_get_partner(port);
-
-	if (partner) {
-		typec_partner_unlink_device(partner, dev);
-		put_device(&partner->dev);
-	}
-
-	if (port->usb2_dev == dev)
-		port->usb2_dev = NULL;
-	else if (port->usb3_dev == dev)
-		port->usb3_dev = NULL;
-}
-
 /**
  * typec_set_data_role - Report data role change
  * @port: The USB Type-C Port where the role was changed
@@ -1877,7 +1634,7 @@ static void typec_partner_deattach(struct typec_connector *con, struct device *d
  */
 void typec_set_data_role(struct typec_port *port, enum typec_data_role role)
 {
-	struct typec_partner *partner;
+	struct device *partner_dev;
 
 	if (port->data_role == role)
 		return;
@@ -1886,14 +1643,14 @@ void typec_set_data_role(struct typec_port *port, enum typec_data_role role)
 	sysfs_notify(&port->dev.kobj, NULL, "data_role");
 	kobject_uevent(&port->dev.kobj, KOBJ_CHANGE);
 
-	partner = typec_get_partner(port);
-	if (!partner)
+	partner_dev = device_find_child(&port->dev, NULL, partner_match);
+	if (!partner_dev)
 		return;
 
-	if (partner->identity)
-		typec_product_type_notify(&partner->dev);
+	if (to_typec_partner(partner_dev)->identity)
+		typec_product_type_notify(partner_dev);
 
-	put_device(&partner->dev);
+	put_device(partner_dev);
 }
 EXPORT_SYMBOL_GPL(typec_set_data_role);
 
@@ -2200,26 +1957,16 @@ typec_port_register_altmode(struct typec_port *port,
 {
 	struct typec_altmode *adev;
 	struct typec_mux *mux;
-	struct typec_retimer *retimer;
 
-	mux = typec_mux_get(&port->dev);
+	mux = typec_mux_get(&port->dev, desc);
 	if (IS_ERR(mux))
 		return ERR_CAST(mux);
 
-	retimer = typec_retimer_get(&port->dev);
-	if (IS_ERR(retimer)) {
-		typec_mux_put(mux);
-		return ERR_CAST(retimer);
-	}
-
 	adev = typec_register_altmode(&port->dev, desc);
-	if (IS_ERR(adev)) {
-		typec_retimer_put(retimer);
+	if (IS_ERR(adev))
 		typec_mux_put(mux);
-	} else {
+	else
 		to_altmode(adev)->mux = mux;
-		to_altmode(adev)->retimer = retimer;
-	}
 
 	return adev;
 }
@@ -2233,8 +1980,7 @@ void typec_port_register_altmodes(struct typec_port *port,
 	struct typec_altmode_desc desc;
 	struct typec_altmode *alt;
 	size_t index = 0;
-	u16 svid;
-	u32 vdo;
+	u32 svid, vdo;
 	int ret;
 
 	altmodes_node = device_get_named_child_node(&port->dev, "altmodes");
@@ -2242,7 +1988,7 @@ void typec_port_register_altmodes(struct typec_port *port,
 		return; /* No altmodes specified */
 
 	fwnode_for_each_child_node(altmodes_node, child) {
-		ret = fwnode_property_read_u16(child, "svid", &svid);
+		ret = fwnode_property_read_u32(child, "svid", &svid);
 		if (ret) {
 			dev_err(&port->dev, "Error reading svid for altmode %s\n",
 				fwnode_get_name(child));
@@ -2300,7 +2046,7 @@ struct typec_port *typec_register_port(struct device *parent,
 	if (!port)
 		return ERR_PTR(-ENOMEM);
 
-	id = ida_alloc(&typec_index_ida, GFP_KERNEL);
+	id = ida_simple_get(&typec_index_ida, 0, 0, GFP_KERNEL);
 	if (id < 0) {
 		kfree(port);
 		return ERR_PTR(id);
@@ -2340,13 +2086,13 @@ struct typec_port *typec_register_port(struct device *parent,
 
 	ida_init(&port->mode_ids);
 	mutex_init(&port->port_type_lock);
+	mutex_init(&port->port_list_lock);
+	INIT_LIST_HEAD(&port->port_list);
 
 	port->id = id;
 	port->ops = cap->ops;
 	port->port_type = cap->type;
 	port->prefer_role = cap->prefer_role;
-	port->con.attach = typec_partner_attach;
-	port->con.deattach = typec_partner_deattach;
 
 	device_initialize(&port->dev);
 	port->dev.class = &typec_class;
@@ -2369,33 +2115,17 @@ struct typec_port *typec_register_port(struct device *parent,
 		return ERR_PTR(ret);
 	}
 
-	port->mux = typec_mux_get(&port->dev);
+	port->mux = typec_mux_get(&port->dev, NULL);
 	if (IS_ERR(port->mux)) {
 		ret = PTR_ERR(port->mux);
 		put_device(&port->dev);
 		return ERR_PTR(ret);
 	}
 
-	port->retimer = typec_retimer_get(&port->dev);
-	if (IS_ERR(port->retimer)) {
-		ret = PTR_ERR(port->retimer);
-		put_device(&port->dev);
-		return ERR_PTR(ret);
-	}
-
-	port->pd = cap->pd;
-
 	ret = device_add(&port->dev);
 	if (ret) {
 		dev_err(parent, "failed to register port (%d)\n", ret);
 		put_device(&port->dev);
-		return ERR_PTR(ret);
-	}
-
-	ret = usb_power_delivery_link_device(port->pd, &port->dev);
-	if (ret) {
-		dev_err(&port->dev, "failed to link pd\n");
-		device_unregister(&port->dev);
 		return ERR_PTR(ret);
 	}
 
@@ -2417,7 +2147,6 @@ void typec_unregister_port(struct typec_port *port)
 {
 	if (!IS_ERR_OR_NULL(port)) {
 		typec_unlink_ports(port);
-		typec_port_set_usb_power_delivery(port, NULL);
 		device_unregister(&port->dev);
 	}
 }
@@ -2435,25 +2164,11 @@ static int __init typec_init(void)
 	if (ret)
 		goto err_unregister_bus;
 
-	ret = class_register(&retimer_class);
+	ret = class_register(&typec_class);
 	if (ret)
 		goto err_unregister_mux_class;
 
-	ret = class_register(&typec_class);
-	if (ret)
-		goto err_unregister_retimer_class;
-
-	ret = usb_power_delivery_init();
-	if (ret)
-		goto err_unregister_class;
-
 	return 0;
-
-err_unregister_class:
-	class_unregister(&typec_class);
-
-err_unregister_retimer_class:
-	class_unregister(&retimer_class);
 
 err_unregister_mux_class:
 	class_unregister(&typec_mux_class);
@@ -2467,12 +2182,10 @@ subsys_initcall(typec_init);
 
 static void __exit typec_exit(void)
 {
-	usb_power_delivery_exit();
 	class_unregister(&typec_class);
 	ida_destroy(&typec_index_ida);
 	bus_unregister(&typec_bus);
 	class_unregister(&typec_mux_class);
-	class_unregister(&retimer_class);
 }
 module_exit(typec_exit);
 

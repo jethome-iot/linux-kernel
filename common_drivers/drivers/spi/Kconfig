@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+menuconfig AMLOGIC_SPI
+	tristate "Amlogic SoC SPI Hardware Bus support"
+	depends on SPI
+
+config AMLOGIC_SPI_MESON_SPICC
+	tristate "Amlogic Meson SPICC controller"
+	help
+	  This enables master mode support for the SPICC (SPI communication
+	  controller) available in Amlogic Meson SoCs.
+
+config AMLOGIC_SPI_MESON_SPICC_V2
+	tristate "Amlogic Meson SPICC controller(v2)"
+	help
+	  This enables master mode support for the SPICC (SPI communication
+	  controller) available in A4, T3X Amlogic Meson SoCs.
+
+config SPICC_TEST
+	tristate "Amlogic Meson SPICC controller test entry"
+	help
+	  Specially test entryes for Amlogic Meson SPICC controller.
+	  This creates a configurable test device, which supports multi
+	  tansfers, private interfaces, private parameters test and so on
+
+config AMLOGIC_SPI_MESON_SPIFC
+	tristate "Amlogic Meson SPIFC controller"
+	depends on REGMAP_MMIO
+	help
+	  This enables master mode support for the SPIFC (SPI flash
+	  controller) available in Amlogic Meson SoCs.
+
+config AMLOGIC_SPI_MESON_SPIFC_V2
+	tristate "Amlogic Meson SPIFC v2 controller"
+	depends on REGMAP_MMIO
+	help
+	  This enables master mode support for the SPIFC_V2 (SPI flash
+	  V2 controller) available in A1, C1, C2, Amlogic Meson SoCs.
+	  If you need to use meson spinand or spinor, you must enable
+	  it.
+
+config AMLOGIC_SPI_MESON_SPICC_SLAVE
+	tristate "Amlogic Meson SPICC Slave controller"
+	help
+	  This enables slave mode support for the SPICC (SPI communication
+	  controller) available in Amlogic Meson SoCs. SPICC can work both
+	  in master mode and slave mode.
+	  say Y or M here.If you are not sure, say N.
+
+config AMLOGIC_SPI_NFC
+	tristate "Amlogic Meson SPI NFC controller"
+	help
+	  This enables master mode support for the SPI NFC (SPI flash
+	  controller with host ECC) available in Amlogic Meson SoCs.
+

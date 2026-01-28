@@ -77,6 +77,10 @@ extern const struct file_operations binder_fops;
 
 extern char *binder_devices_param;
 
+#ifdef CONFIG_UCLAMP_TASK
+unsigned long uclamp_eff_value(struct task_struct *p, enum uclamp_id clamp_id);
+#endif
+
 #ifdef CONFIG_ANDROID_BINDERFS
 extern bool is_binderfs_device(const struct inode *inode);
 extern struct dentry *binderfs_create_file(struct dentry *dir, const char *name,
@@ -216,10 +220,13 @@ struct binder_error {
  *                        and by @lock)
  * @has_async_transaction: async transaction to node in progress
  *                        (protected by @lock)
+ * @sched_policy:         minimum scheduling policy for node
+ *                        (invariant after initialized)
  * @accept_fds:           file descriptor operations supported for node
  *                        (invariant after initialized)
  * @min_priority:         minimum scheduling priority
  *                        (invariant after initialized)
+ * @inherit_rt:           inherit RT scheduling policy from caller
  * @txn_security_ctx:     require sender's security context
  *                        (invariant after initialized)
  * @async_todo:           list of async work items
@@ -257,6 +264,8 @@ struct binder_node {
 		/*
 		 * invariant after initialization
 		 */
+		u8 sched_policy:2;
+		u8 inherit_rt:1;
 		u8 accept_fds:1;
 		u8 txn_security_ctx:1;
 		u8 min_priority;
@@ -323,6 +332,29 @@ struct binder_ref {
 	struct binder_proc *proc;
 	struct binder_node *node;
 	struct binder_ref_death *death;
+};
+
+/**
+ * struct binder_priority - scheduler policy, priority and uclamp
+ * @sched_policy            scheduler policy
+ * @prio                    [100..139] for SCHED_NORMAL, [0..99] for FIFO/RT
+ * @uclamp                  [0..1024] for UCLAMP_MIN & UCLAMP_MAX
+ * The binder driver supports inheriting the following scheduler policies:
+ * SCHED_NORMAL
+ * SCHED_BATCH
+ * SCHED_FIFO
+ * SCHED_RR
+ */
+struct binder_priority {
+	unsigned int sched_policy;
+	int prio;
+	unsigned int uclamp[UCLAMP_CNT];
+};
+
+enum binder_prio_state {
+	BINDER_PRIO_SET,	/* desired priority set */
+	BINDER_PRIO_PENDING,	/* initiated a saved priority restore */
+	BINDER_PRIO_ABORT,	/* abort the pending priority restore */
 };
 
 /**
@@ -425,7 +457,7 @@ struct binder_proc {
 	int requested_threads;
 	int requested_threads_started;
 	int tmp_ref;
-	long default_priority;
+	struct binder_priority default_priority;
 	struct dentry *debugfs_entry;
 	struct binder_alloc alloc;
 	struct binder_context *context;
@@ -434,6 +466,66 @@ struct binder_proc {
 	struct dentry *binderfs_entry;
 	bool oneway_spam_detection_enabled;
 };
+
+struct binder_proc_wrap {
+	struct binder_proc proc;
+	spinlock_t lock;
+};
+
+static inline struct binder_proc *
+binder_proc_entry(struct binder_alloc *alloc)
+{
+	return container_of(alloc, struct binder_proc, alloc);
+}
+
+static inline struct binder_proc_wrap *
+binder_proc_wrap_entry(struct binder_proc *proc)
+{
+	return container_of(proc, struct binder_proc_wrap, proc);
+}
+
+static inline struct binder_proc_wrap *
+binder_alloc_to_proc_wrap(struct binder_alloc *alloc)
+{
+	return binder_proc_wrap_entry(binder_proc_entry(alloc));
+}
+
+static inline void binder_alloc_lock_init(struct binder_alloc *alloc)
+{
+	spin_lock_init(&binder_alloc_to_proc_wrap(alloc)->lock);
+}
+
+static inline void binder_alloc_lock(struct binder_alloc *alloc)
+{
+	spin_lock(&binder_alloc_to_proc_wrap(alloc)->lock);
+}
+
+static inline void binder_alloc_unlock(struct binder_alloc *alloc)
+{
+	spin_unlock(&binder_alloc_to_proc_wrap(alloc)->lock);
+}
+
+static inline int binder_alloc_trylock(struct binder_alloc *alloc)
+{
+	return spin_trylock(&binder_alloc_to_proc_wrap(alloc)->lock);
+}
+
+/**
+ * binder_alloc_get_free_async_space() - get free space available for async
+ * @alloc:	binder_alloc for this proc
+ *
+ * Return:	the bytes remaining in the address-space for async transactions
+ */
+static inline size_t
+binder_alloc_get_free_async_space(struct binder_alloc *alloc)
+{
+	size_t free_async_space;
+
+	binder_alloc_lock(alloc);
+	free_async_space = alloc->free_async_space;
+	binder_alloc_unlock(alloc);
+	return free_async_space;
+}
 
 /**
  * struct binder_thread - binder thread bookkeeping
@@ -459,8 +551,6 @@ struct binder_proc {
  *                        (only accessed by this thread)
  * @reply_error:          transaction errors reported by target thread
  *                        (protected by @proc->inner_lock)
- * @ee:                   extended error information from this thread
- *                        (protected by @proc->inner_lock)
  * @wait:                 wait queue for thread work
  * @stats:                per-thread statistics
  *                        (atomics, no lock needed)
@@ -470,6 +560,13 @@ struct binder_proc {
  * @is_dead:              thread is dead and awaiting free
  *                        when outstanding transactions are cleaned up
  *                        (protected by @proc->inner_lock)
+ * @task:                 struct task_struct for this thread
+ * @prio_lock:            protects thread priority fields
+ * @prio_next:            saved priority to be restored next
+ *                        (protected by @prio_lock)
+ * @prio_state:           state of the priority restore process as
+ *                        defined by enum binder_prio_state
+ *                        (protected by @prio_lock)
  *
  * Bookkeeping structure for binder threads.
  */
@@ -485,11 +582,14 @@ struct binder_thread {
 	bool process_todo;
 	struct binder_error return_error;
 	struct binder_error reply_error;
-	struct binder_extended_error ee;
 	wait_queue_head_t wait;
 	struct binder_stats stats;
 	atomic_t tmp_ref;
 	bool is_dead;
+	struct task_struct *task;
+	spinlock_t prio_lock;
+	struct binder_priority prio_next;
+	enum binder_prio_state prio_state;
 };
 
 /**
@@ -497,7 +597,6 @@ struct binder_thread {
  * @fixup_entry:          list entry
  * @file:                 struct file to be associated with new fd
  * @offset:               offset in buffer data to this fixup
- * @target_fd:            fd to use by the target to install @file
  *
  * List element for fd fixups in a transaction. Since file
  * descriptors need to be allocated in the context of the
@@ -508,7 +607,6 @@ struct binder_txn_fd_fixup {
 	struct list_head fixup_entry;
 	struct file *file;
 	size_t offset;
-	int target_fd;
 };
 
 struct binder_transaction {
@@ -527,8 +625,10 @@ struct binder_transaction {
 	struct binder_buffer *buffer;
 	unsigned int    code;
 	unsigned int    flags;
-	long    priority;
-	long    saved_priority;
+	struct binder_priority priority;
+	struct binder_priority saved_priority;
+	bool set_priority_called;
+	bool is_nested;
 	kuid_t  sender_euid;
 	ktime_t start_time;
 	struct list_head fd_fixups;
@@ -540,6 +640,7 @@ struct binder_transaction {
 	 * during thread teardown
 	 */
 	spinlock_t lock;
+	ANDROID_VENDOR_DATA(1);
 };
 
 /**

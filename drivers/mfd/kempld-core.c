@@ -349,7 +349,7 @@ static ssize_t pld_version_show(struct device *dev,
 {
 	struct kempld_device_data *pld = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "%s\n", pld->info.version);
+	return scnprintf(buf, PAGE_SIZE, "%s\n", pld->info.version);
 }
 
 static ssize_t pld_specification_show(struct device *dev,
@@ -357,7 +357,8 @@ static ssize_t pld_specification_show(struct device *dev,
 {
 	struct kempld_device_data *pld = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "%d.%d\n", pld->info.spec_major, pld->info.spec_minor);
+	return scnprintf(buf, PAGE_SIZE, "%d.%d\n", pld->info.spec_major,
+		       pld->info.spec_minor);
 }
 
 static ssize_t pld_type_show(struct device *dev,
@@ -365,7 +366,7 @@ static ssize_t pld_type_show(struct device *dev,
 {
 	struct kempld_device_data *pld = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "%s\n", kempld_get_type_string(pld));
+	return scnprintf(buf, PAGE_SIZE, "%s\n", kempld_get_type_string(pld));
 }
 
 static DEVICE_ATTR_RO(pld_version);
@@ -535,7 +536,7 @@ static int kempld_probe(struct platform_device *pdev)
 	return kempld_detect_device(pld);
 }
 
-static void kempld_remove(struct platform_device *pdev)
+static int kempld_remove(struct platform_device *pdev)
 {
 	struct kempld_device_data *pld = platform_get_drvdata(pdev);
 	const struct kempld_platform_data *pdata = dev_get_platdata(pld->dev);
@@ -544,6 +545,8 @@ static void kempld_remove(struct platform_device *pdev)
 
 	mfd_remove_devices(&pdev->dev);
 	pdata->release_hardware_mutex(pld);
+
+	return 0;
 }
 
 #ifdef CONFIG_ACPI
@@ -561,7 +564,7 @@ static struct platform_driver kempld_driver = {
 		.acpi_match_table = ACPI_PTR(kempld_acpi_table),
 	},
 	.probe		= kempld_probe,
-	.remove_new	= kempld_remove,
+	.remove		= kempld_remove,
 };
 
 static const struct dmi_system_id kempld_dmi_table[] __initconst = {

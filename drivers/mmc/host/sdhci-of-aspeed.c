@@ -450,19 +450,22 @@ err_pltfm_free:
 	return ret;
 }
 
-static void aspeed_sdhci_remove(struct platform_device *pdev)
+static int aspeed_sdhci_remove(struct platform_device *pdev)
 {
 	struct sdhci_pltfm_host *pltfm_host;
 	struct sdhci_host *host;
+	int dead = 0;
 
 	host = platform_get_drvdata(pdev);
 	pltfm_host = sdhci_priv(host);
 
-	sdhci_remove_host(host, 0);
+	sdhci_remove_host(host, dead);
 
 	clk_disable_unprepare(pltfm_host->clk);
 
 	sdhci_pltfm_free(pdev);
+
+	return 0;
 }
 
 static const struct aspeed_sdhci_pdata ast2400_sdhci_pdata = {
@@ -518,7 +521,7 @@ static struct platform_driver aspeed_sdhci_driver = {
 		.of_match_table = aspeed_sdhci_of_match,
 	},
 	.probe		= aspeed_sdhci_probe,
-	.remove_new	= aspeed_sdhci_remove,
+	.remove		= aspeed_sdhci_remove,
 };
 
 static int aspeed_sdc_probe(struct platform_device *pdev)
@@ -544,7 +547,8 @@ static int aspeed_sdc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	sdc->regs = devm_platform_get_and_ioremap_resource(pdev, 0, &sdc->res);
+	sdc->res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	sdc->regs = devm_ioremap_resource(&pdev->dev, sdc->res);
 	if (IS_ERR(sdc->regs)) {
 		ret = PTR_ERR(sdc->regs);
 		goto err_clk;
@@ -571,11 +575,13 @@ err_clk:
 	return ret;
 }
 
-static void aspeed_sdc_remove(struct platform_device *pdev)
+static int aspeed_sdc_remove(struct platform_device *pdev)
 {
 	struct aspeed_sdc *sdc = dev_get_drvdata(&pdev->dev);
 
 	clk_disable_unprepare(sdc->clk);
+
+	return 0;
 }
 
 static const struct of_device_id aspeed_sdc_of_match[] = {
@@ -595,11 +601,30 @@ static struct platform_driver aspeed_sdc_driver = {
 		.of_match_table = aspeed_sdc_of_match,
 	},
 	.probe		= aspeed_sdc_probe,
-	.remove_new	= aspeed_sdc_remove,
+	.remove		= aspeed_sdc_remove,
 };
 
 #if defined(CONFIG_MMC_SDHCI_OF_ASPEED_TEST)
 #include "sdhci-of-aspeed-test.c"
+
+static inline int aspeed_sdc_tests_init(void)
+{
+	return __kunit_test_suites_init(aspeed_sdc_test_suites);
+}
+
+static inline void aspeed_sdc_tests_exit(void)
+{
+	__kunit_test_suites_exit(aspeed_sdc_test_suites);
+}
+#else
+static inline int aspeed_sdc_tests_init(void)
+{
+	return 0;
+}
+
+static inline void aspeed_sdc_tests_exit(void)
+{
+}
 #endif
 
 static int __init aspeed_sdc_init(void)
@@ -612,7 +637,18 @@ static int __init aspeed_sdc_init(void)
 
 	rc = platform_driver_register(&aspeed_sdc_driver);
 	if (rc < 0)
-		platform_driver_unregister(&aspeed_sdhci_driver);
+		goto cleanup_sdhci;
+
+	rc = aspeed_sdc_tests_init();
+	if (rc < 0) {
+		platform_driver_unregister(&aspeed_sdc_driver);
+		goto cleanup_sdhci;
+	}
+
+	return 0;
+
+cleanup_sdhci:
+	platform_driver_unregister(&aspeed_sdhci_driver);
 
 	return rc;
 }
@@ -620,6 +656,8 @@ module_init(aspeed_sdc_init);
 
 static void __exit aspeed_sdc_exit(void)
 {
+	aspeed_sdc_tests_exit();
+
 	platform_driver_unregister(&aspeed_sdc_driver);
 	platform_driver_unregister(&aspeed_sdhci_driver);
 }

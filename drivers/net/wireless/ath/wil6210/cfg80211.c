@@ -723,13 +723,11 @@ wil_cfg80211_add_iface(struct wiphy *wiphy, const char *name,
 	ndev = vif_to_ndev(vif);
 	ether_addr_copy(ndev->perm_addr, ndev_main->perm_addr);
 	if (is_valid_ether_addr(params->macaddr)) {
-		eth_hw_addr_set(ndev, params->macaddr);
+		ether_addr_copy(ndev->dev_addr, params->macaddr);
 	} else {
-		u8 addr[ETH_ALEN];
-
-		ether_addr_copy(addr, ndev_main->perm_addr);
-		addr[0] = (addr[0] ^ (1 << vif->mid)) |	0x2; /* locally administered */
-		eth_hw_addr_set(ndev, addr);
+		ether_addr_copy(ndev->dev_addr, ndev_main->perm_addr);
+		ndev->dev_addr[0] = (ndev->dev_addr[0] ^ (1 << vif->mid)) |
+			0x2; /* locally administered */
 	}
 	wdev = vif_to_wdev(vif);
 	ether_addr_copy(wdev->address, ndev->dev_addr);
@@ -1653,9 +1651,10 @@ static int wil_cfg80211_add_key(struct wiphy *wiphy,
 				params->seq_len, params->seq);
 			return -EINVAL;
 		}
-	} else {
-		wil_del_rx_key(key_index, key_usage, cs);
 	}
+
+	if (!IS_ERR(cs))
+		wil_del_rx_key(key_index, key_usage, cs);
 
 	if (params->seq && params->seq_len != IEEE80211_GCMP_PN_LEN) {
 		wil_err(wil,
@@ -2082,12 +2081,11 @@ void wil_cfg80211_ap_recovery(struct wil6210_priv *wil)
 
 static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 				      struct net_device *ndev,
-				      struct cfg80211_ap_update *params)
+				      struct cfg80211_beacon_data *bcon)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wireless_dev *wdev = ndev->ieee80211_ptr;
 	struct wil6210_vif *vif = ndev_to_vif(ndev);
-	struct cfg80211_beacon_data *bcon = &params->beacon;
 	int rc;
 	u32 privacy = 0;
 

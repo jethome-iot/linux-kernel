@@ -72,10 +72,6 @@ enum buf_end_align_type {
 	 * buf1 ]|[ buf2 | buf2 | buf2 ][ ...
 	 */
 	NEXT_NEXT_UNALIGNED,
-	/**
-	 * @LOOP_END: The number of enum values in &buf_end_align_type.
-	 * It is used for controlling loop termination.
-	 */
 	LOOP_END,
 };
 
@@ -101,10 +97,10 @@ static bool check_buffer_pages_allocated(struct binder_alloc *alloc,
 	unsigned long end;
 	int page_index;
 
-	end = PAGE_ALIGN(buffer->user_data + size);
-	page_addr = buffer->user_data;
+	end = PAGE_ALIGN((uintptr_t)buffer->user_data + size);
+	page_addr = (uintptr_t)buffer->user_data;
 	for (; page_addr < end; page_addr += PAGE_SIZE) {
-		page_index = (page_addr - alloc->buffer) / PAGE_SIZE;
+		page_index = (page_addr - (uintptr_t)alloc->buffer) / PAGE_SIZE;
 		if (!alloc->pages[page_index].page_ptr ||
 		    !list_empty(&alloc->pages[page_index].lru)) {
 			pr_err("expect alloc but is %s at page index %d\n",

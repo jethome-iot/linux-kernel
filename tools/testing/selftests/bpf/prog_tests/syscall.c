@@ -12,7 +12,7 @@ struct args {
 	int btf_fd;
 };
 
-static void test_syscall_load_prog(void)
+void test_syscall(void)
 {
 	static char verifier_log[8192];
 	struct args ctx = {
@@ -20,20 +20,20 @@ static void test_syscall_load_prog(void)
 		.log_buf = (uintptr_t) verifier_log,
 		.log_size = sizeof(verifier_log),
 	};
-	LIBBPF_OPTS(bpf_test_run_opts, tattr,
+	struct bpf_prog_test_run_attr tattr = {
 		.ctx_in = &ctx,
 		.ctx_size_in = sizeof(ctx),
-	);
+	};
 	struct syscall *skel = NULL;
 	__u64 key = 12, value = 0;
-	int err, prog_fd;
+	int err;
 
 	skel = syscall__open_and_load();
 	if (!ASSERT_OK_PTR(skel, "skel_load"))
 		goto cleanup;
 
-	prog_fd = bpf_program__fd(skel->progs.load_prog);
-	err = bpf_prog_test_run_opts(prog_fd, &tattr);
+	tattr.prog_fd = bpf_program__fd(skel->progs.bpf_prog);
+	err = bpf_prog_test_run_xattr(&tattr);
 	ASSERT_EQ(err, 0, "err");
 	ASSERT_EQ(tattr.retval, 1, "retval");
 	ASSERT_GT(ctx.map_fd, 0, "ctx.map_fd");
@@ -52,30 +52,4 @@ cleanup:
 		close(ctx.map_fd);
 	if (ctx.btf_fd > 0)
 		close(ctx.btf_fd);
-}
-
-static void test_syscall_update_outer_map(void)
-{
-	LIBBPF_OPTS(bpf_test_run_opts, opts);
-	struct syscall *skel;
-	int err, prog_fd;
-
-	skel = syscall__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "skel_load"))
-		goto cleanup;
-
-	prog_fd = bpf_program__fd(skel->progs.update_outer_map);
-	err = bpf_prog_test_run_opts(prog_fd, &opts);
-	ASSERT_EQ(err, 0, "err");
-	ASSERT_EQ(opts.retval, 1, "retval");
-cleanup:
-	syscall__destroy(skel);
-}
-
-void test_syscall(void)
-{
-	if (test__start_subtest("load_prog"))
-		test_syscall_load_prog();
-	if (test__start_subtest("update_outer_map"))
-		test_syscall_update_outer_map();
 }

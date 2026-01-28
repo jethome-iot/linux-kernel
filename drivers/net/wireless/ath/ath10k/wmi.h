@@ -3,7 +3,6 @@
  * Copyright (c) 2005-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _WMI_H_
@@ -3171,7 +3170,7 @@ struct wmi_start_scan_common {
 	/* dwell time in msec on passive channels */
 	__le32 dwell_time_passive;
 	/*
-	 * min time in msec on the BSS channel,only valid if at least one
+	 * min time in msec on the BSS channel,only valid if atleast one
 	 * VDEV is active
 	 */
 	__le32 min_rest_time;
@@ -3197,7 +3196,7 @@ struct wmi_start_scan_common {
 	 * and bssid_list
 	 */
 	__le32 repeat_probe_time;
-	/* time in msec between 2 consecutive probe requests with in a set. */
+	/* time in msec between 2 consequetive probe requests with in a set. */
 	__le32 probe_spacing_time;
 	/*
 	 * data inactivity time in msec on bss channel that will be used by
@@ -3479,9 +3478,7 @@ struct wmi_phyerr_event {
 	__le32 num_phyerrs;
 	__le32 tsf_l32;
 	__le32 tsf_u32;
-
-	/* array of struct wmi_phyerr */
-	u8 phyerrs[];
+	struct wmi_phyerr phyerrs[];
 } __packed;
 
 struct wmi_10_4_phyerr_event {
@@ -3855,9 +3852,9 @@ enum wmi_pdev_param {
 	 * retransmitting frames.
 	 */
 	WMI_PDEV_PARAM_DYNAMIC_BW,
-	/* Non aggregate/ 11g sw retry threshold.0-disable */
+	/* Non aggregrate/ 11g sw retry threshold.0-disable */
 	WMI_PDEV_PARAM_NON_AGG_SW_RETRY_TH,
-	/* aggregate sw retry threshold. 0-disable*/
+	/* aggregrate sw retry threshold. 0-disable*/
 	WMI_PDEV_PARAM_AGG_SW_RETRY_TH,
 	/* Station kickout threshold (non of consecutive failures).0-disable */
 	WMI_PDEV_PARAM_STA_KICKOUT_TH,
@@ -3954,9 +3951,9 @@ enum wmi_10x_pdev_param {
 	WMI_10X_PDEV_PARAM_PROTECTION_MODE,
 	/* Dynamic bandwidth 0: disable 1: enable */
 	WMI_10X_PDEV_PARAM_DYNAMIC_BW,
-	/* Non aggregate/ 11g sw retry threshold.0-disable */
+	/* Non aggregrate/ 11g sw retry threshold.0-disable */
 	WMI_10X_PDEV_PARAM_NON_AGG_SW_RETRY_TH,
-	/* aggregate sw retry threshold. 0-disable*/
+	/* aggregrate sw retry threshold. 0-disable*/
 	WMI_10X_PDEV_PARAM_AGG_SW_RETRY_TH,
 	/* Station kickout threshold (non of consecutive failures).0-disable */
 	WMI_10X_PDEV_PARAM_STA_KICKOUT_TH,
@@ -4398,7 +4395,7 @@ struct wmi_pdev_stats_tx {
 	/* wal pdev continuous xretry */
 	__le32 pdev_cont_xretry;
 
-	/* wal pdev continuous xretry */
+	/* wal pdev continous xretry */
 	__le32 pdev_tx_timeout;
 
 	/* wal pdev resets  */
@@ -5241,7 +5238,7 @@ enum wmi_vdev_param {
 	 * scheduler.
 	 */
 	WMI_VDEV_OC_SCHEDULER_AIR_TIME_LIMIT,
-	/* enable/disable WDS for this VDEV  */
+	/* enable/dsiable WDS for this VDEV  */
 	WMI_VDEV_PARAM_WDS,
 	/* ATIM Window */
 	WMI_VDEV_PARAM_ATIM_WINDOW,
@@ -5373,7 +5370,7 @@ enum wmi_10x_vdev_param {
 	 * scheduler.
 	 */
 	WMI_10X_VDEV_OC_SCHEDULER_AIR_TIME_LIMIT,
-	/* enable/disable WDS for this VDEV  */
+	/* enable/dsiable WDS for this VDEV  */
 	WMI_10X_VDEV_PARAM_WDS,
 	/* ATIM Window */
 	WMI_10X_VDEV_PARAM_ATIM_WINDOW,
@@ -5905,7 +5902,7 @@ enum wmi_sta_ps_param_tx_wake_threshold {
 enum wmi_sta_ps_param_pspoll_count {
 	WMI_STA_PS_PSPOLL_COUNT_NO_MAX = 0,
 	/*
-	 * Values greater than 0 indicate the maximum number of PS-Poll frames
+	 * Values greater than 0 indicate the maximum numer of PS-Poll frames
 	 * FW will send before waking up.
 	 */
 
@@ -6948,7 +6945,7 @@ struct wmi_echo_ev_arg {
 };
 
 struct wmi_pdev_temperature_event {
-	/* temperature value in Celsius degree */
+	/* temperature value in Celcius degree */
 	__le32 temperature;
 } __packed;
 
@@ -7503,6 +7500,8 @@ void ath10k_wmi_main_op_fw_stats_fill(struct ath10k *ar,
 void ath10k_wmi_10x_op_fw_stats_fill(struct ath10k *ar,
 				     struct ath10k_fw_stats *fw_stats,
 				     char *buf);
+size_t ath10k_wmi_fw_stats_num_peers(struct list_head *head);
+size_t ath10k_wmi_fw_stats_num_vdevs(struct list_head *head);
 void ath10k_wmi_10_4_op_fw_stats_fill(struct ath10k *ar,
 				      struct ath10k_fw_stats *fw_stats,
 				      char *buf);

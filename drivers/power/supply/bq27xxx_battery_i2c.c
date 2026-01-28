@@ -136,9 +136,9 @@ static int bq27xxx_battery_i2c_bulk_write(struct bq27xxx_device_info *di,
 	return 0;
 }
 
-static int bq27xxx_battery_i2c_probe(struct i2c_client *client)
+static int bq27xxx_battery_i2c_probe(struct i2c_client *client,
+				     const struct i2c_device_id *id)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct bq27xxx_device_info *di;
 	int ret;
 	char *name;
@@ -205,16 +205,20 @@ err_failed:
 	return ret;
 }
 
-static void bq27xxx_battery_i2c_remove(struct i2c_client *client)
+static int bq27xxx_battery_i2c_remove(struct i2c_client *client)
 {
 	struct bq27xxx_device_info *di = i2c_get_clientdata(client);
 
-	free_irq(client->irq, di);
+	if (client->irq)
+		free_irq(client->irq, di);
+
 	bq27xxx_battery_teardown(di);
 
 	mutex_lock(&battery_mutex);
 	idr_remove(&battery_id, di->id);
 	mutex_unlock(&battery_mutex);
+
+	return 0;
 }
 
 static const struct i2c_device_id bq27xxx_i2c_id_table[] = {
@@ -295,7 +299,6 @@ static struct i2c_driver bq27xxx_battery_i2c_driver = {
 	.driver = {
 		.name = "bq27xxx-battery",
 		.of_match_table = of_match_ptr(bq27xxx_battery_i2c_of_match_table),
-		.pm = &bq27xxx_battery_battery_pm_ops,
 	},
 	.probe = bq27xxx_battery_i2c_probe,
 	.remove = bq27xxx_battery_i2c_remove,

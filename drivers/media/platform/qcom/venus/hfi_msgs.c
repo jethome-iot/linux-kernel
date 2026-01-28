@@ -32,7 +32,6 @@ static void event_seq_changed(struct venus_core *core, struct venus_inst *inst,
 	struct hfi_colour_space *colour_info;
 	struct hfi_buffer_requirements *bufreq;
 	struct hfi_extradata_input_crop *crop;
-	struct hfi_dpb_counts *dpb_count;
 	u8 *data_ptr;
 	u32 ptype;
 
@@ -99,7 +98,7 @@ static void event_seq_changed(struct venus_core *core, struct venus_inst *inst,
 		case HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS:
 			data_ptr += sizeof(u32);
 			bufreq = (struct hfi_buffer_requirements *)data_ptr;
-			event.buf_count = hfi_bufreq_get_count_min(bufreq, ver);
+			event.buf_count = HFI_BUFREQ_COUNT_MIN(bufreq, ver);
 			data_ptr += sizeof(*bufreq);
 			break;
 		case HFI_INDEX_EXTRADATA_INPUT_CROP:
@@ -110,12 +109,6 @@ static void event_seq_changed(struct venus_core *core, struct venus_inst *inst,
 			event.input_crop.width = crop->width;
 			event.input_crop.height = crop->height;
 			data_ptr += sizeof(*crop);
-			break;
-		case HFI_PROPERTY_PARAM_VDEC_DPB_COUNTS:
-			data_ptr += sizeof(u32);
-			dpb_count = (struct hfi_dpb_counts *)data_ptr;
-			event.buf_count = dpb_count->fw_min_cnt;
-			data_ptr += sizeof(*dpb_count);
 			break;
 		default:
 			break;
@@ -233,7 +226,7 @@ static void hfi_sys_init_done(struct venus_core *core, struct venus_inst *inst,
 		goto done;
 	}
 
-	rem_bytes = pkt->hdr.size - sizeof(*pkt);
+	rem_bytes = pkt->hdr.size - sizeof(*pkt) + sizeof(u32);
 	if (rem_bytes <= 0) {
 		/* missing property data */
 		error = HFI_ERR_SYS_INSUFFICIENT_RESOURCES;
@@ -248,15 +241,13 @@ done:
 }
 
 static void
-sys_get_prop_image_version(struct venus_core *core,
+sys_get_prop_image_version(struct device *dev,
 			   struct hfi_msg_sys_property_info_pkt *pkt)
 {
-	struct device *dev = core->dev;
 	u8 *smem_tbl_ptr;
 	u8 *img_ver;
 	int req_bytes;
 	size_t smem_blk_sz;
-	int ret;
 
 	req_bytes = pkt->hdr.size - sizeof(*pkt);
 
@@ -265,30 +256,8 @@ sys_get_prop_image_version(struct venus_core *core,
 		return;
 
 	img_ver = pkt->data;
-	if (!img_ver)
-		return;
 
-	ret = sscanf(img_ver, "14:video-firmware.%u.%u-%u",
-		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
-	if (ret)
-		goto done;
-
-	ret = sscanf(img_ver, "14:VIDEO.VPU.%u.%u-%u",
-		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
-	if (ret)
-		goto done;
-
-	ret = sscanf(img_ver, "14:VIDEO.VE.%u.%u-%u",
-		     &core->venus_ver.major, &core->venus_ver.minor, &core->venus_ver.rev);
-	if (ret)
-		goto done;
-
-	dev_err(dev, VDBGL "error reading F/W version\n");
-	return;
-
-done:
-	dev_dbg(dev, VDBGL "F/W version: %s, major %u, minor %u, revision %u\n",
-		img_ver, core->venus_ver.major, core->venus_ver.minor, core->venus_ver.rev);
+	dev_dbg(dev, VDBGL "F/W version: %s\n", img_ver);
 
 	smem_tbl_ptr = qcom_smem_get(QCOM_SMEM_HOST_ANY,
 		SMEM_IMG_VER_TBL, &smem_blk_sz);
@@ -310,7 +279,7 @@ static void hfi_sys_property_info(struct venus_core *core,
 
 	switch (pkt->property) {
 	case HFI_PROPERTY_SYS_IMAGE_VERSION:
-		sys_get_prop_image_version(core, pkt);
+		sys_get_prop_image_version(dev, pkt);
 		break;
 	default:
 		dev_dbg(dev, VDBGL "unknown property data\n");
@@ -458,7 +427,7 @@ static void hfi_session_init_done(struct venus_core *core,
 	if (!IS_V1(core))
 		goto done;
 
-	rem_bytes = pkt->shdr.hdr.size - sizeof(*pkt);
+	rem_bytes = pkt->shdr.hdr.size - sizeof(*pkt) + sizeof(u32);
 	if (rem_bytes <= 0) {
 		error = HFI_ERR_SESSION_INSUFFICIENT_RESOURCES;
 		goto done;

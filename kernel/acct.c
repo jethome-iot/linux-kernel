@@ -60,6 +60,7 @@
 #include <linux/sched/cputime.h>
 
 #include <asm/div64.h>
+#include <linux/blkdev.h> /* sector_div */
 #include <linux/pid_namespace.h>
 #include <linux/fs_pin.h>
 
@@ -70,30 +71,10 @@
  * Turned into sysctl-controllable parameters. AV, 12/11/98
  */
 
-static int acct_parm[3] = {4, 2, 30};
+int acct_parm[3] = {4, 2, 30};
 #define RESUME		(acct_parm[0])	/* >foo% free space - resume */
 #define SUSPEND		(acct_parm[1])	/* <foo% free space - suspend */
 #define ACCT_TIMEOUT	(acct_parm[2])	/* foo second timeout between checks */
-
-#ifdef CONFIG_SYSCTL
-static struct ctl_table kern_acct_table[] = {
-	{
-		.procname       = "acct",
-		.data           = &acct_parm,
-		.maxlen         = 3*sizeof(int),
-		.mode           = 0644,
-		.proc_handler   = proc_dointvec,
-	},
-	{ }
-};
-
-static __init int kernel_acct_sysctls_init(void)
-{
-	register_sysctl_init("kernel", kern_acct_table);
-	return 0;
-}
-late_initcall(kernel_acct_sysctls_init);
-#endif /* CONFIG_SYSCTL */
 
 /*
  * External references and all of the globals.
@@ -246,7 +227,7 @@ static int acct_on(struct filename *pathname)
 		filp_close(file, NULL);
 		return PTR_ERR(internal);
 	}
-	err = mnt_get_write_access(internal);
+	err = __mnt_want_write(internal);
 	if (err) {
 		mntput(internal);
 		kfree(acct);
@@ -271,7 +252,7 @@ static int acct_on(struct filename *pathname)
 	old = xchg(&ns->bacct, &acct->pin);
 	mutex_unlock(&acct->lock);
 	pin_kill(old);
-	mnt_put_write_access(mnt);
+	__mnt_drop_write(mnt);
 	mntput(mnt);
 	return 0;
 }
@@ -320,7 +301,7 @@ void acct_exit_ns(struct pid_namespace *ns)
 }
 
 /*
- *  encode an u64 into a comp_t
+ *  encode an unsigned long into a comp_t
  *
  *  This routine has been adopted from the encode_comp_t() function in
  *  the kern_acct.c file of the FreeBSD operating system. The encoding
@@ -331,7 +312,7 @@ void acct_exit_ns(struct pid_namespace *ns)
 #define	EXPSIZE		3			/* Base 8 (3 bit) exponent. */
 #define	MAXFRACT	((1 << MANTSIZE) - 1)	/* Maximum fractional value. */
 
-static comp_t encode_comp_t(u64 value)
+static comp_t encode_comp_t(unsigned long value)
 {
 	int exp, rnd;
 
@@ -445,7 +426,7 @@ static void fill_ac(acct_t *ac)
 	memset(ac, 0, sizeof(acct_t));
 
 	ac->ac_version = ACCT_VERSION | ACCT_BYTEORDER;
-	strscpy(ac->ac_comm, current->comm, sizeof(ac->ac_comm));
+	strlcpy(ac->ac_comm, current->comm, sizeof(ac->ac_comm));
 
 	/* calculate run_time in nsec*/
 	run_time = ktime_get_ns();
@@ -470,7 +451,7 @@ static void fill_ac(acct_t *ac)
 	do_div(elapsed, AHZ);
 	btime = ktime_get_real_seconds() - elapsed;
 	ac->ac_btime = clamp_t(time64_t, btime, 0, U32_MAX);
-#if ACCT_VERSION == 2
+#if ACCT_VERSION==2
 	ac->ac_ahz = AHZ;
 #endif
 
@@ -557,14 +538,15 @@ void acct_collect(long exitcode, int group_dead)
 	unsigned long vsize = 0;
 
 	if (group_dead && current->mm) {
-		struct mm_struct *mm = current->mm;
-		VMA_ITERATOR(vmi, mm, 0);
 		struct vm_area_struct *vma;
 
-		mmap_read_lock(mm);
-		for_each_vma(vmi, vma)
+		mmap_read_lock(current->mm);
+		vma = current->mm->mmap;
+		while (vma) {
 			vsize += vma->vm_end - vma->vm_start;
-		mmap_read_unlock(mm);
+			vma = vma->vm_next;
+		}
+		mmap_read_unlock(current->mm);
 	}
 
 	spin_lock_irq(&current->sighand->siglock);

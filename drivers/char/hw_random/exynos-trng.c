@@ -173,7 +173,7 @@ err_pm_get:
 	return ret;
 }
 
-static void exynos_trng_remove(struct platform_device *pdev)
+static int exynos_trng_remove(struct platform_device *pdev)
 {
 	struct exynos_trng_dev *trng =  platform_get_drvdata(pdev);
 
@@ -181,16 +181,18 @@ static void exynos_trng_remove(struct platform_device *pdev)
 
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+
+	return 0;
 }
 
-static int exynos_trng_suspend(struct device *dev)
+static int __maybe_unused exynos_trng_suspend(struct device *dev)
 {
 	pm_runtime_put_sync(dev);
 
 	return 0;
 }
 
-static int exynos_trng_resume(struct device *dev)
+static int __maybe_unused exynos_trng_resume(struct device *dev)
 {
 	int ret;
 
@@ -203,7 +205,7 @@ static int exynos_trng_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(exynos_trng_pm_ops, exynos_trng_suspend,
+static SIMPLE_DEV_PM_OPS(exynos_trng_pm_ops, exynos_trng_suspend,
 			 exynos_trng_resume);
 
 static const struct of_device_id exynos_trng_dt_match[] = {
@@ -217,11 +219,11 @@ MODULE_DEVICE_TABLE(of, exynos_trng_dt_match);
 static struct platform_driver exynos_trng_driver = {
 	.driver = {
 		.name = "exynos-trng",
-		.pm = pm_sleep_ptr(&exynos_trng_pm_ops),
+		.pm = &exynos_trng_pm_ops,
 		.of_match_table = exynos_trng_dt_match,
 	},
 	.probe = exynos_trng_probe,
-	.remove_new = exynos_trng_remove,
+	.remove = exynos_trng_remove,
 };
 
 module_platform_driver(exynos_trng_driver);

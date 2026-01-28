@@ -14,24 +14,27 @@
 有关测试专用工具的简要概述，参见
 Documentation/translations/zh_CN/dev-tools/testing-overview.rst
 
+.. class:: toc-title
+
+	   目录
+
 .. toctree::
-   :caption: 目录
    :maxdepth: 2
 
    testing-overview
-   sparse
    gcov
    kasan
-   gdb-kernel-debugging
 
 Todolist:
 
  - coccinelle
+ - sparse
  - kcov
  - ubsan
  - kmemleak
  - kcsan
  - kfence
+ - gdb-kernel-debugging
  - kgdb
  - kselftest
  - kunit/index

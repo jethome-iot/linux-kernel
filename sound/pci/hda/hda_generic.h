@@ -9,9 +9,6 @@
 #define __SOUND_HDA_GENERIC_H
 
 #include <linux/leds.h>
-#include "hda_auto_parser.h"
-
-struct hda_jack_callback;
 
 /* table entry for multi-io paths */
 struct hda_multi_io {
@@ -186,7 +183,7 @@ struct hda_gen_spec {
 	struct automic_entry am_entry[MAX_AUTO_MIC_PINS];
 
 	/* for pin sensing */
-	/* current status; set in hda_generic.c */
+	/* current status; set in hda_geneic.c */
 	unsigned int hp_jack_present:1;
 	unsigned int line_jack_present:1;
 	unsigned int speaker_muted:1; /* current status of speaker mute */

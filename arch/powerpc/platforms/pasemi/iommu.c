@@ -11,7 +11,6 @@
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <linux/pci.h>
-#include <linux/of.h>
 #include <asm/iommu.h>
 #include <asm/machdep.h>
 #include <asm/firmware.h>
@@ -254,7 +253,7 @@ void __init iommu_init_early_pasemi(void)
 	iommu_off = 1;
 #else
 	iommu_off = of_chosen &&
-			of_property_read_bool(of_chosen, "linux,iommu-off");
+			of_get_property(of_chosen, "linux,iommu-off", NULL);
 #endif
 	if (iommu_off)
 		return;

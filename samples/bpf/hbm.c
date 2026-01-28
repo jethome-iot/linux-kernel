@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <errno.h>
@@ -45,6 +46,7 @@
 #include <bpf/bpf.h>
 #include <getopt.h>
 
+#include "bpf_rlimit.h"
 #include "cgroup_helpers.h"
 #include "hbm.h"
 #include "bpf_util.h"
@@ -65,7 +67,7 @@ static void Usage(void);
 static void read_trace_pipe2(void);
 static void do_error(char *msg, bool errno_flag);
 
-#define TRACEFS "/sys/kernel/tracing/"
+#define DEBUGFS "/sys/kernel/debug/tracing/"
 
 static struct bpf_program *bpf_prog;
 static struct bpf_object *obj;
@@ -77,7 +79,7 @@ static void read_trace_pipe2(void)
 	FILE *outf;
 	char *outFname = "hbm_out.log";
 
-	trace_fd = open(TRACEFS "trace_pipe", O_RDONLY, 0);
+	trace_fd = open(DEBUGFS "trace_pipe", O_RDONLY, 0);
 	if (trace_fd < 0) {
 		printf("Error opening trace_pipe\n");
 		return;
@@ -118,9 +120,6 @@ static void do_error(char *msg, bool errno_flag)
 
 static int prog_load(char *prog)
 {
-	struct bpf_program *pos;
-	const char *sec_name;
-
 	obj = bpf_object__open_file(prog, NULL);
 	if (libbpf_get_error(obj)) {
 		printf("ERROR: opening BPF object file failed\n");
@@ -133,13 +132,7 @@ static int prog_load(char *prog)
 		goto err;
 	}
 
-	bpf_object__for_each_program(pos, obj) {
-		sec_name = bpf_program__section_name(pos);
-		if (sec_name && !strcmp(sec_name, "cgroup_skb/egress")) {
-			bpf_prog = pos;
-			break;
-		}
-	}
+	bpf_prog = bpf_object__find_program_by_title(obj, "cgroup_skb/egress");
 	if (!bpf_prog) {
 		printf("ERROR: finding a prog in obj file failed\n");
 		goto err;
@@ -498,6 +491,7 @@ int main(int argc, char **argv)
 					"Option -%c requires an argument.\n\n",
 					optopt);
 		case 'h':
+			__fallthrough;
 		default:
 			Usage();
 			return 0;
@@ -507,9 +501,6 @@ int main(int argc, char **argv)
 	if (optind < argc)
 		prog = argv[optind];
 	printf("HBM prog: %s\n", prog != NULL ? prog : "NULL");
-
-	/* Use libbpf 1.0 API mode */
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 
 	return run_bpf_prog(prog, cg_id);
 }

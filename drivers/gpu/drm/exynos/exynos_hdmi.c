@@ -21,8 +21,8 @@
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/mfd/syscon.h>
-#include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -893,7 +893,7 @@ static int hdmi_get_modes(struct drm_connector *connector)
 	if (!edid)
 		return -ENODEV;
 
-	hdata->dvi_mode = !connector->display_info.is_hdmi;
+	hdata->dvi_mode = !drm_detect_hdmi_monitor(edid);
 	DRM_DEV_DEBUG_KMS(hdata->dev, "%s : width[%d] x height[%d]\n",
 			  (hdata->dvi_mode ? "dvi monitor" : "hdmi monitor"),
 			  edid->width_cm, edid->height_cm);
@@ -922,8 +922,8 @@ static int hdmi_find_phy_conf(struct hdmi_context *hdata, u32 pixel_clock)
 	return -EINVAL;
 }
 
-static enum drm_mode_status hdmi_mode_valid(struct drm_connector *connector,
-					    struct drm_display_mode *mode)
+static int hdmi_mode_valid(struct drm_connector *connector,
+			struct drm_display_mode *mode)
 {
 	struct hdmi_context *hdata = connector_to_hdmi(connector);
 	int ret;
@@ -1594,12 +1594,12 @@ static int hdmi_audio_hw_params(struct device *dev, void *data,
 	struct hdmi_context *hdata = dev_get_drvdata(dev);
 
 	if (daifmt->fmt != HDMI_I2S || daifmt->bit_clk_inv ||
-	    daifmt->frame_clk_inv || daifmt->bit_clk_provider ||
-	    daifmt->frame_clk_provider) {
+	    daifmt->frame_clk_inv || daifmt->bit_clk_master ||
+	    daifmt->frame_clk_master) {
 		dev_err(dev, "%s: Bad flags %d %d %d %d\n", __func__,
 			daifmt->bit_clk_inv, daifmt->frame_clk_inv,
-			daifmt->bit_clk_provider,
-			daifmt->frame_clk_provider);
+			daifmt->bit_clk_master,
+			daifmt->frame_clk_master);
 		return -EINVAL;
 	}
 
@@ -2069,7 +2069,7 @@ err_ddc:
 	return ret;
 }
 
-static void hdmi_remove(struct platform_device *pdev)
+static int hdmi_remove(struct platform_device *pdev)
 {
 	struct hdmi_context *hdata = platform_get_drvdata(pdev);
 
@@ -2092,6 +2092,8 @@ static void hdmi_remove(struct platform_device *pdev)
 	put_device(&hdata->ddc_adpt->dev);
 
 	mutex_destroy(&hdata->mutex);
+
+	return 0;
 }
 
 static int __maybe_unused exynos_hdmi_suspend(struct device *dev)
@@ -2123,7 +2125,7 @@ static const struct dev_pm_ops exynos_hdmi_pm_ops = {
 
 struct platform_driver hdmi_driver = {
 	.probe		= hdmi_probe,
-	.remove_new	= hdmi_remove,
+	.remove		= hdmi_remove,
 	.driver		= {
 		.name	= "exynos-hdmi",
 		.owner	= THIS_MODULE,

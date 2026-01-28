@@ -714,17 +714,17 @@ static void _rtl92ee_gen_refresh_led_state(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_ps_ctl *ppsc = rtl_psc(rtl_priv(hw));
-	enum rtl_led_pin pin0 = rtlpriv->ledctl.sw_led0;
+	struct rtl_led *pled0 = &rtlpriv->ledctl.sw_led0;
 
 	if (rtlpriv->rtlhal.up_first_time)
 		return;
 
 	if (ppsc->rfoff_reason == RF_CHANGE_BY_IPS)
-		rtl92ee_sw_led_on(hw, pin0);
+		rtl92ee_sw_led_on(hw, pled0);
 	else if (ppsc->rfoff_reason == RF_CHANGE_BY_INIT)
-		rtl92ee_sw_led_on(hw, pin0);
+		rtl92ee_sw_led_on(hw, pled0);
 	else
-		rtl92ee_sw_led_off(hw, pin0);
+		rtl92ee_sw_led_off(hw, pled0);
 }
 
 static bool _rtl92ee_init_mac(struct ieee80211_hw *hw)
@@ -1320,6 +1320,7 @@ int rtl92ee_hw_init(struct ieee80211_hw *hw)
 		err = 1;
 		return err;
 	}
+	rtlhal->rx_tag = 0;
 	rtl_write_word(rtlpriv, REG_PCIE_CTRL_REG, 0x8000);
 	err = rtl92ee_download_fw(hw, false);
 	if (err) {
@@ -1429,7 +1430,7 @@ static enum version_8192e _rtl92ee_read_chip_version(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_phy *rtlphy = &rtlpriv->phy;
-	enum version_8192e version;
+	enum version_8192e version = VERSION_UNKNOWN;
 	u32 value32;
 
 	rtlphy->rf_type = RF_2T2R;

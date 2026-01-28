@@ -608,7 +608,7 @@ static int clear_one_vid(struct ncsi_dev_priv *ndp, struct ncsi_channel *nc,
 	bitmap = &ncf->bitmap;
 
 	spin_lock_irqsave(&nc->lock, flags);
-	index = find_first_bit(bitmap, ncf->n_vids);
+	index = find_next_bit(bitmap, ncf->n_vids, 0);
 	if (index >= ncf->n_vids) {
 		spin_unlock_irqrestore(&nc->lock, flags);
 		return -1;
@@ -667,7 +667,7 @@ static int set_one_vid(struct ncsi_dev_priv *ndp, struct ncsi_channel *nc,
 		return -1;
 	}
 
-	index = find_first_zero_bit(bitmap, ncf->n_vids);
+	index = find_next_zero_bit(bitmap, ncf->n_vids, 0);
 	if (index < 0 || index >= ncf->n_vids) {
 		netdev_err(ndp->ndev.dev,
 			   "Channel %u already has all VLAN filters set\n",
@@ -688,6 +688,8 @@ static int set_one_vid(struct ncsi_dev_priv *ndp, struct ncsi_channel *nc,
 
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_NCSI_OEM_CMD_KEEP_PHY)
 
 static int ncsi_oem_keep_phy_intel(struct ncsi_cmd_arg *nca)
 {
@@ -713,6 +715,10 @@ static int ncsi_oem_keep_phy_intel(struct ncsi_cmd_arg *nca)
 			   nca->type);
 	return ret;
 }
+
+#endif
+
+#if IS_ENABLED(CONFIG_NCSI_OEM_CMD_GET_MAC)
 
 /* NCSI OEM Command APIs */
 static int ncsi_oem_gma_handler_bcm(struct ncsi_cmd_arg *nca)
@@ -849,6 +855,8 @@ static int ncsi_gma_handler(struct ncsi_cmd_arg *nca, unsigned int mf_id)
 	/* Get Mac address from NCSI device */
 	return nch->handler(nca);
 }
+
+#endif /* CONFIG_NCSI_OEM_CMD_GET_MAC */
 
 /* Determine if a given channel from the channel_queue should be used for Tx */
 static bool ncsi_channel_is_tx(struct ncsi_dev_priv *ndp,
@@ -1031,23 +1039,20 @@ static void ncsi_configure_channel(struct ncsi_dev_priv *ndp)
 			goto error;
 		}
 
-		nd->state = IS_ENABLED(CONFIG_NCSI_OEM_CMD_GET_MAC)
-			  ? ncsi_dev_state_config_oem_gma
-			  : ncsi_dev_state_config_clear_vids;
+		nd->state = ncsi_dev_state_config_oem_gma;
 		break;
 	case ncsi_dev_state_config_oem_gma:
 		nd->state = ncsi_dev_state_config_clear_vids;
+		ret = -1;
 
+#if IS_ENABLED(CONFIG_NCSI_OEM_CMD_GET_MAC)
+		nca.type = NCSI_PKT_CMD_OEM;
 		nca.package = np->id;
 		nca.channel = nc->id;
 		ndp->pending_req_num = 1;
-		if (nc->version.major >= 1 && nc->version.minor >= 2) {
-			nca.type = NCSI_PKT_CMD_GMCMA;
-			ret = ncsi_xmit_cmd(&nca);
-		} else {
-			nca.type = NCSI_PKT_CMD_OEM;
-			ret = ncsi_gma_handler(&nca, nc->version.mf_id);
-		}
+		ret = ncsi_gma_handler(&nca, nc->version.mf_id);
+#endif /* CONFIG_NCSI_OEM_CMD_GET_MAC */
+
 		if (ret < 0)
 			schedule_work(&ndp->work);
 
@@ -1399,6 +1404,7 @@ static void ncsi_probe_channel(struct ncsi_dev_priv *ndp)
 
 		schedule_work(&ndp->work);
 		break;
+#if IS_ENABLED(CONFIG_NCSI_OEM_CMD_GET_MAC)
 	case ncsi_dev_state_probe_mlx_gma:
 		ndp->pending_req_num = 1;
 
@@ -1423,6 +1429,7 @@ static void ncsi_probe_channel(struct ncsi_dev_priv *ndp)
 
 		nd->state = ncsi_dev_state_probe_cis;
 		break;
+#endif /* CONFIG_NCSI_OEM_CMD_GET_MAC */
 	case ncsi_dev_state_probe_cis:
 		ndp->pending_req_num = NCSI_RESERVED_CHANNEL;
 
@@ -1440,6 +1447,7 @@ static void ncsi_probe_channel(struct ncsi_dev_priv *ndp)
 		if (IS_ENABLED(CONFIG_NCSI_OEM_CMD_KEEP_PHY))
 			nd->state = ncsi_dev_state_probe_keep_phy;
 		break;
+#if IS_ENABLED(CONFIG_NCSI_OEM_CMD_KEEP_PHY)
 	case ncsi_dev_state_probe_keep_phy:
 		ndp->pending_req_num = 1;
 
@@ -1452,6 +1460,7 @@ static void ncsi_probe_channel(struct ncsi_dev_priv *ndp)
 
 		nd->state = ncsi_dev_state_probe_gvi;
 		break;
+#endif /* CONFIG_NCSI_OEM_CMD_KEEP_PHY */
 	case ncsi_dev_state_probe_gvi:
 	case ncsi_dev_state_probe_gc:
 	case ncsi_dev_state_probe_gls:
@@ -1794,8 +1803,7 @@ struct ncsi_dev *ncsi_register_dev(struct net_device *dev,
 	pdev = to_platform_device(dev->dev.parent);
 	if (pdev) {
 		np = pdev->dev.of_node;
-		if (np && (of_property_read_bool(np, "mellanox,multi-host") ||
-			   of_property_read_bool(np, "mlx,multi-host")))
+		if (np && of_get_property(np, "mlx,multi-host", NULL))
 			ndp->mlx_multi_host = true;
 	}
 

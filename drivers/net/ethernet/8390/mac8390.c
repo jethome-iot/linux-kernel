@@ -1,9 +1,11 @@
-// SPDX-License-Identifier: GPL-1.0+
 /* mac8390.c: New driver for 8390-based Nubus (or Nubus-alike)
    Ethernet cards on Linux */
 /* Based on the former daynaport.c driver, by Alan Cox.  Some code
    taken from or inspired by skeleton.c by Donald Becker, acenic.c by
-   Jes Sorensen, and ne2k-pci.c by Donald Becker and Paul Gortmaker. */
+   Jes Sorensen, and ne2k-pci.c by Donald Becker and Paul Gortmaker.
+
+   This software may be used and distributed according to the terms of
+   the GNU Public License, incorporated herein by reference.  */
 
 /* 2000-02-28: support added for Dayna and Kinetics cards by
    A.G.deWijn@phys.uu.nl */
@@ -290,7 +292,6 @@ static bool mac8390_rsrc_init(struct net_device *dev,
 	struct nubus_dirent ent;
 	int offset;
 	volatile unsigned short *i;
-	u8 addr[ETH_ALEN];
 
 	dev->irq = SLOT2IRQ(board->slot);
 	/* This is getting to be a habit */
@@ -313,8 +314,7 @@ static bool mac8390_rsrc_init(struct net_device *dev,
 		return false;
 	}
 
-	nubus_get_rsrc_mem(addr, &ent, 6);
-	eth_hw_addr_set(dev, addr);
+	nubus_get_rsrc_mem(dev->dev_addr, &ent, 6);
 
 	if (useresources[cardtype] == 1) {
 		nubus_rewinddir(&dir);

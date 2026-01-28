@@ -29,7 +29,6 @@ enum bpf_type_id_kind {
 enum bpf_type_info_kind {
 	BPF_TYPE_EXISTS = 0,		/* type existence in target kernel */
 	BPF_TYPE_SIZE = 1,		/* type size in target kernel */
-	BPF_TYPE_MATCHES = 2,		/* type match in target kernel */
 };
 
 /* second argument to __builtin_preserve_enum_value() built-in */
@@ -112,81 +111,20 @@ enum bpf_enum_value_kind {
 })
 
 /*
- * Write to a bitfield, identified by s->field.
- * This is the inverse of BPF_CORE_WRITE_BITFIELD().
- */
-#define BPF_CORE_WRITE_BITFIELD(s, field, new_val) ({			\
-	void *p = (void *)s + __CORE_RELO(s, field, BYTE_OFFSET);	\
-	unsigned int byte_size = __CORE_RELO(s, field, BYTE_SIZE);	\
-	unsigned int lshift = __CORE_RELO(s, field, LSHIFT_U64);	\
-	unsigned int rshift = __CORE_RELO(s, field, RSHIFT_U64);	\
-	unsigned long long mask, val, nval = new_val;			\
-	unsigned int rpad = rshift - lshift;				\
-									\
-	asm volatile("" : "+r"(p));					\
-									\
-	switch (byte_size) {						\
-	case 1: val = *(unsigned char *)p; break;			\
-	case 2: val = *(unsigned short *)p; break;			\
-	case 4: val = *(unsigned int *)p; break;			\
-	case 8: val = *(unsigned long long *)p; break;			\
-	}								\
-									\
-	mask = (~0ULL << rshift) >> lshift;				\
-	val = (val & ~mask) | ((nval << rpad) & mask);			\
-									\
-	switch (byte_size) {						\
-	case 1: *(unsigned char *)p      = val; break;			\
-	case 2: *(unsigned short *)p     = val; break;			\
-	case 4: *(unsigned int *)p       = val; break;			\
-	case 8: *(unsigned long long *)p = val; break;			\
-	}								\
-})
-
-#define ___bpf_field_ref1(field)	(field)
-#define ___bpf_field_ref2(type, field)	(((typeof(type) *)0)->field)
-#define ___bpf_field_ref(args...)					    \
-	___bpf_apply(___bpf_field_ref, ___bpf_narg(args))(args)
-
-/*
  * Convenience macro to check that field actually exists in target kernel's.
  * Returns:
  *    1, if matching field is present in target kernel;
  *    0, if no matching field found.
- *
- * Supports two forms:
- *   - field reference through variable access:
- *     bpf_core_field_exists(p->my_field);
- *   - field reference through type and field names:
- *     bpf_core_field_exists(struct my_type, my_field).
  */
-#define bpf_core_field_exists(field...)					    \
-	__builtin_preserve_field_info(___bpf_field_ref(field), BPF_FIELD_EXISTS)
+#define bpf_core_field_exists(field)					    \
+	__builtin_preserve_field_info(field, BPF_FIELD_EXISTS)
 
 /*
  * Convenience macro to get the byte size of a field. Works for integers,
  * struct/unions, pointers, arrays, and enums.
- *
- * Supports two forms:
- *   - field reference through variable access:
- *     bpf_core_field_size(p->my_field);
- *   - field reference through type and field names:
- *     bpf_core_field_size(struct my_type, my_field).
  */
-#define bpf_core_field_size(field...)					    \
-	__builtin_preserve_field_info(___bpf_field_ref(field), BPF_FIELD_BYTE_SIZE)
-
-/*
- * Convenience macro to get field's byte offset.
- *
- * Supports two forms:
- *   - field reference through variable access:
- *     bpf_core_field_offset(p->my_field);
- *   - field reference through type and field names:
- *     bpf_core_field_offset(struct my_type, my_field).
- */
-#define bpf_core_field_offset(field...)					    \
-	__builtin_preserve_field_info(___bpf_field_ref(field), BPF_FIELD_BYTE_OFFSET)
+#define bpf_core_field_size(field)					    \
+	__builtin_preserve_field_info(field, BPF_FIELD_BYTE_SIZE)
 
 /*
  * Convenience macro to get BTF type ID of a specified type, using a local BTF
@@ -215,16 +153,6 @@ enum bpf_enum_value_kind {
  */
 #define bpf_core_type_exists(type)					    \
 	__builtin_preserve_type_info(*(typeof(type) *)0, BPF_TYPE_EXISTS)
-
-/*
- * Convenience macro to check that provided named type
- * (struct/union/enum/typedef) "matches" that in a target kernel.
- * Returns:
- *    1, if the type matches in the target kernel's BTF;
- *    0, if the type does not match any in the target kernel
- */
-#define bpf_core_type_matches(type)					    \
-	__builtin_preserve_type_info(*(typeof(type) *)0, BPF_TYPE_MATCHES)
 
 /*
  * Convenience macro to get the byte size of a provided named type
@@ -396,7 +324,7 @@ enum bpf_enum_value_kind {
 
 /* Non-CO-RE variant of BPF_CORE_READ_INTO() */
 #define BPF_PROBE_READ_INTO(dst, src, a, ...) ({			    \
-	___core_read(bpf_probe_read_kernel, bpf_probe_read_kernel,	    \
+	___core_read(bpf_probe_read, bpf_probe_read,			    \
 		     dst, (src), a, ##__VA_ARGS__)			    \
 })
 
@@ -432,7 +360,7 @@ enum bpf_enum_value_kind {
 
 /* Non-CO-RE variant of BPF_CORE_READ_STR_INTO() */
 #define BPF_PROBE_READ_STR_INTO(dst, src, a, ...) ({			    \
-	___core_read(bpf_probe_read_kernel_str, bpf_probe_read_kernel,	    \
+	___core_read(bpf_probe_read_str, bpf_probe_read,		    \
 		     dst, (src), a, ##__VA_ARGS__)			    \
 })
 

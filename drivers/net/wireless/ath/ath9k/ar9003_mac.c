@@ -144,11 +144,10 @@ ar9003_set_txdesc(struct ath_hw *ah, void *ds, struct ath_tx_info *i)
 	WRITE_ONCE(ads->ctl16, set11nPktDurRTSCTS(i->rates, 2)
 		| set11nPktDurRTSCTS(i->rates, 3));
 
-	WRITE_ONCE(ads->ctl18,
-		  set11nRateFlags(i->rates, 0) | set11nChainSel(i->rates, 0)
-		| set11nRateFlags(i->rates, 1) | set11nChainSel(i->rates, 1)
-		| set11nRateFlags(i->rates, 2) | set11nChainSel(i->rates, 2)
-		| set11nRateFlags(i->rates, 3) | set11nChainSel(i->rates, 3)
+	WRITE_ONCE(ads->ctl18, set11nRateFlags(i->rates, 0)
+		| set11nRateFlags(i->rates, 1)
+		| set11nRateFlags(i->rates, 2)
+		| set11nRateFlags(i->rates, 3)
 		| SM(i->rtscts_rate, AR_RTSCTSRate));
 
 	WRITE_ONCE(ads->ctl19, AR_Not_Sounding);
@@ -193,16 +192,16 @@ static bool ar9003_hw_get_isr(struct ath_hw *ah, enum ath9k_int *masked,
 	if (ath9k_hw_mci_is_enabled(ah))
 		async_mask |= AR_INTR_ASYNC_MASK_MCI;
 
-	async_cause = REG_READ(ah, AR_INTR_ASYNC_CAUSE(ah));
+	async_cause = REG_READ(ah, AR_INTR_ASYNC_CAUSE);
 
 	if (async_cause & async_mask) {
-		if ((REG_READ(ah, AR_RTC_STATUS(ah)) & AR_RTC_STATUS_M(ah))
+		if ((REG_READ(ah, AR_RTC_STATUS) & AR_RTC_STATUS_M)
 				== AR_RTC_STATUS_ON)
 			isr = REG_READ(ah, AR_ISR);
 	}
 
 
-	sync_cause = REG_READ(ah, AR_INTR_SYNC_CAUSE(ah)) & AR_INTR_SYNC_DEFAULT;
+	sync_cause = REG_READ(ah, AR_INTR_SYNC_CAUSE) & AR_INTR_SYNC_DEFAULT;
 
 	*masked = 0;
 
@@ -280,7 +279,7 @@ static bool ar9003_hw_get_isr(struct ath_hw *ah, enum ath9k_int *masked,
 			u32 s5;
 
 			if (pCap->hw_caps & ATH9K_HW_CAP_RAC_SUPPORTED)
-				s5 = REG_READ(ah, AR_ISR_S5_S(ah));
+				s5 = REG_READ(ah, AR_ISR_S5_S);
 			else
 				s5 = REG_READ(ah, AR_ISR_S5);
 
@@ -345,8 +344,8 @@ static bool ar9003_hw_get_isr(struct ath_hw *ah, enum ath9k_int *masked,
 			ath_dbg(common, INTERRUPT,
 				"AR_INTR_SYNC_LOCAL_TIMEOUT\n");
 
-		REG_WRITE(ah, AR_INTR_SYNC_CAUSE_CLR(ah), sync_cause);
-		(void) REG_READ(ah, AR_INTR_SYNC_CAUSE_CLR(ah));
+		REG_WRITE(ah, AR_INTR_SYNC_CAUSE_CLR, sync_cause);
+		(void) REG_READ(ah, AR_INTR_SYNC_CAUSE_CLR);
 
 	}
 	return true;

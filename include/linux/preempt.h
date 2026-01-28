@@ -8,8 +8,7 @@
  */
 
 #include <linux/linkage.h>
-#include <linux/cleanup.h>
-#include <linux/types.h>
+#include <linux/list.h>
 
 /*
  * We put the hardirq and softirq counter into the preemption
@@ -155,10 +154,9 @@ static __always_inline unsigned char interrupt_context_level(void)
  * The preempt_count offset after spin_lock()
  */
 #if !defined(CONFIG_PREEMPT_RT)
-#define PREEMPT_LOCK_OFFSET		PREEMPT_DISABLE_OFFSET
+#define PREEMPT_LOCK_OFFSET	PREEMPT_DISABLE_OFFSET
 #else
-/* Locks on RT do not disable preemption */
-#define PREEMPT_LOCK_OFFSET		0
+#define PREEMPT_LOCK_OFFSET	0
 #endif
 
 /*
@@ -360,9 +358,7 @@ void preempt_notifier_unregister(struct preempt_notifier *notifier);
 static inline void preempt_notifier_init(struct preempt_notifier *notifier,
 				     struct preempt_ops *ops)
 {
-	/* INIT_HLIST_NODE() open coded, to avoid dependency on list.h */
-	notifier->link.next = NULL;
-	notifier->link.pprev = NULL;
+	INIT_HLIST_NODE(&notifier->link);
 	notifier->ops = ops;
 }
 
@@ -434,51 +430,5 @@ static inline void migrate_disable(void) { }
 static inline void migrate_enable(void) { }
 
 #endif /* CONFIG_SMP */
-
-/**
- * preempt_disable_nested - Disable preemption inside a normally preempt disabled section
- *
- * Use for code which requires preemption protection inside a critical
- * section which has preemption disabled implicitly on non-PREEMPT_RT
- * enabled kernels, by e.g.:
- *  - holding a spinlock/rwlock
- *  - soft interrupt context
- *  - regular interrupt handlers
- *
- * On PREEMPT_RT enabled kernels spinlock/rwlock held sections, soft
- * interrupt context and regular interrupt handlers are preemptible and
- * only prevent migration. preempt_disable_nested() ensures that preemption
- * is disabled for cases which require CPU local serialization even on
- * PREEMPT_RT. For non-PREEMPT_RT kernels this is a NOP.
- *
- * The use cases are code sequences which are not serialized by a
- * particular lock instance, e.g.:
- *  - seqcount write side critical sections where the seqcount is not
- *    associated to a particular lock and therefore the automatic
- *    protection mechanism does not work. This prevents a live lock
- *    against a preempting high priority reader.
- *  - RMW per CPU variable updates like vmstat.
- */
-/* Macro to avoid header recursion hell vs. lockdep */
-#define preempt_disable_nested()				\
-do {								\
-	if (IS_ENABLED(CONFIG_PREEMPT_RT))			\
-		preempt_disable();				\
-	else							\
-		lockdep_assert_preemption_disabled();		\
-} while (0)
-
-/**
- * preempt_enable_nested - Undo the effect of preempt_disable_nested()
- */
-static __always_inline void preempt_enable_nested(void)
-{
-	if (IS_ENABLED(CONFIG_PREEMPT_RT))
-		preempt_enable();
-}
-
-DEFINE_LOCK_GUARD_0(preempt, preempt_disable(), preempt_enable())
-DEFINE_LOCK_GUARD_0(preempt_notrace, preempt_disable_notrace(), preempt_enable_notrace())
-DEFINE_LOCK_GUARD_0(migrate, migrate_disable(), migrate_enable())
 
 #endif /* __LINUX_PREEMPT_H */

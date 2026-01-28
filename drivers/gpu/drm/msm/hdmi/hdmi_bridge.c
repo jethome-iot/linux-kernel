@@ -6,10 +6,16 @@
 
 #include <linux/delay.h>
 #include <drm/drm_bridge_connector.h>
-#include <drm/drm_edid.h>
 
 #include "msm_kms.h"
 #include "hdmi.h"
+
+void msm_hdmi_bridge_destroy(struct drm_bridge *bridge)
+{
+	struct hdmi_bridge *hdmi_bridge = to_hdmi_bridge(bridge);
+
+	msm_hdmi_hpd_disable(hdmi_bridge);
+}
 
 static void msm_hdmi_power_on(struct drm_bridge *bridge)
 {
@@ -21,9 +27,13 @@ static void msm_hdmi_power_on(struct drm_bridge *bridge)
 
 	pm_runtime_get_sync(&hdmi->pdev->dev);
 
-	ret = regulator_bulk_enable(config->pwr_reg_cnt, hdmi->pwr_regs);
-	if (ret)
-		DRM_DEV_ERROR(dev->dev, "failed to enable pwr regulator: %d\n", ret);
+	for (i = 0; i < config->pwr_reg_cnt; i++) {
+		ret = regulator_enable(hdmi->pwr_regs[i]);
+		if (ret) {
+			DRM_DEV_ERROR(dev->dev, "failed to enable pwr regulator: %s (%d)\n",
+					config->pwr_reg_names[i], ret);
+		}
+	}
 
 	if (config->pwr_clk_cnt > 0) {
 		DBG("pixclock: %lu", hdmi->pixclock);
@@ -59,11 +69,15 @@ static void power_off(struct drm_bridge *bridge)
 	for (i = 0; i < config->pwr_clk_cnt; i++)
 		clk_disable_unprepare(hdmi->pwr_clks[i]);
 
-	ret = regulator_bulk_disable(config->pwr_reg_cnt, hdmi->pwr_regs);
-	if (ret)
-		DRM_DEV_ERROR(dev->dev, "failed to disable pwr regulator: %d\n", ret);
+	for (i = 0; i < config->pwr_reg_cnt; i++) {
+		ret = regulator_disable(hdmi->pwr_regs[i]);
+		if (ret) {
+			DRM_DEV_ERROR(dev->dev, "failed to disable pwr regulator: %s (%d)\n",
+					config->pwr_reg_names[i], ret);
+		}
+	}
 
-	pm_runtime_put(&hdmi->pdev->dev);
+	pm_runtime_put_autosuspend(&hdmi->pdev->dev);
 }
 
 #define AVI_IFRAME_LINE_NUMBER 1
@@ -150,6 +164,14 @@ static void msm_hdmi_bridge_pre_enable(struct drm_bridge *bridge)
 
 	if (hdmi->hdcp_ctrl)
 		msm_hdmi_hdcp_on(hdmi->hdcp_ctrl);
+}
+
+static void msm_hdmi_bridge_enable(struct drm_bridge *bridge)
+{
+}
+
+static void msm_hdmi_bridge_disable(struct drm_bridge *bridge)
+{
 }
 
 static void msm_hdmi_bridge_post_disable(struct drm_bridge *bridge)
@@ -268,18 +290,15 @@ static enum drm_mode_status msm_hdmi_bridge_mode_valid(struct drm_bridge *bridge
 	long actual, requested;
 
 	requested = 1000 * mode->clock;
+	actual = kms->funcs->round_pixclk(kms,
+			requested, hdmi_bridge->hdmi->encoder);
 
 	/* for mdp5/apq8074, we manage our own pixel clk (as opposed to
 	 * mdp4/dtv stuff where pixel clk is assigned to mdp/encoder
 	 * instead):
 	 */
-	if (kms->funcs->round_pixclk)
-		actual = kms->funcs->round_pixclk(kms,
-			requested, hdmi_bridge->hdmi->encoder);
-	else if (config->pwr_clk_cnt > 0)
-		actual = clk_round_rate(hdmi->pwr_clks[0], requested);
-	else
-		actual = requested;
+	if (config->pwr_clk_cnt > 0)
+		actual = clk_round_rate(hdmi->pwr_clks[0], actual);
 
 	DBG("requested=%ld, actual=%ld", requested, actual);
 
@@ -291,6 +310,8 @@ static enum drm_mode_status msm_hdmi_bridge_mode_valid(struct drm_bridge *bridge
 
 static const struct drm_bridge_funcs msm_hdmi_bridge_funcs = {
 		.pre_enable = msm_hdmi_bridge_pre_enable,
+		.enable = msm_hdmi_bridge_enable,
+		.disable = msm_hdmi_bridge_disable,
 		.post_disable = msm_hdmi_bridge_post_disable,
 		.mode_set = msm_hdmi_bridge_mode_set,
 		.mode_valid = msm_hdmi_bridge_mode_valid,
@@ -309,7 +330,7 @@ msm_hdmi_hotplug_work(struct work_struct *work)
 }
 
 /* initialize bridge */
-int msm_hdmi_bridge_init(struct hdmi *hdmi)
+struct drm_bridge *msm_hdmi_bridge_init(struct hdmi *hdmi)
 {
 	struct drm_bridge *bridge = NULL;
 	struct hdmi_bridge *hdmi_bridge;
@@ -317,8 +338,10 @@ int msm_hdmi_bridge_init(struct hdmi *hdmi)
 
 	hdmi_bridge = devm_kzalloc(hdmi->dev->dev,
 			sizeof(*hdmi_bridge), GFP_KERNEL);
-	if (!hdmi_bridge)
-		return -ENOMEM;
+	if (!hdmi_bridge) {
+		ret = -ENOMEM;
+		goto fail;
+	}
 
 	hdmi_bridge->hdmi = hdmi;
 	INIT_WORK(&hdmi_bridge->hpd_work, msm_hdmi_hotplug_work);
@@ -331,15 +354,15 @@ int msm_hdmi_bridge_init(struct hdmi *hdmi)
 		DRM_BRIDGE_OP_DETECT |
 		DRM_BRIDGE_OP_EDID;
 
-	ret = devm_drm_bridge_add(hdmi->dev->dev, bridge);
-	if (ret)
-		return ret;
-
 	ret = drm_bridge_attach(hdmi->encoder, bridge, NULL, DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 	if (ret)
-		return ret;
+		goto fail;
 
-	hdmi->bridge = bridge;
+	return bridge;
 
-	return 0;
+fail:
+	if (bridge)
+		msm_hdmi_bridge_destroy(bridge);
+
+	return ERR_PTR(ret);
 }

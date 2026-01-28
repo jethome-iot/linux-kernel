@@ -102,20 +102,11 @@ static int coreboot_table_populate(struct device *dev, void *ptr)
 		if (!device)
 			return -ENOMEM;
 
+		dev_set_name(&device->dev, "coreboot%d", i);
 		device->dev.parent = dev;
 		device->dev.bus = &coreboot_bus_type;
 		device->dev.release = coreboot_device_release;
 		memcpy(device->raw, ptr_entry, entry->size);
-
-		switch (device->entry.tag) {
-		case LB_TAG_CBMEM_ENTRY:
-			dev_set_name(&device->dev, "cbmem-%08x",
-				     device->cbmem_entry.id);
-			break;
-		default:
-			dev_set_name(&device->dev, "coreboot%d", i);
-			break;
-		}
 
 		ret = device_register(&device->dev);
 		if (ret) {
@@ -176,9 +167,10 @@ static int __cb_dev_unregister(struct device *dev, void *dummy)
 	return 0;
 }
 
-static void coreboot_table_remove(struct platform_device *pdev)
+static int coreboot_table_remove(struct platform_device *pdev)
 {
 	bus_for_each_dev(&coreboot_bus_type, NULL, NULL, __cb_dev_unregister);
+	return 0;
 }
 
 #ifdef CONFIG_ACPI
@@ -200,7 +192,7 @@ MODULE_DEVICE_TABLE(of, coreboot_of_match);
 
 static struct platform_driver coreboot_table_driver = {
 	.probe = coreboot_table_probe,
-	.remove_new = coreboot_table_remove,
+	.remove = coreboot_table_remove,
 	.driver = {
 		.name = "coreboot_table",
 		.acpi_match_table = ACPI_PTR(cros_coreboot_acpi_match),

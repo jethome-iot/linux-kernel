@@ -579,7 +579,7 @@ static int search_by_key_reada(struct super_block *s,
 		if (!buffer_uptodate(bh[j])) {
 			if (depth == -1)
 				depth = reiserfs_write_unlock_nested(s);
-			bh_readahead(bh[j], REQ_RAHEAD);
+			ll_rw_block(REQ_OP_READ, REQ_RAHEAD, 1, bh + j);
 		}
 		brelse(bh[j]);
 	}
@@ -685,7 +685,7 @@ int search_by_key(struct super_block *sb, const struct cpu_key *key,
 			if (!buffer_uptodate(bh) && depth == -1)
 				depth = reiserfs_write_unlock_nested(sb);
 
-			bh_read_nowait(bh, 0);
+			ll_rw_block(REQ_OP_READ, 0, 1, &bh);
 			wait_on_buffer(bh);
 
 			if (depth != -1)
@@ -1262,6 +1262,7 @@ int reiserfs_delete_item(struct reiserfs_transaction_handle *th,
 
 #ifdef CONFIG_REISERFS_CHECK
 	char mode;
+	int iter = 0;
 #endif
 
 	BUG_ON(!th->t_trans_id);
@@ -1273,6 +1274,7 @@ int reiserfs_delete_item(struct reiserfs_transaction_handle *th,
 		removed = 0;
 
 #ifdef CONFIG_REISERFS_CHECK
+		iter++;
 		mode =
 #endif
 		    prepare_for_delete_or_cut(th, inode, path,
@@ -1407,7 +1409,7 @@ void reiserfs_delete_solid_item(struct reiserfs_transaction_handle *th,
 	INITIALIZE_PATH(path);
 	int item_len = 0;
 	int tb_init = 0;
-	struct cpu_key cpu_key = {};
+	struct cpu_key cpu_key;
 	int retval;
 	int quota_cut_bytes = 0;
 
@@ -2003,9 +2005,8 @@ int reiserfs_do_truncate(struct reiserfs_transaction_handle *th,
 			pathrelse(&s_search_path);
 
 			if (update_timestamps) {
-				inode_set_mtime_to_ts(inode,
-						      current_time(inode));
-				inode_set_ctime_current(inode);
+				inode->i_mtime = current_time(inode);
+				inode->i_ctime = current_time(inode);
 			}
 			reiserfs_update_sd(th, inode);
 
@@ -2029,8 +2030,8 @@ int reiserfs_do_truncate(struct reiserfs_transaction_handle *th,
 update_and_out:
 	if (update_timestamps) {
 		/* this is truncate, not file closing */
-		inode_set_mtime_to_ts(inode, current_time(inode));
-		inode_set_ctime_current(inode);
+		inode->i_mtime = current_time(inode);
+		inode->i_ctime = current_time(inode);
 	}
 	reiserfs_update_sd(th, inode);
 

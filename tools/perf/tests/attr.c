@@ -34,7 +34,7 @@
 #include "event.h"
 #include "util.h"
 #include "tests.h"
-#include "pmus.h"
+#include "pmu.h"
 
 #define ENV "PERF_TEST_ATTR"
 
@@ -65,7 +65,7 @@ do {									\
 
 #define WRITE_ASS(field, fmt) __WRITE_ASS(field, fmt, attr->field)
 
-static int store_event(struct perf_event_attr *attr, pid_t pid, struct perf_cpu cpu,
+static int store_event(struct perf_event_attr *attr, pid_t pid, int cpu,
 		       int fd, int group_fd, unsigned long flags)
 {
 	FILE *file;
@@ -93,7 +93,7 @@ static int store_event(struct perf_event_attr *attr, pid_t pid, struct perf_cpu 
 	/* syscall arguments */
 	__WRITE_ASS(fd,       "d", fd);
 	__WRITE_ASS(group_fd, "d", group_fd);
-	__WRITE_ASS(cpu,      "d", cpu.cpu);
+	__WRITE_ASS(cpu,      "d", cpu);
 	__WRITE_ASS(pid,      "d", pid);
 	__WRITE_ASS(flags,   "lu", flags);
 
@@ -144,7 +144,7 @@ static int store_event(struct perf_event_attr *attr, pid_t pid, struct perf_cpu 
 	return 0;
 }
 
-void test_attr__open(struct perf_event_attr *attr, pid_t pid, struct perf_cpu cpu,
+void test_attr__open(struct perf_event_attr *attr, pid_t pid, int cpu,
 		     int fd, int group_fd, unsigned long flags)
 {
 	int errno_saved = errno;
@@ -178,22 +178,15 @@ static int run_dir(const char *d, const char *perf)
 	return system(cmd) ? TEST_FAIL : TEST_OK;
 }
 
-static int test__attr(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
+int test__attr(struct test *test __maybe_unused, int subtest __maybe_unused)
 {
 	struct stat st;
 	char path_perf[PATH_MAX];
 	char path_dir[PATH_MAX];
 	char *exec_path;
 
-	if (perf_pmus__num_core_pmus() > 1) {
-		/*
-		 * TODO: Attribute tests hard code the PMU type. If there are >1
-		 * core PMU then each PMU will have a different type which
-		 * requires additional support.
-		 */
-		pr_debug("Skip test on hybrid systems");
+	if (perf_pmu__has_hybrid())
 		return TEST_SKIP;
-	}
 
 	/* First try development tree tests. */
 	if (!lstat("./tests", &st))
@@ -214,5 +207,3 @@ static int test__attr(struct test_suite *test __maybe_unused, int subtest __mayb
 
 	return TEST_SKIP;
 }
-
-DEFINE_SUITE("Setup struct perf_event_attr", attr);

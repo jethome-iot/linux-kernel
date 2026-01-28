@@ -491,12 +491,12 @@ static bool single_major = true;
 module_param(single_major, bool, 0444);
 MODULE_PARM_DESC(single_major, "Use a single major number for all rbd devices (default: true)");
 
-static ssize_t add_store(const struct bus_type *bus, const char *buf, size_t count);
-static ssize_t remove_store(const struct bus_type *bus, const char *buf,
+static ssize_t add_store(struct bus_type *bus, const char *buf, size_t count);
+static ssize_t remove_store(struct bus_type *bus, const char *buf,
 			    size_t count);
-static ssize_t add_single_major_store(const struct bus_type *bus, const char *buf,
+static ssize_t add_single_major_store(struct bus_type *bus, const char *buf,
 				      size_t count);
-static ssize_t remove_single_major_store(const struct bus_type *bus, const char *buf,
+static ssize_t remove_single_major_store(struct bus_type *bus, const char *buf,
 					 size_t count);
 static int rbd_dev_image_probe(struct rbd_device *rbd_dev, int depth);
 
@@ -538,7 +538,7 @@ static bool rbd_is_lock_owner(struct rbd_device *rbd_dev)
 	return is_lock_owner;
 }
 
-static ssize_t supported_features_show(const struct bus_type *bus, char *buf)
+static ssize_t supported_features_show(struct bus_type *bus, char *buf)
 {
 	return sprintf(buf, "0x%llx\n", RBD_FEATURES_SUPPORTED);
 }
@@ -659,9 +659,9 @@ static bool pending_result_dec(struct pending_result *pending, int *result)
 	return true;
 }
 
-static int rbd_open(struct gendisk *disk, blk_mode_t mode)
+static int rbd_open(struct block_device *bdev, fmode_t mode)
 {
-	struct rbd_device *rbd_dev = disk->private_data;
+	struct rbd_device *rbd_dev = bdev->bd_disk->private_data;
 	bool removing = false;
 
 	spin_lock_irq(&rbd_dev->lock);
@@ -678,7 +678,7 @@ static int rbd_open(struct gendisk *disk, blk_mode_t mode)
 	return 0;
 }
 
-static void rbd_release(struct gendisk *disk)
+static void rbd_release(struct gendisk *disk, fmode_t mode)
 {
 	struct rbd_device *rbd_dev = disk->private_data;
 	unsigned long open_count_before;
@@ -755,23 +755,24 @@ static struct rbd_client *__rbd_get_client(struct rbd_client *rbdc)
  */
 static struct rbd_client *rbd_client_find(struct ceph_options *ceph_opts)
 {
-	struct rbd_client *rbdc = NULL, *iter;
+	struct rbd_client *client_node;
+	bool found = false;
 
 	if (ceph_opts->flags & CEPH_OPT_NOSHARE)
 		return NULL;
 
 	spin_lock(&rbd_client_list_lock);
-	list_for_each_entry(iter, &rbd_client_list, node) {
-		if (!ceph_compare_options(ceph_opts, iter->client)) {
-			__rbd_get_client(iter);
+	list_for_each_entry(client_node, &rbd_client_list, node) {
+		if (!ceph_compare_options(ceph_opts, client_node->client)) {
+			__rbd_get_client(client_node);
 
-			rbdc = iter;
+			found = true;
 			break;
 		}
 	}
 	spin_unlock(&rbd_client_list_lock);
 
-	return rbdc;
+	return found ? client_node : NULL;
 }
 
 /*
@@ -834,7 +835,7 @@ struct rbd_options {
 	u32 alloc_hint_flags;  /* CEPH_OSD_OP_ALLOC_HINT_FLAG_* */
 };
 
-#define RBD_QUEUE_DEPTH_DEFAULT	BLKDEV_DEFAULT_RQ
+#define RBD_QUEUE_DEPTH_DEFAULT	BLKDEV_MAX_RQ
 #define RBD_ALLOC_SIZE_DEFAULT	(64 * 1024)
 #define RBD_LOCK_TIMEOUT_DEFAULT 0  /* no timeout */
 #define RBD_READ_ONLY_DEFAULT	false
@@ -1300,7 +1301,7 @@ static void rbd_osd_submit(struct ceph_osd_request *osd_req)
 	dout("%s osd_req %p for obj_req %p objno %llu %llu~%llu\n",
 	     __func__, osd_req, obj_req, obj_req->ex.oe_objno,
 	     obj_req->ex.oe_off, obj_req->ex.oe_len);
-	ceph_osdc_start_request(osd_req->r_osdc, osd_req);
+	ceph_osdc_start_request(osd_req->r_osdc, osd_req, false);
 }
 
 /*
@@ -2104,7 +2105,7 @@ static int rbd_object_map_update(struct rbd_obj_request *obj_req, u64 snap_id,
 	if (ret)
 		return ret;
 
-	ceph_osdc_start_request(osdc, req);
+	ceph_osdc_start_request(osdc, req, false);
 	return 0;
 }
 
@@ -3086,12 +3087,13 @@ static int setup_copyup_bvecs(struct rbd_obj_request *obj_req, u64 obj_overlap)
 
 	for (i = 0; i < obj_req->copyup_bvec_count; i++) {
 		unsigned int len = min(obj_overlap, (u64)PAGE_SIZE);
-		struct page *page = alloc_page(GFP_NOIO);
 
-		if (!page)
+		obj_req->copyup_bvecs[i].bv_page = alloc_page(GFP_NOIO);
+		if (!obj_req->copyup_bvecs[i].bv_page)
 			return -ENOMEM;
 
-		bvec_set_page(&obj_req->copyup_bvecs[i], page, len, 0);
+		obj_req->copyup_bvecs[i].bv_offset = 0;
+		obj_req->copyup_bvecs[i].bv_len = len;
 		obj_overlap -= len;
 	}
 
@@ -4814,7 +4816,7 @@ static blk_status_t rbd_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 static void rbd_free_disk(struct rbd_device *rbd_dev)
 {
-	put_disk(rbd_dev->disk);
+	blk_cleanup_disk(rbd_dev->disk);
 	blk_mq_free_tag_set(&rbd_dev->tag_set);
 	rbd_dev->disk = NULL;
 }
@@ -4853,7 +4855,7 @@ static int rbd_obj_read_sync(struct rbd_device *rbd_dev,
 	if (ret)
 		goto out_req;
 
-	ceph_osdc_start_request(osdc, req);
+	ceph_osdc_start_request(osdc, req, false);
 	ret = ceph_osdc_wait_request(osdc, req);
 	if (ret >= 0)
 		ceph_copy_from_page_vector(pages, buf, 0, ret);
@@ -4977,10 +4979,12 @@ static int rbd_init_disk(struct rbd_device *rbd_dev)
 		 rbd_dev->dev_id);
 	disk->major = rbd_dev->major;
 	disk->first_minor = rbd_dev->minor;
-	if (single_major)
+	if (single_major) {
 		disk->minors = (1 << RBD_SINGLE_MAJOR_PART_SHIFT);
-	else
+		disk->flags |= GENHD_FL_EXT_DEVT;
+	} else {
 		disk->minors = RBD_MINORS_PER_MAJOR;
+	}
 	disk->fops = &rbd_bd_ops;
 	disk->private_data = rbd_dev;
 
@@ -4995,6 +4999,7 @@ static int rbd_init_disk(struct rbd_device *rbd_dev)
 	blk_queue_io_opt(q, rbd_dev->opts->alloc_size);
 
 	if (rbd_dev->opts->trim) {
+		blk_queue_flag_set(QUEUE_FLAG_DISCARD, q);
 		q->limits.discard_granularity = rbd_dev->opts->alloc_size;
 		blk_queue_max_discard_sectors(q, objset_bytes >> SECTOR_SHIFT);
 		blk_queue_max_write_zeroes_sectors(q, objset_bytes >> SECTOR_SHIFT);
@@ -5332,7 +5337,7 @@ static void rbd_dev_release(struct device *dev)
 
 	if (need_put) {
 		destroy_workqueue(rbd_dev->task_wq);
-		ida_free(&rbd_dev_id_ida, rbd_dev->dev_id);
+		ida_simple_remove(&rbd_dev_id_ida, rbd_dev->dev_id);
 	}
 
 	rbd_dev_free(rbd_dev);
@@ -5408,9 +5413,9 @@ static struct rbd_device *rbd_dev_create(struct rbd_client *rbdc,
 		return NULL;
 
 	/* get an id and fill in device name */
-	rbd_dev->dev_id = ida_alloc_max(&rbd_dev_id_ida,
-					minor_to_rbd_dev_id(1 << MINORBITS) - 1,
-					GFP_KERNEL);
+	rbd_dev->dev_id = ida_simple_get(&rbd_dev_id_ida, 0,
+					 minor_to_rbd_dev_id(1 << MINORBITS),
+					 GFP_KERNEL);
 	if (rbd_dev->dev_id < 0)
 		goto fail_rbd_dev;
 
@@ -5431,7 +5436,7 @@ static struct rbd_device *rbd_dev_create(struct rbd_client *rbdc,
 	return rbd_dev;
 
 fail_dev_id:
-	ida_free(&rbd_dev_id_ida, rbd_dev->dev_id);
+	ida_simple_remove(&rbd_dev_id_ida, rbd_dev->dev_id);
 fail_rbd_dev:
 	rbd_dev_free(rbd_dev);
 	return NULL;
@@ -6213,7 +6218,7 @@ static inline size_t next_token(const char **buf)
         * These are the characters that produce nonzero for
         * isspace() in the "C" and "POSIX" locales.
         */
-	static const char spaces[] = " \f\n\r\t\v";
+        const char *spaces = " \f\n\r\t\v";
 
         *buf += strspn(*buf, spaces);	/* Find start of token */
 
@@ -6519,8 +6524,7 @@ static int rbd_add_parse_args(const char *buf,
 	pctx.opts->exclusive = RBD_EXCLUSIVE_DEFAULT;
 	pctx.opts->trim = RBD_TRIM_DEFAULT;
 
-	ret = ceph_parse_mon_ips(mon_addrs, mon_addrs_size, pctx.copts, NULL,
-				 ',');
+	ret = ceph_parse_mon_ips(mon_addrs, mon_addrs_size, pctx.copts, NULL);
 	if (ret)
 		goto out_err;
 
@@ -7087,7 +7091,9 @@ out:
 	return ret;
 }
 
-static ssize_t do_rbd_add(const char *buf, size_t count)
+static ssize_t do_rbd_add(struct bus_type *bus,
+			  const char *buf,
+			  size_t count)
 {
 	struct rbd_device *rbd_dev = NULL;
 	struct ceph_options *ceph_opts = NULL;
@@ -7166,9 +7172,7 @@ static ssize_t do_rbd_add(const char *buf, size_t count)
 	if (rc)
 		goto err_out_image_lock;
 
-	rc = device_add_disk(&rbd_dev->dev, rbd_dev->disk, NULL);
-	if (rc)
-		goto err_out_cleanup_disk;
+	device_add_disk(&rbd_dev->dev, rbd_dev->disk, NULL);
 
 	spin_lock(&rbd_dev_list_lock);
 	list_add_tail(&rbd_dev->node, &rbd_dev_list);
@@ -7182,8 +7186,6 @@ out:
 	module_put(THIS_MODULE);
 	return rc;
 
-err_out_cleanup_disk:
-	rbd_free_disk(rbd_dev);
 err_out_image_lock:
 	rbd_dev_image_unlock(rbd_dev);
 	rbd_dev_device_release(rbd_dev);
@@ -7199,18 +7201,18 @@ err_out_args:
 	goto out;
 }
 
-static ssize_t add_store(const struct bus_type *bus, const char *buf, size_t count)
+static ssize_t add_store(struct bus_type *bus, const char *buf, size_t count)
 {
 	if (single_major)
 		return -EINVAL;
 
-	return do_rbd_add(buf, count);
+	return do_rbd_add(bus, buf, count);
 }
 
-static ssize_t add_single_major_store(const struct bus_type *bus, const char *buf,
+static ssize_t add_single_major_store(struct bus_type *bus, const char *buf,
 				      size_t count)
 {
-	return do_rbd_add(buf, count);
+	return do_rbd_add(bus, buf, count);
 }
 
 static void rbd_dev_remove_parent(struct rbd_device *rbd_dev)
@@ -7240,9 +7242,12 @@ static void rbd_dev_remove_parent(struct rbd_device *rbd_dev)
 	}
 }
 
-static ssize_t do_rbd_remove(const char *buf, size_t count)
+static ssize_t do_rbd_remove(struct bus_type *bus,
+			     const char *buf,
+			     size_t count)
 {
 	struct rbd_device *rbd_dev = NULL;
+	struct list_head *tmp;
 	int dev_id;
 	char opt_buf[6];
 	bool force = false;
@@ -7269,7 +7274,8 @@ static ssize_t do_rbd_remove(const char *buf, size_t count)
 
 	ret = -ENOENT;
 	spin_lock(&rbd_dev_list_lock);
-	list_for_each_entry(rbd_dev, &rbd_dev_list, node) {
+	list_for_each(tmp, &rbd_dev_list) {
+		rbd_dev = list_entry(tmp, struct rbd_device, node);
 		if (rbd_dev->dev_id == dev_id) {
 			ret = 0;
 			break;
@@ -7310,18 +7316,18 @@ static ssize_t do_rbd_remove(const char *buf, size_t count)
 	return count;
 }
 
-static ssize_t remove_store(const struct bus_type *bus, const char *buf, size_t count)
+static ssize_t remove_store(struct bus_type *bus, const char *buf, size_t count)
 {
 	if (single_major)
 		return -EINVAL;
 
-	return do_rbd_remove(buf, count);
+	return do_rbd_remove(bus, buf, count);
 }
 
-static ssize_t remove_single_major_store(const struct bus_type *bus, const char *buf,
+static ssize_t remove_single_major_store(struct bus_type *bus, const char *buf,
 					 size_t count)
 {
-	return do_rbd_remove(buf, count);
+	return do_rbd_remove(bus, buf, count);
 }
 
 /*
@@ -7333,10 +7339,8 @@ static int __init rbd_sysfs_init(void)
 	int ret;
 
 	ret = device_register(&rbd_root_dev);
-	if (ret < 0) {
-		put_device(&rbd_root_dev);
+	if (ret < 0)
 		return ret;
-	}
 
 	ret = bus_register(&rbd_bus_type);
 	if (ret < 0)

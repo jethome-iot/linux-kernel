@@ -1,0 +1,66 @@
+/* SPDX-License-Identifier: (GPL-2.0+ OR MIT) */
+/*
+ * Copyright (c) 2019 Amlogic, Inc. All rights reserved.
+ */
+
+#ifndef __AD82120B_H__
+#define __AD82120B_H__
+
+#define AD82120B_REGISTER_COUNT     166
+#define AD82120B_RAM1_TABLE_COUNT   162
+#define AD82120B_RAM2_TABLE_COUNT   159
+/* Register Address Map */
+#define AD82120B_STATE_CTRL1_REG	0x00
+#define AD82120B_STATE_CTRL2_REG	0x01
+#define AD82120B_STATE_CTRL3_REG	0x02
+#define AD82120B_VOLUME_CTRL_REG	0x03
+#define AD82120B_STATE_CTRL4_REG	0x0C
+#define AD82120B_STATE_CTRL5_REG	0x1A
+
+#define CFADDR    0x1d
+#define A1CF1     0x1e
+#define A1CF2     0x1f
+#define A1CF3     0x20
+#define A1CF4     0x21
+#define CFUD      0x32
+
+#define AD82120B_DEVICE_ID_REG	0x37
+
+#define AD82120B_CLK_DET_CTRL	0x56
+
+#define AD82120B_FAULT_REG		0x4D
+#define AD82120B_MAX_REG		0xA5
+
+/* AD82120B_STATE_CTRL2_REG */
+#define AD82120B_SSZ_DS			BIT(5)
+
+/* AD82120B_STATE_CTRL1_REG */
+#define AD82120B_SAIF_I2S		(0x0 << 5)
+#define AD82120B_SAIF_LEFTJ		(0x1 << 5)
+#define AD82120B_SAIF_FORMAT_MASK	GENMASK(7, 5)
+
+/* AD82120B_STATE_CTRL3_REG */
+#define AD82120B_MUTE			BIT(6)
+
+/* AD82120B_STATE_CTRL5_REG */
+#define AD82120B_SW_RESET			BIT(5)
+
+/* AD82120B_CLK_DET_CTRL */
+#define AD82120B_ASR_DET			BIT(7)
+
+/* AD82120B_DEVICE_ID_REG */
+#define AD82120B_DEVICE_ID 0xA0
+
+/* AD82120B_STATE_CTRL4_REG */
+#define AD82120B_CHIP_SYNC_EN			BIT(1)
+
+/* AD82120B_FAULT_REG */
+#define AD82120B_OCE			BIT(7)
+#define AD82120B_OTE			BIT(6)
+#define AD82120B_UVE			BIT(5)
+#define AD82120B_DCDE			BIT(4)
+#define AD82120B_BSUVE			BIT(3)
+#define AD82120B_CLKE			BIT(2)
+#define AD82120B_OVPE			BIT(1)
+#define AD82120B_D_CLKE			BIT(0)
+#endif /* __AD82120B_H__ */

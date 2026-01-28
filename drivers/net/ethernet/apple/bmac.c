@@ -25,6 +25,7 @@
 #include <linux/ethtool.h>
 #include <linux/slab.h>
 #include <linux/pgtable.h>
+#include <asm/prom.h>
 #include <asm/dbdma.h>
 #include <asm/io.h>
 #include <asm/page.h>
@@ -520,14 +521,17 @@ static int bmac_resume(struct macio_dev *mdev)
 static int bmac_set_address(struct net_device *dev, void *addr)
 {
 	struct bmac_data *bp = netdev_priv(dev);
+	unsigned char *p = addr;
 	const unsigned short *pWord16;
 	unsigned long flags;
+	int i;
 
 	XXDEBUG(("bmac: enter set_address\n"));
 	spin_lock_irqsave(&bp->lock, flags);
 
-	eth_hw_addr_set(dev, addr);
-
+	for (i = 0; i < 6; ++i) {
+		dev->dev_addr[i] = p[i];
+	}
 	/* load up the hardware address */
 	pWord16  = (const unsigned short *)dev->dev_addr;
 	bmwrite(dev, MADD0, *pWord16++);
@@ -1236,7 +1240,6 @@ static int bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
 	struct bmac_data *bp;
 	const unsigned char *prop_addr;
 	unsigned char addr[6];
-	u8 macaddr[6];
 	struct net_device *dev;
 	int is_bmac_plus = ((int)match->data) != 0;
 
@@ -1284,9 +1287,7 @@ static int bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
 
 	rev = addr[0] == 0 && addr[1] == 0xA0;
 	for (j = 0; j < 6; ++j)
-		macaddr[j] = rev ? bitrev8(addr[j]): addr[j];
-
-	eth_hw_addr_set(dev, macaddr);
+		dev->dev_addr[j] = rev ? bitrev8(addr[j]): addr[j];
 
 	/* Enable chip without interrupts for now */
 	bmac_enable_and_reset_chip(dev);

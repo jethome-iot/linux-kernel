@@ -13,7 +13,6 @@ static int touch_cap_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers,
 				 struct device *alloc_devs[])
 {
 	struct vivid_dev *dev = vb2_get_drv_priv(vq);
-	unsigned int q_num_bufs = vb2_get_num_buffers(vq);
 	struct v4l2_pix_format *f = &dev->tch_format;
 	unsigned int size = f->sizeimage;
 
@@ -24,8 +23,8 @@ static int touch_cap_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers,
 		sizes[0] = size;
 	}
 
-	if (q_num_bufs + *nbuffers < 2)
-		*nbuffers = 2 - q_num_bufs;
+	if (vq->num_buffers + *nbuffers < 2)
+		*nbuffers = 2 - vq->num_buffers;
 
 	*nplanes = 1;
 	return 0;
@@ -211,7 +210,7 @@ static void vivid_fill_buff_noise(__s16 *tch_buf, int size)
 
 	/* Fill 10% of the values within range -3 and 3, zero the others */
 	for (i = 0; i < size; i++) {
-		unsigned int rand = get_random_u32();
+		unsigned int rand = get_random_int();
 
 		if (rand % 10)
 			tch_buf[i] = 0;
@@ -222,7 +221,7 @@ static void vivid_fill_buff_noise(__s16 *tch_buf, int size)
 
 static inline int get_random_pressure(void)
 {
-	return get_random_u32_below(VIVID_PRESSURE_LIMIT);
+	return get_random_int() % VIVID_PRESSURE_LIMIT;
 }
 
 static void vivid_tch_buf_set(struct v4l2_pix_format *f,
@@ -263,7 +262,7 @@ void vivid_fillbuff_tch(struct vivid_dev *dev, struct vivid_buffer *buf)
 
 	__s16 *tch_buf = vb2_plane_vaddr(&buf->vb.vb2_buf, 0);
 
-	buf->vb.sequence = dev->touch_cap_with_seq_wrap_count;
+	buf->vb.sequence = dev->touch_cap_seq_count;
 	test_pattern = (buf->vb.sequence / TCH_SEQ_COUNT) % TEST_CASE_MAX;
 	test_pat_idx = buf->vb.sequence % TCH_SEQ_COUNT;
 
@@ -273,7 +272,7 @@ void vivid_fillbuff_tch(struct vivid_dev *dev, struct vivid_buffer *buf)
 		return;
 
 	if (test_pat_idx == 0)
-		dev->tch_pat_random = get_random_u32();
+		dev->tch_pat_random = get_random_int();
 	rand = dev->tch_pat_random;
 
 	switch (test_pattern) {

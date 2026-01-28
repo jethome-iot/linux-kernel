@@ -14,6 +14,7 @@
 #include <linux/compiler.h>
 #include <linux/minmax.h>
 #include <linux/types.h>
+#include <linux/android_kabi.h>
 /*
  * Resources are tree-like, allowing
  * nesting etc..
@@ -25,6 +26,11 @@ struct resource {
 	unsigned long flags;
 	unsigned long desc;
 	struct resource *parent, *sibling, *child;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /*
@@ -79,8 +85,7 @@ struct resource {
 #define IORESOURCE_IRQ_HIGHLEVEL	(1<<2)
 #define IORESOURCE_IRQ_LOWLEVEL		(1<<3)
 #define IORESOURCE_IRQ_SHAREABLE	(1<<4)
-#define IORESOURCE_IRQ_OPTIONAL		(1<<5)
-#define IORESOURCE_IRQ_WAKECAPABLE	(1<<6)
+#define IORESOURCE_IRQ_OPTIONAL 	(1<<5)
 
 /* PnP DMA specific bits (IORESOURCE_BITS) */
 #define IORESOURCE_DMA_TYPE_MASK	(3<<0)
@@ -142,7 +147,6 @@ enum {
 	IORES_DESC_DEVICE_PRIVATE_MEMORY	= 6,
 	IORES_DESC_RESERVED			= 7,
 	IORES_DESC_SOFT_RESERVED		= 8,
-	IORES_DESC_CXL				= 9,
 };
 
 /*
@@ -155,7 +159,7 @@ enum {
 
 /* helpers to define resources */
 #define DEFINE_RES_NAMED(_start, _size, _name, _flags)			\
-(struct resource) {							\
+	{								\
 		.start = (_start),					\
 		.end = (_start) + (_size) - 1,				\
 		.name = (_name),					\
@@ -172,11 +176,6 @@ enum {
 	DEFINE_RES_NAMED((_start), (_size), (_name), IORESOURCE_MEM)
 #define DEFINE_RES_MEM(_start, _size)					\
 	DEFINE_RES_MEM_NAMED((_start), (_size), NULL)
-
-#define DEFINE_RES_REG_NAMED(_start, _size, _name)			\
-	DEFINE_RES_NAMED((_start), (_size), (_name), IORESOURCE_REG)
-#define DEFINE_RES_REG(_start, _size)					\
-	DEFINE_RES_REG_NAMED((_start), (_size), NULL)
 
 #define DEFINE_RES_IRQ_NAMED(_irq, _name)				\
 	DEFINE_RES_NAMED((_irq), 1, (_name), IORESOURCE_IRQ)
@@ -229,7 +228,7 @@ static inline unsigned long resource_ext_type(const struct resource *res)
 	return res->flags & IORESOURCE_EXT_TYPE_BITS;
 }
 /* True iff r1 completely contains r2 */
-static inline bool resource_contains(const struct resource *r1, const struct resource *r2)
+static inline bool resource_contains(struct resource *r1, struct resource *r2)
 {
 	if (resource_type(r1) != resource_type(r2))
 		return false;
@@ -239,13 +238,13 @@ static inline bool resource_contains(const struct resource *r1, const struct res
 }
 
 /* True if any part of r1 overlaps r2 */
-static inline bool resource_overlaps(const struct resource *r1, const struct resource *r2)
+static inline bool resource_overlaps(struct resource *r1, struct resource *r2)
 {
        return r1->start <= r2->end && r1->end >= r2->start;
 }
 
-static inline bool resource_intersection(const struct resource *r1, const struct resource *r2,
-					 struct resource *r)
+static inline bool
+resource_intersection(struct resource *r1, struct resource *r2, struct resource *r)
 {
 	if (!resource_overlaps(r1, r2))
 		return false;
@@ -254,8 +253,8 @@ static inline bool resource_intersection(const struct resource *r1, const struct
 	return true;
 }
 
-static inline bool resource_union(const struct resource *r1, const struct resource *r2,
-				  struct resource *r)
+static inline bool
+resource_union(struct resource *r1, struct resource *r2, struct resource *r)
 {
 	if (!resource_overlaps(r1, r2))
 		return false;
@@ -318,8 +317,6 @@ extern void __devm_release_region(struct device *dev, struct resource *parent,
 				  resource_size_t start, resource_size_t n);
 extern int iomem_map_sanity_check(resource_size_t addr, unsigned long size);
 extern bool iomem_is_exclusive(u64 addr);
-extern bool resource_is_exclusive(struct resource *resource, u64 addr,
-				  resource_size_t size);
 
 extern int
 walk_system_ram_range(unsigned long start_pfn, unsigned long nr_pages,
@@ -331,9 +328,6 @@ extern int
 walk_system_ram_res(u64 start, u64 end, void *arg,
 		    int (*func)(struct resource *, void *));
 extern int
-walk_system_ram_res_rev(u64 start, u64 end, void *arg,
-			int (*func)(struct resource *, void *));
-extern int
 walk_iomem_res_desc(unsigned long desc, unsigned long flags, u64 start, u64 end,
 		    void *arg, int (*func)(struct resource *, void *));
 
@@ -341,8 +335,6 @@ struct resource *devm_request_free_mem_region(struct device *dev,
 		struct resource *base, unsigned long size);
 struct resource *request_free_mem_region(struct resource *base,
 		unsigned long size, const char *name);
-struct resource *alloc_free_mem_region(struct resource *base,
-		unsigned long size, unsigned long align, const char *name);
 
 static inline void irqresource_disabled(struct resource *res, u32 irq)
 {

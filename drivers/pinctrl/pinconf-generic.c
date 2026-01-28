@@ -10,19 +10,17 @@
 
 #define pr_fmt(fmt) "generic pinconfig core: " fmt
 
-#include <linux/array_size.h>
-#include <linux/debugfs.h>
-#include <linux/device.h>
-#include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/init.h>
+#include <linux/device.h>
 #include <linux/slab.h>
+#include <linux/debugfs.h>
 #include <linux/seq_file.h>
-
-#include <linux/pinctrl/pinconf-generic.h>
-#include <linux/pinctrl/pinconf.h>
 #include <linux/pinctrl/pinctrl.h>
-
+#include <linux/pinctrl/pinconf.h>
+#include <linux/pinctrl/pinconf-generic.h>
+#include <linux/of.h>
 #include "core.h"
 #include "pinconf.h"
 #include "pinctrl-utils.h"
@@ -48,7 +46,6 @@ static const struct pin_config_item conf_items[] = {
 	PCONFDUMP(PIN_CONFIG_MODE_LOW_POWER, "pin low power", "mode", true),
 	PCONFDUMP(PIN_CONFIG_OUTPUT_ENABLE, "output enabled", NULL, false),
 	PCONFDUMP(PIN_CONFIG_OUTPUT, "pin output", "level", true),
-	PCONFDUMP(PIN_CONFIG_OUTPUT_IMPEDANCE_OHMS, "output impedance", "ohms", true),
 	PCONFDUMP(PIN_CONFIG_POWER_SOURCE, "pin power source", "selector", true),
 	PCONFDUMP(PIN_CONFIG_SLEEP_HARDWARE_STATE, "sleep hardware state", NULL, false),
 	PCONFDUMP(PIN_CONFIG_SLEW_RATE, "slew rate", NULL, true),
@@ -57,7 +54,7 @@ static const struct pin_config_item conf_items[] = {
 
 static void pinconf_generic_dump_one(struct pinctrl_dev *pctldev,
 				     struct seq_file *s, const char *gname,
-				     unsigned int pin,
+				     unsigned pin,
 				     const struct pin_config_item *items,
 				     int nitems, int *print_sep)
 {
@@ -110,7 +107,7 @@ static void pinconf_generic_dump_one(struct pinctrl_dev *pctldev,
  * to be specified the other can be NULL/0.
  */
 void pinconf_generic_dump_pins(struct pinctrl_dev *pctldev, struct seq_file *s,
-			       const char *gname, unsigned int pin)
+			       const char *gname, unsigned pin)
 {
 	const struct pinconf_ops *ops = pctldev->desc->confops;
 	int print_sep = 0;
@@ -182,7 +179,6 @@ static const struct pinconf_generic_params dt_params[] = {
 	{ "output-disable", PIN_CONFIG_OUTPUT_ENABLE, 0 },
 	{ "output-enable", PIN_CONFIG_OUTPUT_ENABLE, 1 },
 	{ "output-high", PIN_CONFIG_OUTPUT, 1, },
-	{ "output-impedance-ohms", PIN_CONFIG_OUTPUT_IMPEDANCE_OHMS, 0 },
 	{ "output-low", PIN_CONFIG_OUTPUT, 0, },
 	{ "power-source", PIN_CONFIG_POWER_SOURCE, 0 },
 	{ "sleep-hardware-state", PIN_CONFIG_SLEEP_HARDWARE_STATE, 0 },
@@ -295,15 +291,15 @@ EXPORT_SYMBOL_GPL(pinconf_generic_parse_dt_config);
 
 int pinconf_generic_dt_subnode_to_map(struct pinctrl_dev *pctldev,
 		struct device_node *np, struct pinctrl_map **map,
-		unsigned int *reserved_maps, unsigned int *num_maps,
+		unsigned *reserved_maps, unsigned *num_maps,
 		enum pinctrl_map_type type)
 {
 	int ret;
 	const char *function;
 	struct device *dev = pctldev->dev;
 	unsigned long *configs = NULL;
-	unsigned int num_configs = 0;
-	unsigned int reserve, strings_count;
+	unsigned num_configs = 0;
+	unsigned reserve, strings_count;
 	struct property *prop;
 	const char *group;
 	const char *subnode_target_type = "pins";
@@ -379,9 +375,9 @@ EXPORT_SYMBOL_GPL(pinconf_generic_dt_subnode_to_map);
 
 int pinconf_generic_dt_node_to_map(struct pinctrl_dev *pctldev,
 		struct device_node *np_config, struct pinctrl_map **map,
-		unsigned int *num_maps, enum pinctrl_map_type type)
+		unsigned *num_maps, enum pinctrl_map_type type)
 {
-	unsigned int reserved_maps;
+	unsigned reserved_maps;
 	struct device_node *np;
 	int ret;
 
@@ -412,7 +408,7 @@ EXPORT_SYMBOL_GPL(pinconf_generic_dt_node_to_map);
 
 void pinconf_generic_dt_free_map(struct pinctrl_dev *pctldev,
 				 struct pinctrl_map *map,
-				 unsigned int num_maps)
+				 unsigned num_maps)
 {
 	pinctrl_utils_free_map(pctldev, map, num_maps);
 }

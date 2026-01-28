@@ -2,7 +2,6 @@
 #ifndef _LINUX_DMA_MAPPING_H
 #define _LINUX_DMA_MAPPING_H
 
-#include <linux/cache.h>
 #include <linux/sizes.h>
 #include <linux/string.h>
 #include <linux/device.h>
@@ -61,6 +60,23 @@
  * at least read-only at lesser-privileged levels).
  */
 #define DMA_ATTR_PRIVILEGED		(1UL << 9)
+
+/*
+ * DMA_ATTR_SYS_CACHE_ONLY: used to indicate that the buffer should be mapped
+ * with the correct memory attributes so that it can be cached in the system
+ * or last level cache. This is useful for buffers that are being mapped for
+ * devices that are non-coherent, but can use the system cache.
+ */
+#define DMA_ATTR_SYS_CACHE_ONLY		(1UL << 10)
+
+/*
+ * DMA_ATTR_SYS_CACHE_ONLY_NWA: used to indicate that the buffer should be
+ * mapped with the correct memory attributes so that it can be cached in the
+ * system or last level cache, with a no write allocate cache policy. This is
+ * useful for buffers that are being mapped for devices that are non-coherent,
+ * but can use the system cache.
+ */
+#define DMA_ATTR_SYS_CACHE_ONLY_NWA	(1UL << 11)
 
 /*
  * A dma_addr_t can hold any valid DMA or bus address for the platform.  It can
@@ -140,13 +156,11 @@ int dma_mmap_attrs(struct device *dev, struct vm_area_struct *vma,
 		void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		unsigned long attrs);
 bool dma_can_mmap(struct device *dev);
-bool dma_pci_p2pdma_supported(struct device *dev);
+int dma_supported(struct device *dev, u64 mask);
 int dma_set_mask(struct device *dev, u64 mask);
 int dma_set_coherent_mask(struct device *dev, u64 mask);
 u64 dma_get_required_mask(struct device *dev);
-bool dma_addressing_limited(struct device *dev);
 size_t dma_max_mapping_size(struct device *dev);
-size_t dma_opt_mapping_size(struct device *dev);
 bool dma_need_sync(struct device *dev, dma_addr_t dma_addr);
 unsigned long dma_get_merge_boundary(struct device *dev);
 struct sg_table *dma_alloc_noncontiguous(struct device *dev, size_t size,
@@ -249,9 +263,9 @@ static inline bool dma_can_mmap(struct device *dev)
 {
 	return false;
 }
-static inline bool dma_pci_p2pdma_supported(struct device *dev)
+static inline int dma_supported(struct device *dev, u64 mask)
 {
-	return false;
+	return 0;
 }
 static inline int dma_set_mask(struct device *dev, u64 mask)
 {
@@ -265,15 +279,7 @@ static inline u64 dma_get_required_mask(struct device *dev)
 {
 	return 0;
 }
-static inline bool dma_addressing_limited(struct device *dev)
-{
-	return false;
-}
 static inline size_t dma_max_mapping_size(struct device *dev)
-{
-	return 0;
-}
-static inline size_t dma_opt_mapping_size(struct device *dev)
 {
 	return 0;
 }
@@ -423,8 +429,6 @@ static inline void dma_sync_sgtable_for_device(struct device *dev,
 #define dma_get_sgtable(d, t, v, h, s) dma_get_sgtable_attrs(d, t, v, h, s, 0)
 #define dma_mmap_coherent(d, v, c, h, s) dma_mmap_attrs(d, v, c, h, s, 0)
 
-bool dma_coherent_ok(struct device *dev, phys_addr_t phys, size_t size);
-
 static inline void *dma_alloc_coherent(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp)
 {
@@ -468,6 +472,20 @@ static inline int dma_coerce_mask_and_coherent(struct device *dev, u64 mask)
 {
 	dev->dma_mask = &dev->coherent_dma_mask;
 	return dma_set_mask_and_coherent(dev, mask);
+}
+
+/**
+ * dma_addressing_limited - return if the device is addressing limited
+ * @dev:	device to check
+ *
+ * Return %true if the devices DMA mask is too small to address all memory in
+ * the system, else %false.  Lack of addressing bits is the prime reason for
+ * bounce buffering, but might not be the only one.
+ */
+static inline bool dma_addressing_limited(struct device *dev)
+{
+	return min_not_zero(dma_get_mask(dev), dev->bus_dma_limit) <
+			    dma_get_required_mask(dev);
 }
 
 static inline unsigned int dma_get_max_seg_size(struct device *dev)
@@ -537,15 +555,13 @@ static inline int dma_set_min_align_mask(struct device *dev,
 	return 0;
 }
 
-#ifndef dma_get_cache_alignment
 static inline int dma_get_cache_alignment(void)
 {
-#ifdef ARCH_HAS_DMA_MINALIGN
+#ifdef ARCH_DMA_MINALIGN
 	return ARCH_DMA_MINALIGN;
 #endif
 	return 1;
 }
-#endif
 
 static inline void *dmam_alloc_coherent(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp)

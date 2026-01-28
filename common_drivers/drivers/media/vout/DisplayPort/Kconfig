@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+#
+# Video output configuration
+#
+menu "Amlogic DisplayPort Output Module"
+
+config AMLOGIC_DisplayPort_TX
+	bool "DisplayPort Output Module"
+	default n
+	help
+		Support for DisplayPort/eDP output
+
+endmenu

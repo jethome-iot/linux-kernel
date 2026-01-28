@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+menu "Analog to digital converters"
+
+config AMLOGIC_ADC
+	tristate "Amlogic ADC devices support"
+	default n
+	help
+	  ADC devices support
+	  select y for built-in
+	  select m for ko
+	  select n for disable
+
+if AMLOGIC_ADC
+
+config AMLOGIC_MESON_SARADC
+	bool "Amlogic Meson SAR ADC driver"
+	depends on OF && COMMON_CLK
+	depends on REGMAP_MMIO
+	help
+	  Say yes here to build support for the SAR ADC found in Amlogic Meson
+	  SoCs.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called meson_saradc.
+
+config AMLOGIC_SARADC_COMMON
+	bool "Amlogic SAR ADC common driver"
+	depends on OF
+	depends on REGMAP_MMIO
+	help
+	  Say yes here to build support for the SAR ADC common found in Amlogic SoCs.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called amlogic_saradc.
+
+config AMLOGIC_SARADC
+	bool "Amlogic SAR ADC driver"
+	depends on OF && COMMON_CLK
+	depends on REGMAP_MMIO
+	help
+	  Say yes here to build support for the SAR ADC found in Amlogic SoCs.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called amlogic_saradc.
+
+config AMLOGIC_PDD
+	bool "Amlogic PDD (Power Down Detection) driver"
+	depends on OF
+	depends on REGMAP_MMIO
+	select IRQ_DOMAIN
+	select GENERIC_IRQ_CHIP
+	help
+	  Say yes here to build support for the PDD found in Amlogic SoCs.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called amlogic_pdd_s7.
+
+config AMLOGIC_SARADC_TO_GPIO
+	bool "Amlogic SAR ADC to GPIO driver"
+	depends on OF
+	depends on GPIOLIB
+	help
+	  Say yes here to build support for the SAR ADC to GPIO.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called amlogic_saradc_to_gpio.
+
+endif # AMLOGIC_ADC
+
+endmenu

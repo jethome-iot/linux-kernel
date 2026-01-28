@@ -5,10 +5,8 @@
  */
 
 #include <linux/interrupt.h>
-#include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/of_irq.h>
-#include <linux/platform_device.h>
 
 #include <asm/mach-ralink/ralink_regs.h>
 
@@ -68,7 +66,6 @@ static int __init ill_acc_of_setup(void)
 	}
 
 	irq = irq_of_parse_and_map(np, 0);
-	of_node_put(np);
 	if (!irq) {
 		dev_err(&pdev->dev, "failed to get irq\n");
 		put_device(&pdev->dev);

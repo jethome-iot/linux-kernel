@@ -37,10 +37,7 @@ struct mcu_msg_init_request {
 	u32 reserved0;		/* maybe a unused channel id */
 	u32 suballoc_dma;
 	u32 suballoc_size;
-	s32 encoder_buffer_size;
-	s32 encoder_buffer_color_depth;
-	s32 num_cores;
-	s32 clk_rate;
+	s32 l2_cache[3];
 };
 
 struct mcu_msg_init_response {
@@ -82,8 +79,9 @@ struct create_channel_param {
 	u32 unknown11;
 	u32 unknown12;
 	u16 num_slices;
-	u32 encoder_buffer_offset;
-	u32 encoder_buffer_enabled;
+	u16 prefetch_auto;
+	u32 prefetch_mem_offset;
+	u32 prefetch_mem_size;
 	u16 clip_hrz_range;
 	u16 clip_vrt_range;
 	u16 me_range[4];
@@ -184,7 +182,7 @@ struct mcu_msg_push_buffers_internal {
 	struct mcu_msg_header header;
 	u32 channel_id;
 	size_t num_buffers;
-	struct mcu_msg_push_buffers_internal_buffer buffer[] __counted_by(num_buffers);
+	struct mcu_msg_push_buffers_internal_buffer buffer[];
 };
 
 struct mcu_msg_put_stream_buffer {

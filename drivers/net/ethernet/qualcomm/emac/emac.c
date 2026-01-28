@@ -11,6 +11,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
+#include <linux/of_device.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
 #include <linux/acpi.h>
@@ -544,10 +545,13 @@ static int emac_probe_resources(struct platform_device *pdev,
 				struct emac_adapter *adpt)
 {
 	struct net_device *netdev = adpt->netdev;
+	char maddr[ETH_ALEN];
 	int ret = 0;
 
 	/* get mac address */
-	if (device_get_ethdev_address(&pdev->dev, netdev))
+	if (device_get_mac_address(&pdev->dev, maddr, ETH_ALEN))
+		eth_hw_addr_set(netdev, maddr);
+	else
 		eth_hw_addr_random(netdev);
 
 	/* Core 0 interrupt */
@@ -683,7 +687,8 @@ static int emac_probe(struct platform_device *pdev)
 	/* Initialize queues */
 	emac_mac_rx_tx_ring_init_all(pdev, adpt);
 
-	netif_napi_add(netdev, &adpt->rx_q.napi, emac_napi_rtx);
+	netif_napi_add(netdev, &adpt->rx_q.napi, emac_napi_rtx,
+		       NAPI_POLL_WEIGHT);
 
 	ret = register_netdev(netdev);
 	if (ret) {
@@ -718,7 +723,7 @@ err_undo_netdev:
 	return ret;
 }
 
-static void emac_remove(struct platform_device *pdev)
+static int emac_remove(struct platform_device *pdev)
 {
 	struct net_device *netdev = dev_get_drvdata(&pdev->dev);
 	struct emac_adapter *adpt = netdev_priv(netdev);
@@ -742,6 +747,8 @@ static void emac_remove(struct platform_device *pdev)
 	iounmap(adpt->phy.base);
 
 	free_netdev(netdev);
+
+	return 0;
 }
 
 static void emac_shutdown(struct platform_device *pdev)
@@ -760,7 +767,7 @@ static void emac_shutdown(struct platform_device *pdev)
 
 static struct platform_driver emac_platform_driver = {
 	.probe	= emac_probe,
-	.remove_new = emac_remove,
+	.remove	= emac_remove,
 	.driver = {
 		.name		= "qcom-emac",
 		.of_match_table = emac_dt_match,

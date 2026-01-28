@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+config AMLOGIC_GPIO
+	tristate "Amlogic gpio support"
+	default n
+	help
+	  gpio device support
+	  select y for built-in
+	  select m for ko
+	  select n for disable
+
+if AMLOGIC_GPIO
+
+config AMLOGIC_GPIOLIB
+	bool "Amlogic gpiolib expand"
+	depends on AMLOGIC_GPIO
+	depends on GPIOLIB
+	default n
+	help
+	  Say Y here if you want to use the
+	  amlogic gpiolib expand.
+
+config AMLOGIC_GPIOLIB_SYSFS
+	bool "Amlogic gpiolib-sysfs"
+	depends on AMLOGIC_GPIO
+	depends on GPIOLIB
+	depends on !GPIO_SYSFS
+	default n
+	help
+	  Say Y here if you want to use the
+	  amlogic gpiolib-sysfs-expand. This file is copied
+	  from kernel drivers/gpio/ and add some modification.
+	  It can not exist with common GPIO_SYSFS.
+
+config AMLOGIC_GPIO_DEBUG
+	bool "Amlogic gpio debug function"
+	depends on AMLOGIC_GPIO
+	depends on !AMLOGIC_ZAPPER_CUT
+	default n
+	help
+	  Say Y here if you want to use the
+	  amlogic gpio debug function. This is used to create debug node
+	  under debugfs.
+
+source "$(COMMON_DRIVERS_DIR)/drivers/gpio/irqchip/Kconfig"
+source "$(COMMON_DRIVERS_DIR)/drivers/gpio/pinctrl/Kconfig"
+source "$(COMMON_DRIVERS_DIR)/drivers/gpio/meson_pmic6b/Kconfig"
+
+endif # AMLOGIC_GPIO

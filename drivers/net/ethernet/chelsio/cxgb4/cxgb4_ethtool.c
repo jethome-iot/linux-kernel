@@ -199,8 +199,8 @@ static void get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 	struct adapter *adapter = netdev2adap(dev);
 	u32 exprom_vers;
 
-	strscpy(info->driver, cxgb4_driver_name, sizeof(info->driver));
-	strscpy(info->bus_info, pci_name(adapter->pdev),
+	strlcpy(info->driver, cxgb4_driver_name, sizeof(info->driver));
+	strlcpy(info->bus_info, pci_name(adapter->pdev),
 		sizeof(info->bus_info));
 	info->regdump_len = get_regs_len(dev);
 
@@ -890,9 +890,7 @@ static int set_pauseparam(struct net_device *dev,
 	return 0;
 }
 
-static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
-			  struct kernel_ethtool_ringparam *kernel_e,
-			  struct netlink_ext_ack *extack)
+static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e)
 {
 	const struct port_info *pi = netdev_priv(dev);
 	const struct sge *s = &pi->adapter->sge;
@@ -908,9 +906,7 @@ static void get_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
 	e->tx_pending = s->ethtxq[pi->first_qset].q.size;
 }
 
-static int set_sge_param(struct net_device *dev, struct ethtool_ringparam *e,
-			 struct kernel_ethtool_ringparam *kernel_e,
-			 struct netlink_ext_ack *extack)
+static int set_sge_param(struct net_device *dev, struct ethtool_ringparam *e)
 {
 	int i;
 	const struct port_info *pi = netdev_priv(dev);
@@ -1588,23 +1584,22 @@ static u32 get_rss_table_size(struct net_device *dev)
 	return pi->rss_size;
 }
 
-static int get_rss_table(struct net_device *dev,
-			 struct ethtool_rxfh_param *rxfh)
+static int get_rss_table(struct net_device *dev, u32 *p, u8 *key, u8 *hfunc)
 {
 	const struct port_info *pi = netdev_priv(dev);
 	unsigned int n = pi->rss_size;
 
-	rxfh->hfunc = ETH_RSS_HASH_TOP;
-	if (!rxfh->indir)
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
+	if (!p)
 		return 0;
 	while (n--)
-		rxfh->indir[n] = pi->rss[n];
+		p[n] = pi->rss[n];
 	return 0;
 }
 
-static int set_rss_table(struct net_device *dev,
-			 struct ethtool_rxfh_param *rxfh,
-			 struct netlink_ext_ack *extack)
+static int set_rss_table(struct net_device *dev, const u32 *p, const u8 *key,
+			 const u8 hfunc)
 {
 	unsigned int i;
 	struct port_info *pi = netdev_priv(dev);
@@ -1612,17 +1607,16 @@ static int set_rss_table(struct net_device *dev,
 	/* We require at least one supported parameter to be changed and no
 	 * change in any of the unsupported parameters
 	 */
-	if (rxfh->key ||
-	    (rxfh->hfunc != ETH_RSS_HASH_NO_CHANGE &&
-	     rxfh->hfunc != ETH_RSS_HASH_TOP))
+	if (key ||
+	    (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP))
 		return -EOPNOTSUPP;
-	if (!rxfh->indir)
+	if (!p)
 		return 0;
 
 	/* Interface must be brought up atleast once */
 	if (pi->adapter->flags & CXGB4_FULL_INIT_DONE) {
 		for (i = 0; i < pi->rss_size; i++)
-			pi->rss[i] = rxfh->indir[i];
+			pi->rss[i] = p[i];
 
 		return cxgb4_write_rss(pi, pi->rss);
 	}
@@ -1995,15 +1989,6 @@ static int get_dump_data(struct net_device *dev, struct ethtool_dump *eth_dump,
 	return 0;
 }
 
-static bool cxgb4_fw_mod_type_info_available(unsigned int fw_mod_type)
-{
-	/* Read port module EEPROM as long as it is plugged-in and
-	 * safe to read.
-	 */
-	return (fw_mod_type != FW_PORT_MOD_TYPE_NONE &&
-		fw_mod_type != FW_PORT_MOD_TYPE_ERROR);
-}
-
 static int cxgb4_get_module_info(struct net_device *dev,
 				 struct ethtool_modinfo *modinfo)
 {
@@ -2012,7 +1997,7 @@ static int cxgb4_get_module_info(struct net_device *dev,
 	struct adapter *adapter = pi->adapter;
 	int ret;
 
-	if (!cxgb4_fw_mod_type_info_available(pi->mod_type))
+	if (!t4_is_inserted_mod_type(pi->mod_type))
 		return -EINVAL;
 
 	switch (pi->port_type) {
@@ -2229,7 +2214,7 @@ void cxgb4_cleanup_ethtool_filters(struct adapter *adap)
 	if (eth_filter_info) {
 		for (i = 0; i < adap->params.nports; i++) {
 			kvfree(eth_filter_info[i].loc_array);
-			bitmap_free(eth_filter_info[i].bmap);
+			kfree(eth_filter_info[i].bmap);
 		}
 		kfree(eth_filter_info);
 	}
@@ -2272,7 +2257,9 @@ int cxgb4_init_ethtool_filters(struct adapter *adap)
 			goto free_eth_finfo;
 		}
 
-		eth_filter->port[i].bmap = bitmap_zalloc(nentries, GFP_KERNEL);
+		eth_filter->port[i].bmap = kcalloc(BITS_TO_LONGS(nentries),
+						   sizeof(unsigned long),
+						   GFP_KERNEL);
 		if (!eth_filter->port[i].bmap) {
 			ret = -ENOMEM;
 			goto free_eth_finfo;
@@ -2284,7 +2271,7 @@ int cxgb4_init_ethtool_filters(struct adapter *adap)
 
 free_eth_finfo:
 	while (i-- > 0) {
-		bitmap_free(eth_filter->port[i].bmap);
+		kfree(eth_filter->port[i].bmap);
 		kvfree(eth_filter->port[i].loc_array);
 	}
 	kfree(eth_filter_info);

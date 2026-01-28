@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#
+# Amlogic freertos configuration
+#
+
+config AMLOGIC_FREERTOS
+	bool "Amlogic Freertos Support"
+	depends on AMLOGIC_BREAK_GKI
+	default n
+	help
+	  Say Y here to enable freertos support.
+
+config AMLOGIC_FREERTOS_NOFITIER
+	bool "Amlogic Freertos Support nofitier"
+	depends on AMLOGIC_FREERTOS
+	default n
+	help
+	  Say Y here to enable freertos nofitier support.
+
+config AMLOGIC_FREERTOS_IS_MAP
+	bool "Amlogic Freertos memory are map to kernel"
+	depends on AMLOGIC_FREERTOS
+	default n
+	help
+	  Say Y here memory are map to kernel.
+
+config AMLOGIC_FREERTOS_MEMORY_FREE
+	  bool "Amlogic Freertos memory need free"
+	  depends on AMLOGIC_FREERTOS
+	  default n
+	  help
+	    Say Y here memory need to free.
+
+config AMLOGIC_FREERTOS_IPI_SEND
+	    bool "Amlogic Freertos ipi send"
+	    depends on AMLOGIC_FREERTOS
+	    default n
+	    help
+	      Say Y here to enable ipi send support.
+
+config AMLOGIC_FREERTOS_ANDROID_CTRL
+	    bool "Amlogic Freertos android ctrl"
+	    depends on AMLOGIC_FREERTOS
+	    default n
+	    help
+	      Say Y here to enable android ctrl support.
+
+config AMLOGIC_FREERTOS_SHUTDOWN
+	    bool "Amlogic Freertos shutdown function"
+	    depends on AMLOGIC_FREERTOS
+	    default n
+	    help
+	      Say Y here to enable shutdown function.
+
+config AMLOGIC_FREERTOS_T7
+	bool "Amlogic Freertos Support with t7"
+	depends on AMLOGIC_BREAK_GKI
+	depends on AMLOGIC_FREERTOS
+	select AMLOGIC_FREERTOS_NOFITIER
+	select AMLOGIC_FREERTOS_IS_MAP
+	select AMLOGIC_FREERTOS_MEMORY_FREE
+	select AMLOGIC_FREERTOS_IPI_SEND
+	select AMLOGIC_FREERTOS_ANDROID_CTRL
+	select AMLOGIC_FREERTOS_SHUTDOWN
+	default n
+	help
+	  Say Y here to enable freertos support.
+
+config AMLOGIC_FREERTOS_C3
+	bool "Amlogic Freertos Support with c3"
+	depends on AMLOGIC_FREERTOS
+	select AMLOGIC_FREERTOS_NOFITIER
+	select AMLOGIC_FREERTOS_IS_MAP
+	select AMLOGIC_FREERTOS_MEMORY_FREE
+	select AMLOGIC_FREERTOS_IPI_SEND
+	default n
+	help
+	  Say Y here to enable freertos support.
+
+config AMLOGIC_AUTO_CAPTURE
+	bool "Amlogic camera auto capture"
+	default n
+	help
+	  This option is used to configure Amlogic camera auto capture.
+	  User space would use a block of reserved memory to save captured camera,
+	  then free this reserved memory after using it.

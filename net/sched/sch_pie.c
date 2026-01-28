@@ -72,7 +72,7 @@ bool pie_drop_early(struct Qdisc *sch, struct pie_params *params,
 	if (vars->accu_prob >= (MAX_PROB / 2) * 17)
 		return true;
 
-	get_random_bytes(&rnd, 8);
+	prandom_bytes(&rnd, 8);
 	if ((rnd >> BITS_PER_BYTE) < local_prob) {
 		vars->accu_prob = 0;
 		return true;
@@ -142,6 +142,9 @@ static int pie_change(struct Qdisc *sch, struct nlattr *opt,
 	struct nlattr *tb[TCA_PIE_MAX + 1];
 	unsigned int qlen, dropped = 0;
 	int err;
+
+	if (!opt)
+		return -EINVAL;
 
 	err = nla_parse_nested_deprecated(tb, TCA_PIE_MAX, opt, pie_policy,
 					  NULL);
@@ -319,7 +322,7 @@ void pie_calculate_probability(struct pie_params *params, struct pie_vars *vars,
 	}
 
 	/* If qdelay is zero and backlog is not, it means backlog is very small,
-	 * so we do not update probability in this round.
+	 * so we do not update probabilty in this round.
 	 */
 	if (qdelay == 0 && backlog != 0)
 		update_prob = false;
@@ -421,10 +424,8 @@ static void pie_timer(struct timer_list *t)
 {
 	struct pie_sched_data *q = from_timer(q, t, adapt_timer);
 	struct Qdisc *sch = q->sch;
-	spinlock_t *root_lock;
+	spinlock_t *root_lock = qdisc_lock(qdisc_root_sleeping(sch));
 
-	rcu_read_lock();
-	root_lock = qdisc_lock(qdisc_root_sleeping(sch));
 	spin_lock(root_lock);
 	pie_calculate_probability(&q->params, &q->vars, sch->qstats.backlog);
 
@@ -432,7 +433,6 @@ static void pie_timer(struct timer_list *t)
 	if (q->params.tupdate)
 		mod_timer(&q->adapt_timer, jiffies + q->params.tupdate);
 	spin_unlock(root_lock);
-	rcu_read_unlock();
 }
 
 static int pie_init(struct Qdisc *sch, struct nlattr *opt,

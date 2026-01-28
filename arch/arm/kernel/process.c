@@ -33,22 +33,16 @@
 #include <asm/mach/time.h>
 #include <asm/tls.h>
 #include <asm/vdso.h>
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+#include <linux/amlogic/user_fault.h>
+#endif
 
 #include "signal.h"
-
-#if defined(CONFIG_CURRENT_POINTER_IN_TPIDRURO) || defined(CONFIG_SMP)
-DEFINE_PER_CPU(struct task_struct *, __entry_task);
-#endif
 
 #if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_STACKPROTECTOR_PER_TASK)
 #include <linux/stackprotector.h>
 unsigned long __stack_chk_guard __read_mostly;
 EXPORT_SYMBOL(__stack_chk_guard);
-#endif
-
-#ifndef CONFIG_CURRENT_POINTER_IN_TPIDRURO
-asmlinkage struct task_struct *__current;
-EXPORT_SYMBOL(__current);
 #endif
 
 static const char *processor_modes[] __maybe_unused = {
@@ -78,6 +72,7 @@ void arch_cpu_idle(void)
 		arm_pm_idle();
 	else
 		cpu_do_idle();
+	raw_local_irq_enable();
 }
 
 void arch_cpu_idle_prepare(void)
@@ -135,6 +130,9 @@ void __show_regs(struct pt_regs *regs)
 
 	printk("PC is at %pS\n", (void *)instruction_pointer(regs));
 	printk("LR is at %pS\n", (void *)regs->ARM_lr);
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+	show_user_fault_info(regs, 0, 0);
+#endif
 	printk("pc : [<%08lx>]    lr : [<%08lx>]    psr: %08lx\n",
 	       regs->ARM_pc, regs->ARM_lr, regs->ARM_cpsr);
 	printk("sp : %08lx  ip : %08lx  fp : %08lx\n",
@@ -155,6 +153,10 @@ void __show_regs(struct pt_regs *regs)
 	buf[2] = flags & PSR_C_BIT ? 'C' : 'c';
 	buf[3] = flags & PSR_V_BIT ? 'V' : 'v';
 	buf[4] = '\0';
+
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+	show_vmalloc_pfn(regs);
+#endif
 
 #ifndef CONFIG_CPU_V7M
 	{
@@ -195,12 +197,15 @@ void __show_regs(struct pt_regs *regs)
 		printk("Control: %08x%s\n", ctrl, buf);
 	}
 #endif
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+	show_extra_reg_data(regs);
+#endif
 }
 
 void show_regs(struct pt_regs * regs)
 {
 	__show_regs(regs);
-	dump_backtrace(regs, NULL, KERN_DEFAULT);
+	dump_stack();
 }
 
 ATOMIC_NOTIFIER_HEAD(thread_notify_head);
@@ -222,6 +227,7 @@ void flush_thread(void)
 
 	flush_ptrace_hw_breakpoint(tsk);
 
+	memset(thread->used_cp, 0, sizeof(thread->used_cp));
 	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
 	memset(&thread->fpstate, 0, sizeof(union fp_state));
 
@@ -230,13 +236,15 @@ void flush_thread(void)
 	thread_notify(THREAD_NOTIFY_FLUSH, thread);
 }
 
+void release_thread(struct task_struct *dead_task)
+{
+}
+
 asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
 
-int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
+int copy_thread(unsigned long clone_flags, unsigned long stack_start,
+		unsigned long stk_sz, struct task_struct *p, unsigned long tls)
 {
-	unsigned long clone_flags = args->flags;
-	unsigned long stack_start = args->stack;
-	unsigned long tls = args->tls;
 	struct thread_info *thread = task_thread_info(p);
 	struct pt_regs *childregs = task_pt_regs(p);
 
@@ -252,15 +260,15 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	thread->cpu_domain = get_domain();
 #endif
 
-	if (likely(!args->fn)) {
+	if (likely(!(p->flags & (PF_KTHREAD | PF_IO_WORKER)))) {
 		*childregs = *current_pt_regs();
 		childregs->ARM_r0 = 0;
 		if (stack_start)
 			childregs->ARM_sp = stack_start;
 	} else {
 		memset(childregs, 0, sizeof(struct pt_regs));
-		thread->cpu_context.r4 = (unsigned long)args->fn_arg;
-		thread->cpu_context.r5 = (unsigned long)args->fn;
+		thread->cpu_context.r4 = stk_sz;
+		thread->cpu_context.r5 = stack_start;
 		childregs->ARM_cpsr = SVC_MODE;
 	}
 	thread->cpu_context.pc = (unsigned long)ret_from_fork;
@@ -274,14 +282,20 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 
 	thread_notify(THREAD_NOTIFY_COPY, thread);
 
+#ifdef CONFIG_STACKPROTECTOR_PER_TASK
+	thread->stack_canary = p->stack_canary;
+#endif
+
 	return 0;
 }
 
-unsigned long __get_wchan(struct task_struct *p)
+unsigned long get_wchan(struct task_struct *p)
 {
 	struct stackframe frame;
 	unsigned long stack_page;
 	int count = 0;
+	if (!p || p == current || task_is_running(p))
+		return 0;
 
 	frame.fp = thread_saved_fp(p);
 	frame.sp = thread_saved_sp(p);
@@ -314,7 +328,7 @@ static int __init gate_vma_init(void)
 	gate_vma.vm_page_prot = PAGE_READONLY_EXEC;
 	gate_vma.vm_start = 0xffff0000;
 	gate_vma.vm_end	= 0xffff0000 + PAGE_SIZE;
-	vm_flags_init(&gate_vma, VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYEXEC);
+	gate_vma.vm_flags = VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYEXEC;
 	return 0;
 }
 arch_initcall(gate_vma_init);
@@ -369,7 +383,7 @@ static unsigned long sigpage_addr(const struct mm_struct *mm,
 
 	slots = ((last - first) >> PAGE_SHIFT) + 1;
 
-	offset = get_random_u32_below(slots);
+	offset = get_random_int() % slots;
 
 	addr = first + (offset << PAGE_SHIFT);
 

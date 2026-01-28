@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Amiga Linux/68k 8390 based PCMCIA Ethernet Driver for the Amiga 1200
  *
@@ -17,6 +16,12 @@
  *
  * cnetdevice: A Sana-II ethernet driver for AmigaOS
  *             Written by Bruce Abbott (bhabbott@inhb.co.nz)
+ *
+ * ----------------------------------------------------------------------------
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file COPYING in the main directory of the Linux
+ * distribution for more details.
  *
  * ----------------------------------------------------------------------------
  *
@@ -315,7 +320,8 @@ static int __init apne_probe1(struct net_device *dev, int ioaddr)
     i = request_irq(dev->irq, apne_interrupt, IRQF_SHARED, DRV_NAME, dev);
     if (i) return i;
 
-    eth_hw_addr_set(dev, SA_prom);
+    for (i = 0; i < ETH_ALEN; i++)
+	dev->dev_addr[i] = SA_prom[i];
 
     pr_cont(" %pM\n", dev->dev_addr);
 
@@ -610,5 +616,4 @@ static int init_pcmcia(void)
 	return 1;
 }
 
-MODULE_DESCRIPTION("National Semiconductor 8390 Amiga PCMCIA ethernet driver");
 MODULE_LICENSE("GPL");

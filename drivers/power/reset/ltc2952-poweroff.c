@@ -94,6 +94,7 @@ static struct ltc2952_poweroff *ltc2952_data;
  */
 static enum hrtimer_restart ltc2952_poweroff_timer_wde(struct hrtimer *timer)
 {
+	ktime_t now;
 	int state;
 	struct ltc2952_poweroff *data = to_ltc2952(timer, timer_wde);
 
@@ -103,7 +104,8 @@ static enum hrtimer_restart ltc2952_poweroff_timer_wde(struct hrtimer *timer)
 	state = gpiod_get_value(data->gpio_watchdog);
 	gpiod_set_value(data->gpio_watchdog, !state);
 
-	hrtimer_forward_now(timer, data->wde_interval);
+	now = hrtimer_cb_get_time(timer);
+	hrtimer_forward(timer, now, data->wde_interval);
 
 	return HRTIMER_RESTART;
 }
@@ -286,7 +288,7 @@ static int ltc2952_poweroff_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void ltc2952_poweroff_remove(struct platform_device *pdev)
+static int ltc2952_poweroff_remove(struct platform_device *pdev)
 {
 	struct ltc2952_poweroff *data = platform_get_drvdata(pdev);
 
@@ -295,6 +297,7 @@ static void ltc2952_poweroff_remove(struct platform_device *pdev)
 	hrtimer_cancel(&data->timer_wde);
 	atomic_notifier_chain_unregister(&panic_notifier_list,
 					 &data->panic_notifier);
+	return 0;
 }
 
 static const struct of_device_id of_ltc2952_poweroff_match[] = {
@@ -305,7 +308,7 @@ MODULE_DEVICE_TABLE(of, of_ltc2952_poweroff_match);
 
 static struct platform_driver ltc2952_poweroff_driver = {
 	.probe = ltc2952_poweroff_probe,
-	.remove_new = ltc2952_poweroff_remove,
+	.remove = ltc2952_poweroff_remove,
 	.driver = {
 		.name = "ltc2952-poweroff",
 		.of_match_table = of_ltc2952_poweroff_match,
@@ -316,3 +319,4 @@ module_platform_driver(ltc2952_poweroff_driver);
 
 MODULE_AUTHOR("René Moll <rene.moll@xsens.com>");
 MODULE_DESCRIPTION("LTC PowerPath power-off driver");
+MODULE_LICENSE("GPL v2");

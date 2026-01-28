@@ -24,14 +24,6 @@ static char *fw_path;
 module_param(fw_path, charp, 0444);
 MODULE_PARM_DESC(fw_path, "alternate path for SOF firmware.");
 
-static char *fw_filename;
-module_param(fw_filename, charp, 0444);
-MODULE_PARM_DESC(fw_filename, "alternate filename for SOF firmware.");
-
-static char *lib_path;
-module_param(lib_path, charp, 0444);
-MODULE_PARM_DESC(lib_path, "alternate path for SOF firmware libraries.");
-
 static char *tplg_path;
 module_param(tplg_path, charp, 0444);
 MODULE_PARM_DESC(tplg_path, "alternate path for SOF topology.");
@@ -43,10 +35,6 @@ MODULE_PARM_DESC(tplg_filename, "alternate filename for SOF topology.");
 static int sof_pci_debug;
 module_param_named(sof_pci_debug, sof_pci_debug, int, 0444);
 MODULE_PARM_DESC(sof_pci_debug, "SOF PCI debug options (0x0 all off)");
-
-static int sof_pci_ipc_type = -1;
-module_param_named(ipc_type, sof_pci_ipc_type, int, 0444);
-MODULE_PARM_DESC(ipc_type, "Force SOF IPC type. 0 - IPC3, 1 - IPC4");
 
 static const char *sof_dmi_override_tplg_name;
 static bool sof_dmi_use_community_key;
@@ -76,38 +64,6 @@ static const struct dmi_system_id sof_tplg_table[] = {
 			DMI_MATCH(DMI_OEM_STRING, "AUDIO-ADL_MAX98373_ALC5682I_I2S"),
 		},
 		.driver_data = "sof-adl-rt5682-ssp0-max98373-ssp2.tplg",
-	},
-	{
-		.callback = sof_tplg_cb,
-		.matches = {
-			DMI_MATCH(DMI_PRODUCT_FAMILY, "Google_Brya"),
-			DMI_MATCH(DMI_OEM_STRING, "AUDIO-MAX98390_ALC5682I_I2S"),
-		},
-		.driver_data = "sof-adl-max98390-ssp2-rt5682-ssp0.tplg",
-	},
-	{
-		.callback = sof_tplg_cb,
-		.matches = {
-			DMI_MATCH(DMI_PRODUCT_FAMILY, "Google_Brya"),
-			DMI_MATCH(DMI_OEM_STRING, "AUDIO_AMP-MAX98360_ALC5682VS_I2S_2WAY"),
-		},
-		.driver_data = "sof-adl-max98360a-rt5682-2way.tplg",
-	},
-	{
-		.callback = sof_tplg_cb,
-		.matches = {
-			DMI_MATCH(DMI_PRODUCT_FAMILY, "Google_Brya"),
-			DMI_MATCH(DMI_OEM_STRING, "AUDIO-AUDIO_MAX98357_ALC5682I_I2S_2WAY"),
-		},
-		.driver_data = "sof-adl-max98357a-rt5682-2way.tplg",
-	},
-	{
-		.callback = sof_tplg_cb,
-		.matches = {
-			DMI_MATCH(DMI_PRODUCT_FAMILY, "Google_Brya"),
-			DMI_MATCH(DMI_OEM_STRING, "AUDIO-MAX98360_ALC5682I_I2S_AMP_SSP2"),
-		},
-		.driver_data = "sof-adl-max98357a-rt5682.tplg",
 	},
 	{}
 };
@@ -190,7 +146,6 @@ static void sof_pci_probe_complete(struct device *dev)
 
 int sof_pci_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 {
-	struct sof_loadable_file_profile *path_override;
 	struct device *dev = &pci->dev;
 	const struct sof_dev_desc *desc =
 		(const struct sof_dev_desc *)pci_id->driver_data;
@@ -222,50 +177,58 @@ int sof_pci_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		return ret;
 
 	sof_pdata->name = pci_name(pci);
-
-	/* PCI defines a vendor ID of 0xFFFF as invalid. */
-	if (pci->subsystem_vendor != 0xFFFF) {
-		sof_pdata->subsystem_vendor = pci->subsystem_vendor;
-		sof_pdata->subsystem_device = pci->subsystem_device;
-		sof_pdata->subsystem_id_set = true;
-	}
-
 	sof_pdata->desc = desc;
 	sof_pdata->dev = dev;
+	sof_pdata->fw_filename = desc->default_fw_filename;
 
-	path_override = &sof_pdata->ipc_file_profile_base;
+	/*
+	 * for platforms using the SOF community key, change the
+	 * default path automatically to pick the right files from the
+	 * linux-firmware tree. This can be overridden with the
+	 * fw_path kernel parameter, e.g. for developers.
+	 */
 
-	if (sof_pci_ipc_type < 0) {
-		path_override->ipc_type = desc->ipc_default;
-	} else if (sof_pci_ipc_type < SOF_IPC_TYPE_COUNT) {
-		path_override->ipc_type = sof_pci_ipc_type;
+	/* alternate fw and tplg filenames ? */
+	if (fw_path) {
+		sof_pdata->fw_filename_prefix = fw_path;
+
+		dev_dbg(dev,
+			"Module parameter used, changed fw path to %s\n",
+			sof_pdata->fw_filename_prefix);
+
+	} else if (dmi_check_system(community_key_platforms) && sof_dmi_use_community_key) {
+		sof_pdata->fw_filename_prefix =
+			devm_kasprintf(dev, GFP_KERNEL, "%s/%s",
+				       sof_pdata->desc->default_fw_path,
+				       "community");
+
+		dev_dbg(dev,
+			"Platform uses community key, changed fw path to %s\n",
+			sof_pdata->fw_filename_prefix);
 	} else {
-		dev_err(dev, "Invalid IPC type requested: %d\n", sof_pci_ipc_type);
-		ret = -EINVAL;
-		goto out;
+		sof_pdata->fw_filename_prefix =
+			sof_pdata->desc->default_fw_path;
 	}
 
-	path_override->fw_path = fw_path;
-	path_override->fw_name = fw_filename;
-	path_override->fw_lib_path = lib_path;
-	path_override->tplg_path = tplg_path;
-
-	if (dmi_check_system(community_key_platforms) &&
-	    sof_dmi_use_community_key) {
-		path_override->fw_path_postfix = "community";
-		path_override->fw_lib_path_postfix = "community";
-	}
+	if (tplg_path)
+		sof_pdata->tplg_filename_prefix = tplg_path;
+	else
+		sof_pdata->tplg_filename_prefix =
+			sof_pdata->desc->default_tplg_path;
 
 	/*
 	 * the topology filename will be provided in the machine descriptor, unless
 	 * it is overridden by a module parameter or DMI quirk.
 	 */
 	if (tplg_filename) {
-		path_override->tplg_name = tplg_filename;
+		sof_pdata->tplg_filename = tplg_filename;
+
+		dev_dbg(dev, "Module parameter used, changed tplg filename to %s\n",
+			sof_pdata->tplg_filename);
 	} else {
 		dmi_check_system(sof_tplg_table);
 		if (sof_dmi_override_tplg_name)
-			path_override->tplg_name = sof_dmi_override_tplg_name;
+			sof_pdata->tplg_filename = sof_dmi_override_tplg_name;
 	}
 
 	/* set callback to be called on successful device probe to enable runtime_pm */
@@ -273,8 +236,6 @@ int sof_pci_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 
 	/* call sof helper for DSP hardware probe */
 	ret = snd_sof_device_probe(dev, sof_pdata);
-
-out:
 	if (ret)
 		pci_release_regions(pci);
 

@@ -68,7 +68,7 @@ static void __init ck_set_gc(struct device_node *node, void __iomem *reg_base,
 	gc->chip_types[0].chip.irq_mask = irq_gc_mask_clr_bit;
 	gc->chip_types[0].chip.irq_unmask = irq_gc_mask_set_bit;
 
-	if (of_property_read_bool(node, "csky,support-pulse-signal"))
+	if (of_find_property(node, "csky,support-pulse-signal", NULL))
 		gc->chip_types[0].chip.irq_unmask = irq_ck_mask_set_bit;
 }
 
@@ -136,11 +136,11 @@ static inline bool handle_irq_perbit(struct pt_regs *regs, u32 hwirq,
 				     u32 irq_base)
 {
 	if (hwirq == 0)
-		return false;
+		return 0;
 
-	generic_handle_domain_irq(root_domain, irq_base + __fls(hwirq));
+	handle_domain_irq(root_domain, irq_base + __fls(hwirq), regs);
 
-	return true;
+	return 1;
 }
 
 /* gx6605s 64 irqs interrupt controller */

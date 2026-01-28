@@ -10,6 +10,7 @@
 #define __STMMAC_H__
 
 #define STMMAC_RESOURCE_NAME   "stmmaceth"
+#define DRV_MODULE_VERSION	"Jan_2016"
 
 #include <linux/clk.h>
 #include <linux/hrtimer.h>
@@ -21,9 +22,7 @@
 #include <linux/ptp_clock_kernel.h>
 #include <linux/net_tstamp.h>
 #include <linux/reset.h>
-#include <net/page_pool/types.h>
-#include <net/xdp.h>
-#include <uapi/linux/bpf.h>
+#include <net/page_pool.h>
 
 struct stmmac_resources {
 	void __iomem *addr;
@@ -51,7 +50,6 @@ struct stmmac_tx_info {
 	bool last_segment;
 	bool is_jumbo;
 	enum stmmac_txbuf_type buf_type;
-	struct xsk_tx_metadata_compl xsk_meta;
 };
 
 #define STMMAC_TBS_AVAIL	BIT(0)
@@ -92,24 +90,6 @@ struct stmmac_rx_buffer {
 	};
 	struct page *sec_page;
 	dma_addr_t sec_addr;
-};
-
-struct stmmac_xdp_buff {
-	struct xdp_buff xdp;
-	struct stmmac_priv *priv;
-	struct dma_desc *desc;
-	struct dma_desc *ndesc;
-};
-
-struct stmmac_metadata_request {
-	struct stmmac_priv *priv;
-	struct dma_desc *tx_desc;
-	bool *set_ic;
-};
-
-struct stmmac_xsk_tx_complete {
-	struct stmmac_priv *priv;
-	struct dma_desc *desc;
 };
 
 struct stmmac_rx_queue {
@@ -195,29 +175,14 @@ struct stmmac_flow_entry {
 /* Rx Frame Steering */
 enum stmmac_rfs_type {
 	STMMAC_RFS_T_VLAN,
-	STMMAC_RFS_T_LLDP,
-	STMMAC_RFS_T_1588,
 	STMMAC_RFS_T_MAX,
 };
 
 struct stmmac_rfs_entry {
 	unsigned long cookie;
-	u16 etype;
 	int in_use;
 	int type;
 	int tc;
-};
-
-struct stmmac_dma_conf {
-	unsigned int dma_buf_sz;
-
-	/* RX Queue */
-	struct stmmac_rx_queue rx_queue[MTL_MAX_RX_QUEUES];
-	unsigned int dma_rx_size;
-
-	/* TX Queue */
-	struct stmmac_tx_queue tx_queue[MTL_MAX_TX_QUEUES];
-	unsigned int dma_tx_size;
 };
 
 struct stmmac_priv {
@@ -226,6 +191,7 @@ struct stmmac_priv {
 	u32 tx_coal_timer[MTL_MAX_TX_QUEUES];
 	u32 rx_coal_frames[MTL_MAX_TX_QUEUES];
 
+	int tx_coalesce;
 	int hwts_tx_en;
 	bool tx_path_in_lpi_mode;
 	bool tso;
@@ -233,6 +199,7 @@ struct stmmac_priv {
 	int sph_cap;
 	u32 sarc_type;
 
+	unsigned int dma_buf_sz;
 	unsigned int rx_copybreak;
 	u32 rx_riwt[MTL_MAX_TX_QUEUES];
 	int hwts_rx_en;
@@ -244,7 +211,13 @@ struct stmmac_priv {
 	int (*hwif_quirks)(struct stmmac_priv *priv);
 	struct mutex lock;
 
-	struct stmmac_dma_conf dma_conf;
+	/* RX Queue */
+	struct stmmac_rx_queue rx_queue[MTL_MAX_RX_QUEUES];
+	unsigned int dma_rx_size;
+
+	/* TX Queue */
+	struct stmmac_tx_queue tx_queue[MTL_MAX_TX_QUEUES];
+	unsigned int dma_tx_size;
 
 	/* Generic channel for NAPI */
 	struct stmmac_channel channel[STMMAC_CH_MAX];
@@ -253,6 +226,7 @@ struct stmmac_priv {
 	unsigned int flow_ctrl;
 	unsigned int pause;
 	struct mii_bus *mii;
+	int mii_irq[PHY_MAX_ADDR];
 
 	struct phylink_config phylink_config;
 	struct phylink *phylink;
@@ -289,14 +263,13 @@ struct stmmac_priv {
 	u32 adv_ts;
 	int use_riwt;
 	int irq_wake;
-	rwlock_t ptp_lock;
+	spinlock_t ptp_lock;
 	/* Protects auxiliary snapshot registers from concurrent access. */
 	struct mutex aux_ts_lock;
 	wait_queue_head_t tstamp_busy_wait;
 
 	void __iomem *mmcaddr;
 	void __iomem *ptpaddr;
-	void __iomem *estaddr;
 	unsigned long active_vlans[BITS_TO_LONGS(VLAN_N_VID)];
 	int sfty_ce_irq;
 	int sfty_ue_irq;
@@ -318,6 +291,14 @@ struct stmmac_priv {
 	unsigned long state;
 	struct workqueue_struct *wq;
 	struct work_struct service_task;
+
+#if IS_ENABLED(CONFIG_AMLOGIC_ETH_PRIVE)
+	/* Workqueue for Amlogic task */
+	struct workqueue_struct *amlogic_wq;
+	struct work_struct amlogic_task;
+	int amlogic_task_action;
+	int linkup_after_resume;
+#endif
 
 	/* Workqueue for handling FPE hand-shaking */
 	unsigned long fpe_task_state;
@@ -367,7 +348,7 @@ int stmmac_xdp_open(struct net_device *dev);
 void stmmac_xdp_release(struct net_device *dev);
 int stmmac_resume(struct device *dev);
 int stmmac_suspend(struct device *dev);
-void stmmac_dvr_remove(struct device *dev);
+int stmmac_dvr_remove(struct device *dev);
 int stmmac_dvr_probe(struct device *device,
 		     struct plat_stmmacenet_data *plat_dat,
 		     struct stmmac_resources *res);
@@ -422,4 +403,8 @@ static inline int stmmac_selftest_get_count(struct stmmac_priv *priv)
 }
 #endif /* CONFIG_STMMAC_SELFTESTS */
 
+#if IS_ENABLED(CONFIG_AMLOGIC_ETH_PRIVE)
+void stmmac_global_err(struct stmmac_priv *priv);
+void stmmac_trigger_amlogic_task(struct stmmac_priv *priv);
+#endif
 #endif /* __STMMAC_H__ */

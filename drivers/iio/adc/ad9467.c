@@ -4,9 +4,8 @@
  *
  * Copyright 2012-2020 Analog Devices Inc.
  */
-#include <linux/cleanup.h>
+
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -14,7 +13,7 @@
 #include <linux/err.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 
 
 #include <linux/iio/iio.h>
@@ -101,6 +100,12 @@
 #define AD9467_DEF_OUTPUT_MODE		0x08
 #define AD9467_REG_VREF_MASK		0x0F
 
+enum {
+	ID_AD9265,
+	ID_AD9434,
+	ID_AD9467,
+};
+
 struct ad9467_chip_info {
 	struct adi_axi_adc_chip_info	axi_adc_info;
 	unsigned int			default_output_mode;
@@ -117,8 +122,6 @@ struct ad9467_state {
 	unsigned int                    (*scales)[2];
 
 	struct gpio_desc		*pwrdown_gpio;
-	/* ensure consistent state obtained on multiple related accesses */
-	struct mutex			lock;
 };
 
 static int ad9467_spi_read(struct spi_device *spi, unsigned int reg)
@@ -158,8 +161,7 @@ static int ad9467_reg_access(struct adi_axi_adc_conv *conv, unsigned int reg,
 	struct spi_device *spi = st->spi;
 	int ret;
 
-	if (!readval) {
-		guard(mutex)(&st->lock);
+	if (readval == NULL) {
 		ret = ad9467_spi_write(spi, reg, writeval);
 		if (ret)
 			return ret;
@@ -228,46 +230,43 @@ static const struct iio_chan_spec ad9467_channels[] = {
 	AD9467_CHAN(0, 0, 16, 'S'),
 };
 
-static const struct ad9467_chip_info ad9467_chip_tbl = {
-	.axi_adc_info = {
-		.name = "ad9467",
-		.id = CHIPID_AD9467,
-		.max_rate = 250000000UL,
-		.scale_table = ad9467_scale_table,
-		.num_scales = ARRAY_SIZE(ad9467_scale_table),
-		.channels = ad9467_channels,
-		.num_channels = ARRAY_SIZE(ad9467_channels),
+static const struct ad9467_chip_info ad9467_chip_tbl[] = {
+	[ID_AD9265] = {
+		.axi_adc_info = {
+			.id = CHIPID_AD9265,
+			.max_rate = 125000000UL,
+			.scale_table = ad9265_scale_table,
+			.num_scales = ARRAY_SIZE(ad9265_scale_table),
+			.channels = ad9467_channels,
+			.num_channels = ARRAY_SIZE(ad9467_channels),
+		},
+		.default_output_mode = AD9265_DEF_OUTPUT_MODE,
+		.vref_mask = AD9265_REG_VREF_MASK,
 	},
-	.default_output_mode = AD9467_DEF_OUTPUT_MODE,
-	.vref_mask = AD9467_REG_VREF_MASK,
-};
-
-static const struct ad9467_chip_info ad9434_chip_tbl = {
-	.axi_adc_info = {
-		.name = "ad9434",
-		.id = CHIPID_AD9434,
-		.max_rate = 500000000UL,
-		.scale_table = ad9434_scale_table,
-		.num_scales = ARRAY_SIZE(ad9434_scale_table),
-		.channels = ad9434_channels,
-		.num_channels = ARRAY_SIZE(ad9434_channels),
+	[ID_AD9434] = {
+		.axi_adc_info = {
+			.id = CHIPID_AD9434,
+			.max_rate = 500000000UL,
+			.scale_table = ad9434_scale_table,
+			.num_scales = ARRAY_SIZE(ad9434_scale_table),
+			.channels = ad9434_channels,
+			.num_channels = ARRAY_SIZE(ad9434_channels),
+		},
+		.default_output_mode = AD9434_DEF_OUTPUT_MODE,
+		.vref_mask = AD9434_REG_VREF_MASK,
 	},
-	.default_output_mode = AD9434_DEF_OUTPUT_MODE,
-	.vref_mask = AD9434_REG_VREF_MASK,
-};
-
-static const struct ad9467_chip_info ad9265_chip_tbl = {
-	.axi_adc_info = {
-		.name = "ad9265",
-		.id = CHIPID_AD9265,
-		.max_rate = 125000000UL,
-		.scale_table = ad9265_scale_table,
-		.num_scales = ARRAY_SIZE(ad9265_scale_table),
-		.channels = ad9467_channels,
-		.num_channels = ARRAY_SIZE(ad9467_channels),
+	[ID_AD9467] = {
+		.axi_adc_info = {
+			.id = CHIPID_AD9467,
+			.max_rate = 250000000UL,
+			.scale_table = ad9467_scale_table,
+			.num_scales = ARRAY_SIZE(ad9467_scale_table),
+			.channels = ad9467_channels,
+			.num_channels = ARRAY_SIZE(ad9467_channels),
+		},
+		.default_output_mode = AD9467_DEF_OUTPUT_MODE,
+		.vref_mask = AD9467_REG_VREF_MASK,
 	},
-	.default_output_mode = AD9265_DEF_OUTPUT_MODE,
-	.vref_mask = AD9265_REG_VREF_MASK,
 };
 
 static int ad9467_get_scale(struct adi_axi_adc_conv *conv, int *val, int *val2)
@@ -313,7 +312,6 @@ static int ad9467_set_scale(struct adi_axi_adc_conv *conv, int val, int val2)
 		if (scale_val[0] != val || scale_val[1] != val2)
 			continue;
 
-		guard(mutex)(&st->lock);
 		ret = ad9467_spi_write(st->spi, AN877_ADC_REG_VREF,
 				       info->scale_table[i][1]);
 		if (ret < 0)
@@ -451,7 +449,7 @@ static int ad9467_probe(struct spi_device *spi)
 	unsigned int id;
 	int ret;
 
-	info = spi_get_device_match_data(spi);
+	info = of_device_get_match_data(&spi->dev);
 	if (!info)
 		return -ENODEV;
 
@@ -501,20 +499,12 @@ static int ad9467_probe(struct spi_device *spi)
 }
 
 static const struct of_device_id ad9467_of_match[] = {
-	{ .compatible = "adi,ad9265", .data = &ad9265_chip_tbl, },
-	{ .compatible = "adi,ad9434", .data = &ad9434_chip_tbl, },
-	{ .compatible = "adi,ad9467", .data = &ad9467_chip_tbl, },
+	{ .compatible = "adi,ad9265", .data = &ad9467_chip_tbl[ID_AD9265], },
+	{ .compatible = "adi,ad9434", .data = &ad9467_chip_tbl[ID_AD9434], },
+	{ .compatible = "adi,ad9467", .data = &ad9467_chip_tbl[ID_AD9467], },
 	{}
 };
 MODULE_DEVICE_TABLE(of, ad9467_of_match);
-
-static const struct spi_device_id ad9467_ids[] = {
-	{ "ad9265", (kernel_ulong_t)&ad9265_chip_tbl },
-	{ "ad9434", (kernel_ulong_t)&ad9434_chip_tbl },
-	{ "ad9467", (kernel_ulong_t)&ad9467_chip_tbl },
-	{}
-};
-MODULE_DEVICE_TABLE(spi, ad9467_ids);
 
 static struct spi_driver ad9467_driver = {
 	.driver = {
@@ -522,11 +512,9 @@ static struct spi_driver ad9467_driver = {
 		.of_match_table = ad9467_of_match,
 	},
 	.probe = ad9467_probe,
-	.id_table = ad9467_ids,
 };
 module_spi_driver(ad9467_driver);
 
 MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
 MODULE_DESCRIPTION("Analog Devices AD9467 ADC driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ADI_AXI);

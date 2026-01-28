@@ -18,6 +18,7 @@
 #include <linux/platform_device.h>
 #include <linux/of_address.h>
 #include <linux/of_pci.h>
+#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/phy/phy.h>
 
@@ -248,7 +249,7 @@ enum iproc_pcie_reg {
 
 	/*
 	 * To hold the address of the register where the MSI writes are
-	 * programmed.  When ARM GICv3 ITS is used, this should be programmed
+	 * programed.  When ARM GICv3 ITS is used, this should be programmed
 	 * with the address of the GITS_TRANSLATER register.
 	 */
 	IPROC_PCIE_MSI_ADDR_LO,
@@ -658,8 +659,10 @@ static int iproc_pci_raw_config_read32(struct iproc_pcie *pcie,
 	void __iomem *addr;
 
 	addr = iproc_pcie_map_cfg_bus(pcie, 0, devfn, where & ~0x3);
-	if (!addr)
+	if (!addr) {
+		*val = ~0;
 		return PCIBIOS_DEVICE_NOT_FOUND;
+	}
 
 	*val = readl(addr);
 
@@ -783,18 +786,19 @@ static int iproc_pcie_check_link(struct iproc_pcie *pcie)
 
 	/* make sure we are not in EP mode */
 	iproc_pci_raw_config_read32(pcie, 0, PCI_HEADER_TYPE, 1, &hdr_type);
-	if ((hdr_type & PCI_HEADER_TYPE_MASK) != PCI_HEADER_TYPE_BRIDGE) {
+	if ((hdr_type & 0x7f) != PCI_HEADER_TYPE_BRIDGE) {
 		dev_err(dev, "in EP mode, hdr=%#02x\n", hdr_type);
 		return -EFAULT;
 	}
 
-	/* force class to PCI_CLASS_BRIDGE_PCI_NORMAL (0x060400) */
+	/* force class to PCI_CLASS_BRIDGE_PCI (0x0604) */
 #define PCI_BRIDGE_CTRL_REG_OFFSET	0x43c
-#define PCI_BRIDGE_CTRL_REG_CLASS_MASK	0xffffff
+#define PCI_CLASS_BRIDGE_MASK		0xffff00
+#define PCI_CLASS_BRIDGE_SHIFT		8
 	iproc_pci_raw_config_read32(pcie, 0, PCI_BRIDGE_CTRL_REG_OFFSET,
 				    4, &class);
-	class &= ~PCI_BRIDGE_CTRL_REG_CLASS_MASK;
-	class |= PCI_CLASS_BRIDGE_PCI_NORMAL;
+	class &= ~PCI_CLASS_BRIDGE_MASK;
+	class |= (PCI_CLASS_BRIDGE_PCI << PCI_CLASS_BRIDGE_SHIFT);
 	iproc_pci_raw_config_write32(pcie, 0, PCI_BRIDGE_CTRL_REG_OFFSET,
 				     4, class);
 
@@ -1537,7 +1541,7 @@ err_exit_phy:
 }
 EXPORT_SYMBOL(iproc_pcie_setup);
 
-void iproc_pcie_remove(struct iproc_pcie *pcie)
+int iproc_pcie_remove(struct iproc_pcie *pcie)
 {
 	struct pci_host_bridge *host = pci_host_bridge_from_priv(pcie);
 
@@ -1548,6 +1552,8 @@ void iproc_pcie_remove(struct iproc_pcie *pcie)
 
 	phy_power_off(pcie->phy);
 	phy_exit(pcie->phy);
+
+	return 0;
 }
 EXPORT_SYMBOL(iproc_pcie_remove);
 
@@ -1577,7 +1583,7 @@ static void quirk_paxc_bridge(struct pci_dev *pdev)
 	 * code that the bridge is not an Ethernet device.
 	 */
 	if (pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE)
-		pdev->class = PCI_CLASS_BRIDGE_PCI_NORMAL;
+		pdev->class = PCI_CLASS_BRIDGE_PCI << 8;
 
 	/*
 	 * MPSS is not being set properly (as it is currently 0).  This is

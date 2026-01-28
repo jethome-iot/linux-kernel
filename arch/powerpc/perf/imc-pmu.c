@@ -6,7 +6,6 @@
  *           (C) 2017 Anju T Sudhakar, IBM Corporation.
  *           (C) 2017 Hemant K Shaw, IBM Corporation.
  */
-#include <linux/of.h>
 #include <linux/perf_event.h>
 #include <linux/slab.h>
 #include <asm/opal.h>
@@ -73,7 +72,7 @@ static struct attribute *imc_format_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group imc_format_group = {
+static struct attribute_group imc_format_group = {
 	.name = "format",
 	.attrs = imc_format_attrs,
 };
@@ -92,7 +91,7 @@ static struct attribute *trace_imc_format_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group trace_imc_format_group = {
+static struct attribute_group trace_imc_format_group = {
 .name = "format",
 .attrs = trace_imc_format_attrs,
 };
@@ -127,7 +126,7 @@ static struct attribute *imc_pmu_cpumask_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group imc_pmu_cpumask_attr_group = {
+static struct attribute_group imc_pmu_cpumask_attr_group = {
 	.attrs = imc_pmu_cpumask_attrs,
 };
 
@@ -241,10 +240,8 @@ static int update_events_in_group(struct device_node *node, struct imc_pmu *pmu)
 	ct = of_get_child_count(pmu_events);
 
 	/* Get the event prefix */
-	if (of_property_read_string(node, "events-prefix", &prefix)) {
-		of_node_put(pmu_events);
+	if (of_property_read_string(node, "events-prefix", &prefix))
 		return 0;
-	}
 
 	/* Get a global unit and scale data if available */
 	if (of_property_read_string(node, "scale", &g_scale))
@@ -258,10 +255,8 @@ static int update_events_in_group(struct device_node *node, struct imc_pmu *pmu)
 
 	/* Allocate memory for the events */
 	pmu->events = kcalloc(ct, sizeof(struct imc_events), GFP_KERNEL);
-	if (!pmu->events) {
-		of_node_put(pmu_events);
+	if (!pmu->events)
 		return -ENOMEM;
-	}
 
 	ct = 0;
 	/* Parse the events and update the struct */
@@ -270,8 +265,6 @@ static int update_events_in_group(struct device_node *node, struct imc_pmu *pmu)
 		if (!ret)
 			ct++;
 	}
-
-	of_node_put(pmu_events);
 
 	/* Allocate memory for attribute group */
 	attr_group = kzalloc(sizeof(*attr_group), GFP_KERNEL);
@@ -535,7 +528,7 @@ static int nest_imc_event_init(struct perf_event *event)
 
 	/*
 	 * Nest HW counter memory resides in a per-chip reserve-memory (HOMER).
-	 * Get the base memory address for this cpu.
+	 * Get the base memory addresss for this cpu.
 	 */
 	chip_id = cpu_to_chip_id(event->cpu);
 
@@ -550,7 +543,7 @@ static int nest_imc_event_init(struct perf_event *event)
 			break;
 		}
 		pcni++;
-	} while (pcni->vbase);
+	} while (pcni->vbase != 0);
 
 	if (!flag)
 		return -ENODEV;
@@ -686,7 +679,7 @@ static int ppc_core_imc_cpu_offline(unsigned int cpu)
 	/*
 	 * Check whether core_imc is registered. We could end up here
 	 * if the cpuhotplug callback registration fails. i.e, callback
-	 * invokes the offline path for all successfully registered cpus.
+	 * invokes the offline path for all sucessfully registered cpus.
 	 * At this stage, core_imc pmu will not be registered and we
 	 * should return here.
 	 *
@@ -1031,16 +1024,16 @@ static bool is_thread_imc_pmu(struct perf_event *event)
 	return false;
 }
 
-static __be64 *get_event_base_addr(struct perf_event *event)
+static u64 * get_event_base_addr(struct perf_event *event)
 {
 	u64 addr;
 
 	if (is_thread_imc_pmu(event)) {
 		addr = (u64)per_cpu(thread_imc_mem, smp_processor_id());
-		return (__be64 *)(addr + (event->attr.config & IMC_EVENT_OFFSET_MASK));
+		return (u64 *)(addr + (event->attr.config & IMC_EVENT_OFFSET_MASK));
 	}
 
-	return (__be64 *)event->hw.event_base;
+	return (u64 *)event->hw.event_base;
 }
 
 static void thread_imc_pmu_start_txn(struct pmu *pmu,
@@ -1064,8 +1057,7 @@ static int thread_imc_pmu_commit_txn(struct pmu *pmu)
 
 static u64 imc_read_counter(struct perf_event *event)
 {
-	__be64 *addr;
-	u64 data;
+	u64 *addr, data;
 
 	/*
 	 * In-Memory Collection (IMC) counters are free flowing counters.

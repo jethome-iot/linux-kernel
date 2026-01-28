@@ -10,21 +10,18 @@
  * Copyright (C) 2012 ARM Ltd.
  */
 
+#include <linux/irq.h>
+#include <linux/memory.h>
+#include <linux/smp.h>
 #include <linux/hardirq.h>
 #include <linux/init.h>
-#include <linux/irq.h>
 #include <linux/irqchip.h>
 #include <linux/kprobes.h>
-#include <linux/memory.h>
 #include <linux/scs.h>
 #include <linux/seq_file.h>
-#include <linux/smp.h>
+#include <asm/numa.h>
 #include <linux/vmalloc.h>
 #include <asm/daifflags.h>
-#include <asm/exception.h>
-#include <asm/numa.h>
-#include <asm/softirq_stack.h>
-#include <asm/stacktrace.h>
 #include <asm/vmap_stack.h>
 
 /* Only access this in an NMI enter/exit */
@@ -64,7 +61,12 @@ static void __init init_irq_stacks(void)
 }
 #else
 /* irq stack only needs to be 16 byte aligned - not IRQ_STACK_SIZE aligned. */
+#ifdef CONFIG_AMLOGIC_VMAP
+DEFINE_PER_CPU_ALIGNED(unsigned long [IRQ_STACK_SIZE/sizeof(long)], irq_stack)
+	__aligned(PAGE_SIZE);
+#else
 DEFINE_PER_CPU_ALIGNED(unsigned long [IRQ_STACK_SIZE/sizeof(long)], irq_stack);
+#endif
 
 static void init_irq_stacks(void)
 {
@@ -72,18 +74,6 @@ static void init_irq_stacks(void)
 
 	for_each_possible_cpu(cpu)
 		per_cpu(irq_stack_ptr, cpu) = per_cpu(irq_stack, cpu);
-}
-#endif
-
-#ifndef CONFIG_PREEMPT_RT
-static void ____do_softirq(struct pt_regs *regs)
-{
-	__do_softirq();
-}
-
-void do_softirq_own_stack(void)
-{
-	call_on_irq_stack(NULL, ____do_softirq);
 }
 #endif
 

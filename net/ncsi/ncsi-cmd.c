@@ -228,8 +228,7 @@ static int ncsi_cmd_handler_oem(struct sk_buff *skb,
 	len += max(payload, padding_bytes);
 
 	cmd = skb_put_zero(skb, len);
-	unsafe_memcpy(&cmd->mfr_id, nca->data, nca->payload,
-		      /* skb allocated with enough to load the payload */);
+	memcpy(&cmd->mfr_id, nca->data, nca->payload);
 	ncsi_cmd_build_header(&cmd->cmd.common, nca);
 
 	return 0;
@@ -270,8 +269,7 @@ static struct ncsi_cmd_handler {
 	{ NCSI_PKT_CMD_GPS,    0, ncsi_cmd_handler_default },
 	{ NCSI_PKT_CMD_OEM,   -1, ncsi_cmd_handler_oem     },
 	{ NCSI_PKT_CMD_PLDM,   0, NULL                     },
-	{ NCSI_PKT_CMD_GPUUID, 0, ncsi_cmd_handler_default },
-	{ NCSI_PKT_CMD_GMCMA,  0, ncsi_cmd_handler_default }
+	{ NCSI_PKT_CMD_GPUUID, 0, ncsi_cmd_handler_default }
 };
 
 static struct ncsi_request *ncsi_alloc_command(struct ncsi_cmd_arg *nca)

@@ -38,7 +38,6 @@
 #include <asm/dma.h>
 #include <asm/maar.h>
 #include <asm/mmu_context.h>
-#include <asm/mmzone.h>
 #include <asm/sections.h>
 #include <asm/pgalloc.h>
 #include <asm/tlb.h>
@@ -89,7 +88,7 @@ static void *__kmap_pgprot(struct page *page, unsigned long addr, pgprot_t prot)
 	pte_t pte;
 	int tlbidx;
 
-	BUG_ON(folio_test_dcache_dirty(page_folio(page)));
+	BUG_ON(Page_dcache_dirty(page));
 
 	preempt_disable();
 	pagefault_disable();
@@ -170,12 +169,11 @@ void kunmap_coherent(void)
 void copy_user_highpage(struct page *to, struct page *from,
 	unsigned long vaddr, struct vm_area_struct *vma)
 {
-	struct folio *src = page_folio(from);
 	void *vfrom, *vto;
 
 	vto = kmap_atomic(to);
 	if (cpu_has_dc_aliases &&
-	    folio_mapped(src) && !folio_test_dcache_dirty(src)) {
+	    page_mapcount(from) && !Page_dcache_dirty(from)) {
 		vfrom = kmap_coherent(from, vaddr);
 		copy_page(vto, vfrom);
 		kunmap_coherent();
@@ -196,17 +194,15 @@ void copy_to_user_page(struct vm_area_struct *vma,
 	struct page *page, unsigned long vaddr, void *dst, const void *src,
 	unsigned long len)
 {
-	struct folio *folio = page_folio(page);
-
 	if (cpu_has_dc_aliases &&
-	    folio_mapped(folio) && !folio_test_dcache_dirty(folio)) {
+	    page_mapcount(page) && !Page_dcache_dirty(page)) {
 		void *vto = kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
 		memcpy(vto, src, len);
 		kunmap_coherent();
 	} else {
 		memcpy(dst, src, len);
 		if (cpu_has_dc_aliases)
-			folio_set_dcache_dirty(folio);
+			SetPageDcacheDirty(page);
 	}
 	if (vma->vm_flags & VM_EXEC)
 		flush_cache_page(vma, vaddr, page_to_pfn(page));
@@ -216,17 +212,15 @@ void copy_from_user_page(struct vm_area_struct *vma,
 	struct page *page, unsigned long vaddr, void *dst, const void *src,
 	unsigned long len)
 {
-	struct folio *folio = page_folio(page);
-
 	if (cpu_has_dc_aliases &&
-	    folio_mapped(folio) && !folio_test_dcache_dirty(folio)) {
+	    page_mapcount(page) && !Page_dcache_dirty(page)) {
 		void *vfrom = kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
 		memcpy(dst, vfrom, len);
 		kunmap_coherent();
 	} else {
 		memcpy(dst, src, len);
 		if (cpu_has_dc_aliases)
-			folio_set_dcache_dirty(folio);
+			SetPageDcacheDirty(page);
 	}
 }
 EXPORT_SYMBOL_GPL(copy_from_user_page);
@@ -422,13 +416,9 @@ void __init paging_init(void)
 		       " %ldk highmem ignored\n",
 		       (highend_pfn - max_low_pfn) << (PAGE_SHIFT - 10));
 		max_zone_pfns[ZONE_HIGHMEM] = max_low_pfn;
-
-		max_mapnr = max_low_pfn;
-	} else if (highend_pfn) {
-		max_mapnr = highend_pfn;
-	} else {
-		max_mapnr = max_low_pfn;
 	}
+
+	max_mapnr = highend_pfn ? highend_pfn : max_low_pfn;
 #else
 	max_mapnr = max_low_pfn;
 #endif
@@ -463,10 +453,10 @@ static inline void __init mem_init_free_highmem(void)
 void __init mem_init(void)
 {
 	/*
-	 * When PFN_PTE_SHIFT is greater than PAGE_SHIFT we won't have enough PTE
+	 * When _PFN_SHIFT is greater than PAGE_SHIFT we won't have enough PTE
 	 * bits to hold a full 32b physical address on MIPS32 systems.
 	 */
-	BUILD_BUG_ON(IS_ENABLED(CONFIG_32BIT) && (PFN_PTE_SHIFT > PAGE_SHIFT));
+	BUILD_BUG_ON(IS_ENABLED(CONFIG_32BIT) && (_PFN_SHIFT > PAGE_SHIFT));
 
 	maar_init();
 	memblock_free_all();
@@ -527,9 +517,17 @@ static int __init pcpu_cpu_distance(unsigned int from, unsigned int to)
 	return node_distance(cpu_to_node(from), cpu_to_node(to));
 }
 
-static int __init pcpu_cpu_to_node(int cpu)
+static void * __init pcpu_fc_alloc(unsigned int cpu, size_t size,
+				       size_t align)
 {
-	return cpu_to_node(cpu);
+	return memblock_alloc_try_nid(size, align, __pa(MAX_DMA_ADDRESS),
+				      MEMBLOCK_ALLOC_ACCESSIBLE,
+				      cpu_to_node(cpu));
+}
+
+static void __init pcpu_fc_free(void *ptr, size_t size)
+{
+	memblock_free_early(__pa(ptr), size);
 }
 
 void __init setup_per_cpu_areas(void)
@@ -545,7 +543,7 @@ void __init setup_per_cpu_areas(void)
 	rc = pcpu_embed_first_chunk(PERCPU_MODULE_RESERVE,
 				    PERCPU_DYNAMIC_RESERVE, PAGE_SIZE,
 				    pcpu_cpu_distance,
-				    pcpu_cpu_to_node);
+				    pcpu_fc_alloc, pcpu_fc_free);
 	if (rc < 0)
 		panic("Failed to initialize percpu areas.");
 

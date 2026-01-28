@@ -1633,7 +1633,7 @@ static int asus_platform_init(struct asus_laptop *asus)
 {
 	int result;
 
-	asus->platform_device = platform_device_alloc(ASUS_LAPTOP_FILE, PLATFORM_DEVID_NONE);
+	asus->platform_device = platform_device_alloc(ASUS_LAPTOP_FILE, -1);
 	if (!asus->platform_device)
 		return -ENOMEM;
 	platform_set_drvdata(asus->platform_device, asus);
@@ -1816,8 +1816,9 @@ static void asus_dmi_check(void)
 		return;
 
 	/* On L1400B WLED control the sound card, don't mess with it ... */
-	if (strncmp(model, "L1400B", 6) == 0)
+	if (strncmp(model, "L1400B", 6) == 0) {
 		wlan_status = -1;
+	}
 }
 
 static bool asus_device_present;
@@ -1900,7 +1901,7 @@ fail_platform:
 	return result;
 }
 
-static void asus_acpi_remove(struct acpi_device *device)
+static int asus_acpi_remove(struct acpi_device *device)
 {
 	struct asus_laptop *asus = acpi_driver_data(device);
 
@@ -1913,6 +1914,7 @@ static void asus_acpi_remove(struct acpi_device *device)
 
 	kfree(asus->name);
 	kfree(asus);
+	return 0;
 }
 
 static const struct acpi_device_id asus_device_ids[] = {

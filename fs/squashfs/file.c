@@ -445,9 +445,8 @@ static int squashfs_readpage_sparse(struct page *page, int expected)
 	return 0;
 }
 
-static int squashfs_read_folio(struct file *file, struct folio *folio)
+static int squashfs_readpage(struct file *file, struct page *page)
 {
-	struct page *page = &folio->page;
 	struct inode *inode = page->mapping->host;
 	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
 	int index = page->index >> (msblk->block_log - PAGE_SHIFT);
@@ -455,7 +454,7 @@ static int squashfs_read_folio(struct file *file, struct folio *folio)
 	int expected = index == file_end ?
 			(i_size_read(inode) & (msblk->block_size - 1)) :
 			 msblk->block_size;
-	int res = 0;
+	int res;
 	void *pageaddr;
 
 	TRACE("Entered squashfs_readpage, page index %lx, start block %llx\n",
@@ -468,15 +467,14 @@ static int squashfs_read_folio(struct file *file, struct folio *folio)
 	if (index < file_end || squashfs_i(inode)->fragment_block ==
 					SQUASHFS_INVALID_BLK) {
 		u64 block = 0;
-
-		res = read_blocklist(inode, index, &block);
-		if (res < 0)
+		int bsize = read_blocklist(inode, index, &block);
+		if (bsize < 0)
 			goto error_out;
 
-		if (res == 0)
+		if (bsize == 0)
 			res = squashfs_readpage_sparse(page, expected);
 		else
-			res = squashfs_readpage_block(page, block, res, expected);
+			res = squashfs_readpage_block(page, block, bsize, expected);
 	} else
 		res = squashfs_readpage_fragment(page, expected);
 
@@ -490,11 +488,11 @@ out:
 	memset(pageaddr, 0, PAGE_SIZE);
 	kunmap_atomic(pageaddr);
 	flush_dcache_page(page);
-	if (res == 0)
+	if (!PageError(page))
 		SetPageUptodate(page);
 	unlock_page(page);
 
-	return res;
+	return 0;
 }
 
 static int squashfs_readahead_fragment(struct page **page,
@@ -544,8 +542,7 @@ static void squashfs_readahead(struct readahead_control *ractl)
 	struct squashfs_page_actor *actor;
 	unsigned int nr_pages = 0;
 	struct page **pages;
-	int i;
-	loff_t file_end = i_size_read(inode) >> msblk->block_log;
+	int i, file_end = i_size_read(inode) >> msblk->block_log;
 	unsigned int max_pages = 1UL << shift;
 
 	readahead_expand(ractl, start, (len | mask) + 1);
@@ -634,6 +631,6 @@ skip_pages:
 }
 
 const struct address_space_operations squashfs_aops = {
-	.read_folio = squashfs_read_folio,
+	.readpage = squashfs_readpage,
 	.readahead = squashfs_readahead
 };

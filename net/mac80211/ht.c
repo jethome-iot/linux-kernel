@@ -9,7 +9,7 @@
  * Copyright 2007, Michael Wu <flamingice@sourmilk.net>
  * Copyright 2007-2010, Intel Corporation
  * Copyright 2017	Intel Deutschland GmbH
- * Copyright(c) 2020-2023 Intel Corporation
+ * Copyright(c) 2020-2021 Intel Corporation
  */
 
 #include <linux/ieee80211.h>
@@ -138,16 +138,13 @@ void ieee80211_apply_htcap_overrides(struct ieee80211_sub_if_data *sdata,
 bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
 				       struct ieee80211_supported_band *sband,
 				       const struct ieee80211_ht_cap *ht_cap_ie,
-				       struct link_sta_info *link_sta)
+				       struct sta_info *sta)
 {
-	struct ieee80211_bss_conf *link_conf;
-	struct sta_info *sta = link_sta->sta;
 	struct ieee80211_sta_ht_cap ht_cap, own_cap;
 	u8 ampdu_info, tx_mcs_set_cap;
 	int i, max_tx_streams;
 	bool changed;
 	enum ieee80211_sta_rx_bandwidth bw;
-	enum nl80211_chan_width width;
 
 	memset(&ht_cap, 0, sizeof(ht_cap));
 
@@ -241,25 +238,16 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
 	ht_cap.mcs.rx_highest = ht_cap_ie->mcs.rx_highest;
 
 	if (ht_cap.cap & IEEE80211_HT_CAP_MAX_AMSDU)
-		link_sta->pub->agg.max_amsdu_len = IEEE80211_MAX_MPDU_LEN_HT_7935;
+		sta->sta.max_amsdu_len = IEEE80211_MAX_MPDU_LEN_HT_7935;
 	else
-		link_sta->pub->agg.max_amsdu_len = IEEE80211_MAX_MPDU_LEN_HT_3839;
-
-	ieee80211_sta_recalc_aggregates(&sta->sta);
+		sta->sta.max_amsdu_len = IEEE80211_MAX_MPDU_LEN_HT_3839;
 
  apply:
-	changed = memcmp(&link_sta->pub->ht_cap, &ht_cap, sizeof(ht_cap));
+	changed = memcmp(&sta->sta.deflink.ht_cap, &ht_cap, sizeof(ht_cap));
 
-	memcpy(&link_sta->pub->ht_cap, &ht_cap, sizeof(ht_cap));
+	memcpy(&sta->sta.deflink.ht_cap, &ht_cap, sizeof(ht_cap));
 
-	rcu_read_lock();
-	link_conf = rcu_dereference(sdata->vif.link_conf[link_sta->link_id]);
-	if (WARN_ON(!link_conf))
-		width = NL80211_CHAN_WIDTH_20_NOHT;
-	else
-		width = link_conf->chandef.width;
-
-	switch (width) {
+	switch (sdata->vif.bss_conf.chandef.width) {
 	default:
 		WARN_ON_ONCE(1);
 		fallthrough;
@@ -271,16 +259,14 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
 	case NL80211_CHAN_WIDTH_80:
 	case NL80211_CHAN_WIDTH_80P80:
 	case NL80211_CHAN_WIDTH_160:
-	case NL80211_CHAN_WIDTH_320:
 		bw = ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40 ?
 				IEEE80211_STA_RX_BW_40 : IEEE80211_STA_RX_BW_20;
 		break;
 	}
-	rcu_read_unlock();
 
-	link_sta->pub->bandwidth = bw;
+	sta->sta.deflink.bandwidth = bw;
 
-	link_sta->cur_max_bandwidth =
+	sta->deflink.cur_max_bandwidth =
 		ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40 ?
 				IEEE80211_STA_RX_BW_40 : IEEE80211_STA_RX_BW_20;
 
@@ -302,13 +288,12 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
 			break;
 		}
 
-		if (smps_mode != link_sta->pub->smps_mode)
+		if (smps_mode != sta->sta.smps_mode)
 			changed = true;
-		link_sta->pub->smps_mode = smps_mode;
+		sta->sta.smps_mode = smps_mode;
 	} else {
-		link_sta->pub->smps_mode = IEEE80211_SMPS_OFF;
+		sta->sta.smps_mode = IEEE80211_SMPS_OFF;
 	}
-
 	return changed;
 }
 
@@ -317,16 +302,16 @@ void ieee80211_sta_tear_down_BA_sessions(struct sta_info *sta,
 {
 	int i;
 
-	lockdep_assert_wiphy(sta->local->hw.wiphy);
+	mutex_lock(&sta->ampdu_mlme.mtx);
+	for (i = 0; i <  IEEE80211_NUM_TIDS; i++)
+		___ieee80211_stop_rx_ba_session(sta, i, WLAN_BACK_RECIPIENT,
+						WLAN_REASON_QSTA_LEAVE_QBSS,
+						reason != AGG_STOP_DESTROY_STA &&
+						reason != AGG_STOP_PEER_REQUEST);
 
 	for (i = 0; i <  IEEE80211_NUM_TIDS; i++)
-		__ieee80211_stop_rx_ba_session(sta, i, WLAN_BACK_RECIPIENT,
-					       WLAN_REASON_QSTA_LEAVE_QBSS,
-					       reason != AGG_STOP_DESTROY_STA &&
-					       reason != AGG_STOP_PEER_REQUEST);
-
-	for (i = 0; i <  IEEE80211_NUM_TIDS; i++)
-		__ieee80211_stop_tx_ba_session(sta, i, reason);
+		___ieee80211_stop_tx_ba_session(sta, i, reason);
+	mutex_unlock(&sta->ampdu_mlme.mtx);
 
 	/*
 	 * In case the tear down is part of a reconfigure due to HW restart
@@ -334,8 +319,9 @@ void ieee80211_sta_tear_down_BA_sessions(struct sta_info *sta,
 	 * the BA session, so handle it to properly clean tid_tx data.
 	 */
 	if(reason == AGG_STOP_DESTROY_STA) {
-		wiphy_work_cancel(sta->local->hw.wiphy, &sta->ampdu_mlme.work);
+		cancel_work_sync(&sta->ampdu_mlme.work);
 
+		mutex_lock(&sta->ampdu_mlme.mtx);
 		for (i = 0; i < IEEE80211_NUM_TIDS; i++) {
 			struct tid_ampdu_tx *tid_tx =
 				rcu_dereference_protected_tid_tx(sta, i);
@@ -346,10 +332,11 @@ void ieee80211_sta_tear_down_BA_sessions(struct sta_info *sta,
 			if (test_and_clear_bit(HT_AGG_STATE_STOP_CB, &tid_tx->state))
 				ieee80211_stop_tx_ba_cb(sta, i, tid_tx);
 		}
+		mutex_unlock(&sta->ampdu_mlme.mtx);
 	}
 }
 
-void ieee80211_ba_session_work(struct wiphy *wiphy, struct wiphy_work *work)
+void ieee80211_ba_session_work(struct work_struct *work)
 {
 	struct sta_info *sta =
 		container_of(work, struct sta_info, ampdu_mlme.work);
@@ -357,33 +344,32 @@ void ieee80211_ba_session_work(struct wiphy *wiphy, struct wiphy_work *work)
 	bool blocked;
 	int tid;
 
-	lockdep_assert_wiphy(sta->local->hw.wiphy);
-
 	/* When this flag is set, new sessions should be blocked. */
 	blocked = test_sta_flag(sta, WLAN_STA_BLOCK_BA);
 
+	mutex_lock(&sta->ampdu_mlme.mtx);
 	for (tid = 0; tid < IEEE80211_NUM_TIDS; tid++) {
 		if (test_and_clear_bit(tid, sta->ampdu_mlme.tid_rx_timer_expired))
-			__ieee80211_stop_rx_ba_session(
+			___ieee80211_stop_rx_ba_session(
 				sta, tid, WLAN_BACK_RECIPIENT,
 				WLAN_REASON_QSTA_TIMEOUT, true);
 
 		if (test_and_clear_bit(tid,
 				       sta->ampdu_mlme.tid_rx_stop_requested))
-			__ieee80211_stop_rx_ba_session(
+			___ieee80211_stop_rx_ba_session(
 				sta, tid, WLAN_BACK_RECIPIENT,
 				WLAN_REASON_UNSPECIFIED, true);
 
 		if (!blocked &&
 		    test_and_clear_bit(tid,
 				       sta->ampdu_mlme.tid_rx_manage_offl))
-			__ieee80211_start_rx_ba_session(sta, 0, 0, 0, 1, tid,
-							IEEE80211_MAX_AMPDU_BUF_HT,
-							false, true, NULL);
+			___ieee80211_start_rx_ba_session(sta, 0, 0, 0, 1, tid,
+							 IEEE80211_MAX_AMPDU_BUF_HT,
+							 false, true, NULL);
 
 		if (test_and_clear_bit(tid + IEEE80211_NUM_TIDS,
 				       sta->ampdu_mlme.tid_rx_manage_offl))
-			__ieee80211_stop_rx_ba_session(
+			___ieee80211_stop_rx_ba_session(
 				sta, tid, WLAN_BACK_RECIPIENT,
 				0, false);
 
@@ -391,35 +377,6 @@ void ieee80211_ba_session_work(struct wiphy *wiphy, struct wiphy_work *work)
 
 		tid_tx = sta->ampdu_mlme.tid_start_tx[tid];
 		if (!blocked && tid_tx) {
-			struct txq_info *txqi = to_txq_info(sta->sta.txq[tid]);
-			struct ieee80211_sub_if_data *sdata =
-				vif_to_sdata(txqi->txq.vif);
-			struct fq *fq = &sdata->local->fq;
-
-			spin_lock_bh(&fq->lock);
-
-			/* Allow only frags to be dequeued */
-			set_bit(IEEE80211_TXQ_STOP, &txqi->flags);
-
-			if (!skb_queue_empty(&txqi->frags)) {
-				/* Fragmented Tx is ongoing, wait for it to
-				 * finish. Reschedule worker to retry later.
-				 */
-
-				spin_unlock_bh(&fq->lock);
-				spin_unlock_bh(&sta->lock);
-
-				/* Give the task working on the txq a chance
-				 * to send out the queued frags
-				 */
-				synchronize_net();
-
-				wiphy_work_queue(sdata->local->hw.wiphy, work);
-				return;
-			}
-
-			spin_unlock_bh(&fq->lock);
-
 			/*
 			 * Assign it over to the normal tid_tx array
 			 * where it "goes live".
@@ -446,11 +403,12 @@ void ieee80211_ba_session_work(struct wiphy *wiphy, struct wiphy_work *work)
 		    test_and_clear_bit(HT_AGG_STATE_START_CB, &tid_tx->state))
 			ieee80211_start_tx_ba_cb(sta, tid, tid_tx);
 		if (test_and_clear_bit(HT_AGG_STATE_WANT_STOP, &tid_tx->state))
-			__ieee80211_stop_tx_ba_session(sta, tid,
-						       AGG_STOP_LOCAL_REQUEST);
+			___ieee80211_stop_tx_ba_session(sta, tid,
+							AGG_STOP_LOCAL_REQUEST);
 		if (test_and_clear_bit(HT_AGG_STATE_STOP_CB, &tid_tx->state))
 			ieee80211_stop_tx_ba_cb(sta, tid, tid_tx);
 	}
+	mutex_unlock(&sta->ampdu_mlme.mtx);
 }
 
 void ieee80211_send_delba(struct ieee80211_sub_if_data *sdata,
@@ -475,7 +433,7 @@ void ieee80211_send_delba(struct ieee80211_sub_if_data *sdata,
 	    sdata->vif.type == NL80211_IFTYPE_MESH_POINT)
 		memcpy(mgmt->bssid, sdata->vif.addr, ETH_ALEN);
 	else if (sdata->vif.type == NL80211_IFTYPE_STATION)
-		memcpy(mgmt->bssid, sdata->deflink.u.mgd.bssid, ETH_ALEN);
+		memcpy(mgmt->bssid, sdata->u.mgd.bssid, ETH_ALEN);
 	else if (sdata->vif.type == NL80211_IFTYPE_ADHOC)
 		memcpy(mgmt->bssid, sdata->u.ibss.bssid, ETH_ALEN);
 
@@ -535,13 +493,11 @@ ieee80211_smps_mode_to_smps_mode(enum ieee80211_smps_mode smps)
 
 int ieee80211_send_smps_action(struct ieee80211_sub_if_data *sdata,
 			       enum ieee80211_smps_mode smps, const u8 *da,
-			       const u8 *bssid, int link_id)
+			       const u8 *bssid)
 {
 	struct ieee80211_local *local = sdata->local;
 	struct sk_buff *skb;
 	struct ieee80211_mgmt *action_frame;
-	struct ieee80211_tx_info *info;
-	u8 status_link_id = link_id < 0 ? 0 : link_id;
 
 	/* 27 = header + category + action + smps mode */
 	skb = dev_alloc_skb(27 + local->hw.extra_tx_headroom);
@@ -561,7 +517,6 @@ int ieee80211_send_smps_action(struct ieee80211_sub_if_data *sdata,
 	case IEEE80211_SMPS_AUTOMATIC:
 	case IEEE80211_SMPS_NUM_MODES:
 		WARN_ON(1);
-		smps = IEEE80211_SMPS_OFF;
 		fallthrough;
 	case IEEE80211_SMPS_OFF:
 		action_frame->u.action.u.ht_smps.smps_control =
@@ -578,39 +533,37 @@ int ieee80211_send_smps_action(struct ieee80211_sub_if_data *sdata,
 	}
 
 	/* we'll do more on status of this frame */
-	info = IEEE80211_SKB_CB(skb);
-	info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
-	/* we have 12 bits, and need 6: link_id 4, smps 2 */
-	info->status_data = IEEE80211_STATUS_TYPE_SMPS |
-			    u16_encode_bits(status_link_id << 2 | smps,
-					    IEEE80211_STATUS_SUBDATA_MASK);
-	ieee80211_tx_skb_tid(sdata, skb, 7, link_id);
+	IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
+	ieee80211_tx_skb(sdata, skb);
 
 	return 0;
 }
 
-void ieee80211_request_smps(struct ieee80211_vif *vif, unsigned int link_id,
+void ieee80211_request_smps_mgd_work(struct work_struct *work)
+{
+	struct ieee80211_sub_if_data *sdata =
+		container_of(work, struct ieee80211_sub_if_data,
+			     u.mgd.request_smps_work);
+
+	sdata_lock(sdata);
+	__ieee80211_request_smps_mgd(sdata, sdata->u.mgd.driver_smps_mode);
+	sdata_unlock(sdata);
+}
+
+void ieee80211_request_smps(struct ieee80211_vif *vif,
 			    enum ieee80211_smps_mode smps_mode)
 {
 	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
-	struct ieee80211_link_data *link;
 
 	if (WARN_ON_ONCE(vif->type != NL80211_IFTYPE_STATION))
 		return;
 
-	rcu_read_lock();
-	link = rcu_dereference(sdata->link[link_id]);
-	if (WARN_ON(!link))
-		goto out;
+	if (sdata->u.mgd.driver_smps_mode == smps_mode)
+		return;
 
-	if (link->u.mgd.driver_smps_mode == smps_mode)
-		goto out;
-
-	link->u.mgd.driver_smps_mode = smps_mode;
-	wiphy_work_queue(sdata->local->hw.wiphy,
-			 &link->u.mgd.request_smps_work);
-out:
-	rcu_read_unlock();
+	sdata->u.mgd.driver_smps_mode = smps_mode;
+	ieee80211_queue_work(&sdata->local->hw,
+			     &sdata->u.mgd.request_smps_work);
 }
 /* this might change ... don't want non-open drivers using it */
 EXPORT_SYMBOL_GPL(ieee80211_request_smps);

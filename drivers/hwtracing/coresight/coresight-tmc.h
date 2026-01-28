@@ -135,7 +135,6 @@ enum etr_mode {
 	ETR_MODE_FLAT,		/* Uses contiguous flat buffer */
 	ETR_MODE_ETR_SG,	/* Uses in-built TMC ETR SG mechanism */
 	ETR_MODE_CATU,		/* Use SG mechanism in CATU */
-	ETR_MODE_AUTO,		/* Use the default mechanism */
 };
 
 struct etr_buf_operations;
@@ -208,7 +207,6 @@ struct tmc_drvdata {
 	enum tmc_mem_intf_width	memwidth;
 	u32			trigger_cntr;
 	u32			etr_caps;
-	enum etr_mode		etr_mode;
 	struct idr		idr;
 	struct mutex		idr_mutex;
 	struct etr_buf		*sysfs_buf;
@@ -284,12 +282,12 @@ ssize_t tmc_etr_get_sysfs_trace(struct tmc_drvdata *drvdata,
 static inline u64							\
 tmc_read_##name(struct tmc_drvdata *drvdata)				\
 {									\
-	return csdev_access_relaxed_read_pair(&drvdata->csdev->access, lo_off, hi_off); \
+	return coresight_read_reg_pair(drvdata->base, lo_off, hi_off);	\
 }									\
 static inline void							\
 tmc_write_##name(struct tmc_drvdata *drvdata, u64 val)			\
 {									\
-	csdev_access_relaxed_write_pair(&drvdata->csdev->access, val, lo_off, hi_off); \
+	coresight_write_reg_pair(drvdata->base, val, lo_off, hi_off);	\
 }
 
 TMC_REG_PAIR(rrp, TMC_RRP, TMC_RRPHI)
@@ -334,8 +332,5 @@ struct coresight_device *tmc_etr_get_catu_device(struct tmc_drvdata *drvdata);
 
 void tmc_etr_set_catu_ops(const struct etr_buf_operations *catu);
 void tmc_etr_remove_catu_ops(void);
-struct etr_buf *tmc_etr_get_buffer(struct coresight_device *csdev,
-				   enum cs_mode mode, void *data);
-extern const struct attribute_group coresight_etr_group;
 
 #endif

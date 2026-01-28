@@ -41,6 +41,7 @@
 #include <asm/elf.h>
 #include <asm/cpufeature.h>
 #include <asm/cpu_ops.h>
+#include <asm/hypervisor.h>
 #include <asm/kasan.h>
 #include <asm/numa.h>
 #include <asm/scs.h>
@@ -51,6 +52,7 @@
 #include <asm/tlbflush.h>
 #include <asm/traps.h>
 #include <asm/efi.h>
+#include <asm/hypervisor.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/mmu_context.h>
 
@@ -58,7 +60,6 @@ static int num_standard_resources;
 static struct resource *standard_resources;
 
 phys_addr_t __fdt_pointer __initdata;
-u64 mmu_enabled_at_boot __initdata;
 
 /*
  * Standard memory resources
@@ -192,16 +193,11 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 
 	if (!dt_virt || !early_init_dt_scan(dt_virt)) {
 		pr_crit("\n"
-			"Error: invalid device tree blob at physical address %pa (virtual address 0x%px)\n"
+			"Error: invalid device tree blob at physical address %pa (virtual address 0x%p)\n"
 			"The dtb must be 8-byte aligned and must not exceed 2 MB in size\n"
 			"\nPlease check your bootloader.",
 			&dt_phys, dt_virt);
 
-		/*
-		 * Note that in this _really_ early stage we cannot even BUG()
-		 * or oops, so the least terrible thing to do is cpu_relax(),
-		 * or else we could end-up printing non-initialized data, etc.
-		 */
 		while (true)
 			cpu_relax();
 	}
@@ -228,8 +224,6 @@ static void __init request_standard_resources(void)
 	kernel_code.end     = __pa_symbol(__init_begin - 1);
 	kernel_data.start   = __pa_symbol(_sdata);
 	kernel_data.end     = __pa_symbol(_end - 1);
-	insert_resource(&iomem_resource, &kernel_code);
-	insert_resource(&iomem_resource, &kernel_data);
 
 	num_standard_resources = memblock.memory.cnt;
 	res_size = num_standard_resources * sizeof(*standard_resources);
@@ -242,16 +236,27 @@ static void __init request_standard_resources(void)
 		if (memblock_is_nomap(region)) {
 			res->name  = "reserved";
 			res->flags = IORESOURCE_MEM;
-			res->start = __pfn_to_phys(memblock_region_reserved_base_pfn(region));
-			res->end = __pfn_to_phys(memblock_region_reserved_end_pfn(region)) - 1;
 		} else {
 			res->name  = "System RAM";
 			res->flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
-			res->start = __pfn_to_phys(memblock_region_memory_base_pfn(region));
-			res->end = __pfn_to_phys(memblock_region_memory_end_pfn(region)) - 1;
 		}
+		res->start = __pfn_to_phys(memblock_region_memory_base_pfn(region));
+		res->end = __pfn_to_phys(memblock_region_memory_end_pfn(region)) - 1;
 
-		insert_resource(&iomem_resource, res);
+		request_resource(&iomem_resource, res);
+
+		if (kernel_code.start >= res->start &&
+		    kernel_code.end <= res->end)
+			request_resource(res, &kernel_code);
+		if (kernel_data.start >= res->start &&
+		    kernel_data.end <= res->end)
+			request_resource(res, &kernel_data);
+#ifdef CONFIG_KEXEC_CORE
+		/* Userspace will find "Crash kernel" region in /proc/iomem. */
+		if (crashk_res.end && crashk_res.start >= res->start &&
+		    crashk_res.end <= res->end)
+			request_resource(res, &crashk_res);
+#endif
 	}
 }
 
@@ -296,8 +301,6 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 
 	*cmdline_p = boot_command_line;
 
-	kaslr_init();
-
 	/*
 	 * If know now we are going to need KPTI then use non-global
 	 * mappings from the start, avoiding the cost of rewriting
@@ -335,12 +338,8 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	xen_early_init();
 	efi_init();
 
-	if (!efi_enabled(EFI_BOOT)) {
-		if ((u64)_text % MIN_KIMG_ALIGN)
-			pr_warn(FW_BUG "Kernel image misaligned at boot, please fix your bootloader!");
-		WARN_TAINT(mmu_enabled_at_boot, TAINT_FIRMWARE_WORKAROUND,
-			   FW_BUG "Booted with MMU enabled!");
-	}
+	if (!efi_enabled(EFI_BOOT) && ((u64)_text % MIN_KIMG_ALIGN) != 0)
+	     pr_warn(FW_BUG "Kernel image misaligned at boot, please fix your bootloader!");
 
 	arm64_memblock_init();
 
@@ -402,10 +401,22 @@ static inline bool cpu_can_disable(unsigned int cpu)
 	return false;
 }
 
-bool arch_cpu_is_hotpluggable(int num)
+static int __init topology_init(void)
 {
-	return cpu_can_disable(num);
+	int i;
+
+	for_each_online_node(i)
+		register_one_node(i);
+
+	for_each_possible_cpu(i) {
+		struct cpu *cpu = &per_cpu(cpu_data.cpu, i);
+		cpu->hotpluggable = cpu_can_disable(i);
+		register_cpu(cpu, i);
+	}
+
+	return 0;
 }
+subsys_initcall(topology_init);
 
 static void dump_kernel_offset(void)
 {
@@ -441,10 +452,9 @@ static int __init register_arm64_panic_block(void)
 }
 device_initcall(register_arm64_panic_block);
 
-static int __init check_mmu_enabled_at_boot(void)
+void kvm_arm_init_hyp_services(void)
 {
-	if (!efi_enabled(EFI_BOOT) && mmu_enabled_at_boot)
-		panic("Non-EFI boot detected with MMU and caches enabled");
-	return 0;
+	kvm_init_ioremap_services();
+	kvm_init_memshare_services();
+	kvm_init_memrelinquish_services();
 }
-device_initcall_sync(check_mmu_enabled_at_boot);

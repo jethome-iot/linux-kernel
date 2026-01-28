@@ -18,7 +18,6 @@
 
 #include <asm/cacheflush.h>
 #include <asm/cpufeature.h>
-#include <asm/daifflags.h>
 #include <asm/proc-fns.h>
 #include <asm-generic/mm_hooks.h>
 #include <asm/cputype.h>
@@ -39,16 +38,11 @@ static inline void contextidr_thread_switch(struct task_struct *next)
 /*
  * Set TTBR0 to reserved_pg_dir. No translations will be possible via TTBR0.
  */
-static inline void cpu_set_reserved_ttbr0_nosync(void)
+static inline void cpu_set_reserved_ttbr0(void)
 {
 	unsigned long ttbr = phys_to_ttbr(__pa_symbol(reserved_pg_dir));
 
 	write_sysreg(ttbr, ttbr0_el1);
-}
-
-static inline void cpu_set_reserved_ttbr0(void)
-{
-	cpu_set_reserved_ttbr0_nosync();
 	isb();
 }
 
@@ -57,6 +51,7 @@ void cpu_do_switch_mm(phys_addr_t pgd_phys, struct mm_struct *mm);
 static inline void cpu_switch_mm(pgd_t *pgd, struct mm_struct *mm)
 {
 	BUG_ON(pgd == swapper_pg_dir);
+	cpu_set_reserved_ttbr0();
 	cpu_do_switch_mm(virt_to_phys(pgd),mm);
 }
 
@@ -65,7 +60,8 @@ static inline void cpu_switch_mm(pgd_t *pgd, struct mm_struct *mm)
  * TCR_T0SZ(VA_BITS), unless system RAM is positioned very high in
  * physical memory, in which case it will be smaller.
  */
-extern int idmap_t0sz;
+extern u64 idmap_t0sz;
+extern u64 idmap_ptrs_per_pgd;
 
 /*
  * Ensure TCR.T0SZ is set to the provided value.
@@ -110,89 +106,45 @@ static inline void cpu_uninstall_idmap(void)
 		cpu_switch_mm(mm->pgd, mm);
 }
 
-static inline void __cpu_install_idmap(pgd_t *idmap)
+static inline void cpu_install_idmap(void)
 {
 	cpu_set_reserved_ttbr0();
 	local_flush_tlb_all();
 	cpu_set_idmap_tcr_t0sz();
 
-	cpu_switch_mm(lm_alias(idmap), &init_mm);
-}
-
-static inline void cpu_install_idmap(void)
-{
-	__cpu_install_idmap(idmap_pg_dir);
-}
-
-/*
- * Load our new page tables. A strict BBM approach requires that we ensure that
- * TLBs are free of any entries that may overlap with the global mappings we are
- * about to install.
- *
- * For a real hibernate/resume/kexec cycle TTBR0 currently points to a zero
- * page, but TLBs may contain stale ASID-tagged entries (e.g. for EFI runtime
- * services), while for a userspace-driven test_resume cycle it points to
- * userspace page tables (and we must point it at a zero page ourselves).
- *
- * We change T0SZ as part of installing the idmap. This is undone by
- * cpu_uninstall_idmap() in __cpu_suspend_exit().
- */
-static inline void cpu_install_ttbr0(phys_addr_t ttbr0, unsigned long t0sz)
-{
-	cpu_set_reserved_ttbr0();
-	local_flush_tlb_all();
-	__cpu_set_tcr_t0sz(t0sz);
-
-	/* avoid cpu_switch_mm() and its SW-PAN and CNP interactions */
-	write_sysreg(ttbr0, ttbr0_el1);
-	isb();
+	cpu_switch_mm(lm_alias(idmap_pg_dir), &init_mm);
 }
 
 /*
  * Atomically replaces the active TTBR1_EL1 PGD with a new VA-compatible PGD,
  * avoiding the possibility of conflicting TLB entries being allocated.
  */
-static inline void __cpu_replace_ttbr1(pgd_t *pgdp, pgd_t *idmap, bool cnp)
+static inline void __nocfi cpu_replace_ttbr1(pgd_t *pgdp)
 {
 	typedef void (ttbr_replace_func)(phys_addr_t);
 	extern ttbr_replace_func idmap_cpu_replace_ttbr1;
 	ttbr_replace_func *replace_phys;
-	unsigned long daif;
 
 	/* phys_to_ttbr() zeros lower 2 bits of ttbr with 52-bit PA */
 	phys_addr_t ttbr1 = phys_to_ttbr(virt_to_phys(pgdp));
 
-	if (cnp)
+	if (system_supports_cnp() && !WARN_ON(pgdp != lm_alias(swapper_pg_dir))) {
+		/*
+		 * cpu_replace_ttbr1() is used when there's a boot CPU
+		 * up (i.e. cpufeature framework is not up yet) and
+		 * latter only when we enable CNP via cpufeature's
+		 * enable() callback.
+		 * Also we rely on the cpu_hwcap bit being set before
+		 * calling the enable() function.
+		 */
 		ttbr1 |= TTBR_CNP_BIT;
+	}
 
-	replace_phys = (void *)__pa_symbol(idmap_cpu_replace_ttbr1);
+	replace_phys = (void *)__pa_symbol(function_nocfi(idmap_cpu_replace_ttbr1));
 
-	__cpu_install_idmap(idmap);
-
-	/*
-	 * We really don't want to take *any* exceptions while TTBR1 is
-	 * in the process of being replaced so mask everything.
-	 */
-	daif = local_daif_save();
+	cpu_install_idmap();
 	replace_phys(ttbr1);
-	local_daif_restore(daif);
-
 	cpu_uninstall_idmap();
-}
-
-static inline void cpu_enable_swapper_cnp(void)
-{
-	__cpu_replace_ttbr1(lm_alias(swapper_pg_dir), idmap_pg_dir, true);
-}
-
-static inline void cpu_replace_ttbr1(pgd_t *pgdp, pgd_t *idmap)
-{
-	/*
-	 * Only for early TTBR1 replacement before cpucaps are finalized and
-	 * before we've decided whether to use CNP.
-	 */
-	WARN_ON(system_capabilities_finalized());
-	__cpu_replace_ttbr1(pgdp, idmap, false);
 }
 
 /*
@@ -297,12 +249,6 @@ void post_ttbr_update_workaround(void);
 
 unsigned long arm64_mm_context_get(struct mm_struct *mm);
 void arm64_mm_context_put(struct mm_struct *mm);
-
-#define mm_untag_mask mm_untag_mask
-static inline unsigned long mm_untag_mask(struct mm_struct *mm)
-{
-	return -1UL >> 8;
-}
 
 #include <asm-generic/mmu_context.h>
 

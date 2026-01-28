@@ -197,7 +197,8 @@ static const struct rtc_class_ops max6900_rtc_ops = {
 	.set_time = max6900_rtc_set_time,
 };
 
-static int max6900_probe(struct i2c_client *client)
+static int
+max6900_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct rtc_device *rtc;
 

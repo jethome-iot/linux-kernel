@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#
+# Amlogic hid driver configuration
+#
+
+config AMLOGIC_ADD_RUMBLE
+	tristate "Add rumble support to latest xbox controllers"
+	depends on AMLOGIC_BREAK_GKI
+	default n
+	help
+	  Say 'Y' here if you want to support rumble.

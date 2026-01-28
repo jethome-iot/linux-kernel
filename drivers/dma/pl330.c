@@ -1053,9 +1053,6 @@ static bool _trigger(struct pl330_thread *thrd)
 
 	thrd->req_running = idx;
 
-	if (desc->rqtype == DMA_MEM_TO_DEV || desc->rqtype == DMA_DEV_TO_MEM)
-		UNTIL(thrd, PL330_STATE_WFP);
-
 	return true;
 }
 
@@ -2769,6 +2766,7 @@ static struct dma_async_tx_descriptor *pl330_prep_dma_cyclic(
 		return NULL;
 
 	pch->cyclic = true;
+	desc->txd.flags = flags;
 
 	return &desc->txd;
 }
@@ -2819,6 +2817,8 @@ pl330_prep_dma_memcpy(struct dma_chan *chan, dma_addr_t dst,
 		desc->rqcfg.brst_len = 1;
 
 	desc->bytes_requested = len;
+
+	desc->txd.flags = flags;
 
 	return &desc->txd;
 }
@@ -2903,6 +2903,7 @@ pl330_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
 	}
 
 	/* Return the last desc in the chain */
+	desc->txd.flags = flg;
 	return &desc->txd;
 }
 
@@ -2981,7 +2982,7 @@ static int __maybe_unused pl330_suspend(struct device *dev)
 	struct amba_device *pcdev = to_amba_device(dev);
 
 	pm_runtime_force_suspend(dev);
-	clk_unprepare(pcdev->pclk);
+	amba_pclk_unprepare(pcdev);
 
 	return 0;
 }
@@ -2991,7 +2992,7 @@ static int __maybe_unused pl330_resume(struct device *dev)
 	struct amba_device *pcdev = to_amba_device(dev);
 	int ret;
 
-	ret = clk_prepare(pcdev->pclk);
+	ret = amba_pclk_prepare(pcdev);
 	if (ret)
 		return ret;
 

@@ -9,9 +9,11 @@
 #undef pr_fmt
 #define pr_fmt(fmt) KBUILD_MODNAME " L" __stringify(__LINE__) ": " fmt
 
+#include <uapi/linux/limits.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/stat.h>
+#include <linux/genhd.h>
 #include <linux/list.h>
 #include <linux/moduleparam.h>
 #include <linux/device.h>
@@ -19,9 +21,7 @@
 #include "rnbd-srv.h"
 
 static struct device *rnbd_dev;
-static const struct class rnbd_dev_class = {
-	.name = "rnbd-server",
-};
+static struct class *rnbd_dev_class;
 static struct kobject *rnbd_devs_kobj;
 
 static void rnbd_srv_dev_release(struct kobject *kobj)
@@ -39,13 +39,14 @@ static struct kobj_type dev_ktype = {
 };
 
 int rnbd_srv_create_dev_sysfs(struct rnbd_srv_dev *dev,
-			       struct block_device *bdev)
+			       struct block_device *bdev,
+			       const char *dev_name)
 {
 	struct kobject *bdev_kobj;
 	int ret;
 
 	ret = kobject_init_and_add(&dev->dev_kobj, &dev_ktype,
-				   rnbd_devs_kobj, "%pg", bdev);
+				   rnbd_devs_kobj, dev_name);
 	if (ret) {
 		kobject_put(&dev->dev_kobj);
 		return ret;
@@ -89,7 +90,8 @@ static ssize_t read_only_show(struct kobject *kobj, struct kobj_attribute *attr,
 
 	sess_dev = container_of(kobj, struct rnbd_srv_sess_dev, kobj);
 
-	return sysfs_emit(page, "%d\n", sess_dev->readonly);
+	return sysfs_emit(page, "%d\n",
+			  !(sess_dev->open_flags & FMODE_WRITE));
 }
 
 static struct kobj_attribute rnbd_srv_dev_session_ro_attr =
@@ -104,7 +106,7 @@ static ssize_t access_mode_show(struct kobject *kobj,
 	sess_dev = container_of(kobj, struct rnbd_srv_sess_dev, kobj);
 
 	return sysfs_emit(page, "%s\n",
-			  rnbd_access_modes[sess_dev->access_mode].str);
+			  rnbd_access_mode_str(sess_dev->access_mode));
 }
 
 static struct kobj_attribute rnbd_srv_dev_session_access_mode_attr =
@@ -215,12 +217,12 @@ int rnbd_srv_create_sysfs_files(void)
 {
 	int err;
 
-	err = class_register(&rnbd_dev_class);
-	if (err)
-		return err;
+	rnbd_dev_class = class_create(THIS_MODULE, "rnbd-server");
+	if (IS_ERR(rnbd_dev_class))
+		return PTR_ERR(rnbd_dev_class);
 
-	rnbd_dev = device_create(&rnbd_dev_class, NULL,
-				 MKDEV(0, 0), NULL, "ctl");
+	rnbd_dev = device_create(rnbd_dev_class, NULL,
+				  MKDEV(0, 0), NULL, "ctl");
 	if (IS_ERR(rnbd_dev)) {
 		err = PTR_ERR(rnbd_dev);
 		goto cls_destroy;
@@ -234,9 +236,9 @@ int rnbd_srv_create_sysfs_files(void)
 	return 0;
 
 dev_destroy:
-	device_destroy(&rnbd_dev_class, MKDEV(0, 0));
+	device_destroy(rnbd_dev_class, MKDEV(0, 0));
 cls_destroy:
-	class_unregister(&rnbd_dev_class);
+	class_destroy(rnbd_dev_class);
 
 	return err;
 }
@@ -245,6 +247,6 @@ void rnbd_srv_destroy_sysfs_files(void)
 {
 	kobject_del(rnbd_devs_kobj);
 	kobject_put(rnbd_devs_kobj);
-	device_destroy(&rnbd_dev_class, MKDEV(0, 0));
-	class_unregister(&rnbd_dev_class);
+	device_destroy(rnbd_dev_class, MKDEV(0, 0));
+	class_destroy(rnbd_dev_class);
 }

@@ -27,16 +27,15 @@
 #include <nvif/ioctl.h>
 #include <nvif/class.h>
 #include <nvif/cl0002.h>
+#include <nvif/cla06f.h>
 #include <nvif/unpack.h>
 
 #include "nouveau_drv.h"
 #include "nouveau_dma.h"
-#include "nouveau_exec.h"
 #include "nouveau_gem.h"
 #include "nouveau_chan.h"
 #include "nouveau_abi16.h"
 #include "nouveau_vmm.h"
-#include "nouveau_sched.h"
 
 static struct nouveau_abi16 *
 nouveau_abi16(struct drm_file *file_priv)
@@ -127,13 +126,10 @@ nouveau_abi16_chan_fini(struct nouveau_abi16 *abi16,
 {
 	struct nouveau_abi16_ntfy *ntfy, *temp;
 
-	/* Cancel all jobs from the entity's queue. */
-	drm_sched_entity_fini(&chan->sched.entity);
-
-	if (chan->chan)
+	/* wait for all activity to stop before releasing notify object, which
+	 * may be still in use */
+	if (chan->chan && chan->ntfy)
 		nouveau_channel_idle(chan->chan);
-
-	nouveau_sched_fini(&chan->sched);
 
 	/* cleanup notifier state */
 	list_for_each_entry_safe(ntfy, temp, &chan->notifiers, head) {
@@ -151,7 +147,7 @@ nouveau_abi16_chan_fini(struct nouveau_abi16 *abi16,
 
 	/* destroy channel object, all children will be killed too */
 	if (chan->chan) {
-		nvif_object_dtor(&chan->ce);
+		nouveau_channel_idle(chan->chan);
 		nouveau_channel_del(&chan->chan);
 	}
 
@@ -175,20 +171,6 @@ nouveau_abi16_fini(struct nouveau_abi16 *abi16)
 
 	kfree(cli->abi16);
 	cli->abi16 = NULL;
-}
-
-static inline int
-getparam_dma_ib_max(struct nvif_device *device)
-{
-	const struct nvif_mclass dmas[] = {
-		{ NV03_CHANNEL_DMA, 0 },
-		{ NV10_CHANNEL_DMA, 0 },
-		{ NV17_CHANNEL_DMA, 0 },
-		{ NV40_CHANNEL_DMA, 0 },
-		{}
-	};
-
-	return nvif_mclass(&device->object, dmas) < 0 ? NV50_DMA_IB_MAX : 0;
 }
 
 int
@@ -255,12 +237,6 @@ nouveau_abi16_ioctl_getparam(ABI16_IOCTL_ARGS)
 	case NOUVEAU_GETPARAM_GRAPH_UNITS:
 		getparam->value = nvkm_gr_units(gr);
 		break;
-	case NOUVEAU_GETPARAM_EXEC_PUSH_MAX: {
-		int ib_max = getparam_dma_ib_max(device);
-
-		getparam->value = nouveau_exec_push_max_from_ib_max(ib_max);
-		break;
-	}
 	default:
 		NV_PRINTK(dbg, cli, "unknown parameter %lld\n", getparam->param);
 		return -EINVAL;
@@ -278,7 +254,7 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 	struct nouveau_abi16 *abi16 = nouveau_abi16_get(file_priv);
 	struct nouveau_abi16_chan *chan;
 	struct nvif_device *device;
-	u64 engine, runm;
+	u64 engine;
 	int ret;
 
 	if (unlikely(!abi16))
@@ -287,15 +263,7 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 	if (!drm->channel)
 		return nouveau_abi16_put(abi16, -ENODEV);
 
-	/* If uvmm wasn't initialized until now disable it completely to prevent
-	 * userspace from mixing up UAPIs.
-	 *
-	 * The client lock is already acquired by nouveau_abi16_get().
-	 */
-	__nouveau_cli_disable_uvmm_noinit(cli);
-
 	device = &abi16->device;
-	engine = NV_DEVICE_HOST_RUNLIST_ENGINES_GR;
 
 	/* hack to allow channel engine type specification on kepler */
 	if (device->info.family >= NV_DEVICE_INFO_V0_KEPLER) {
@@ -309,18 +277,19 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 			default:
 				return nouveau_abi16_put(abi16, -ENOSYS);
 			}
-
-			init->fb_ctxdma_handle = 0;
-			init->tt_ctxdma_handle = 0;
+		} else {
+			engine = NV_DEVICE_HOST_RUNLIST_ENGINES_GR;
 		}
+
+		if (engine != NV_DEVICE_HOST_RUNLIST_ENGINES_CE)
+			engine = nvif_fifo_runlist(device, engine);
+		else
+			engine = nvif_fifo_runlist_ce(device);
+		init->fb_ctxdma_handle = engine;
+		init->tt_ctxdma_handle = 0;
 	}
 
-	if (engine != NV_DEVICE_HOST_RUNLIST_ENGINES_CE)
-		runm = nvif_fifo_runlist(device, engine);
-	else
-		runm = nvif_fifo_runlist_ce(device);
-
-	if (!runm || init->fb_ctxdma_handle == ~0 || init->tt_ctxdma_handle == ~0)
+	if (init->fb_ctxdma_handle == ~0 || init->tt_ctxdma_handle == ~0)
 		return nouveau_abi16_put(abi16, -EINVAL);
 
 	/* allocate "abi16 channel" data and make up a handle for it */
@@ -332,13 +301,8 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 	list_add(&chan->head, &abi16->channels);
 
 	/* create channel object and initialise dma and fence management */
-	ret = nouveau_channel_new(drm, device, false, runm, init->fb_ctxdma_handle,
-				  init->tt_ctxdma_handle, &chan->chan);
-	if (ret)
-		goto done;
-
-	ret = nouveau_sched_init(&chan->sched, drm, drm->sched_wq,
-				 chan->chan->dma.ib_max);
+	ret = nouveau_channel_new(drm, device, init->fb_ctxdma_handle,
+				  init->tt_ctxdma_handle, false, &chan->chan);
 	if (ret)
 		goto done;
 
@@ -359,31 +323,6 @@ nouveau_abi16_ioctl_channel_alloc(ABI16_IOCTL_ARGS)
 		init->subchan[1].handle = chan->chan->nvsw.handle;
 		init->subchan[1].grclass = 0x506e;
 		init->nr_subchan = 2;
-	}
-
-	/* Workaround "nvc0" gallium driver using classes it doesn't allocate on
-	 * Kepler and above.  NVKM no longer always sets CE_CTX_VALID as part of
-	 * channel init, now we know what that stuff actually is.
-	 *
-	 * Doesn't matter for Kepler/Pascal, CE context stored in NV_RAMIN.
-	 *
-	 * Userspace was fixed prior to adding Ampere support.
-	 */
-	switch (device->info.family) {
-	case NV_DEVICE_INFO_V0_VOLTA:
-		ret = nvif_object_ctor(&chan->chan->user, "abi16CeWar", 0, VOLTA_DMA_COPY_A,
-				       NULL, 0, &chan->ce);
-		if (ret)
-			goto done;
-		break;
-	case NV_DEVICE_INFO_V0_TURING:
-		ret = nvif_object_ctor(&chan->chan->user, "abi16CeWar", 0, TURING_DMA_COPY_A,
-				       NULL, 0, &chan->ce);
-		if (ret)
-			goto done;
-		break;
-	default:
-		break;
 	}
 
 	/* Named memory object area */

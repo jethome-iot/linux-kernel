@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * NILFS segment constructor.
+ * segment.c - NILFS segment constructor.
  *
  * Copyright (C) 2005-2008 Nippon Telegraph and Telephone Corporation.
  *
@@ -699,7 +699,7 @@ static size_t nilfs_lookup_dirty_data_buffers(struct inode *inode,
 					      loff_t start, loff_t end)
 {
 	struct address_space *mapping = inode->i_mapping;
-	struct folio_batch fbatch;
+	struct pagevec pvec;
 	pgoff_t index = 0, last = ULONG_MAX;
 	size_t ndirties = 0;
 	int i;
@@ -713,30 +713,28 @@ static size_t nilfs_lookup_dirty_data_buffers(struct inode *inode,
 		index = start >> PAGE_SHIFT;
 		last = end >> PAGE_SHIFT;
 	}
-	folio_batch_init(&fbatch);
+	pagevec_init(&pvec);
  repeat:
 	if (unlikely(index > last) ||
-	      !filemap_get_folios_tag(mapping, &index, last,
-		      PAGECACHE_TAG_DIRTY, &fbatch))
+	    !pagevec_lookup_range_tag(&pvec, mapping, &index, last,
+				PAGECACHE_TAG_DIRTY))
 		return ndirties;
 
-	for (i = 0; i < folio_batch_count(&fbatch); i++) {
+	for (i = 0; i < pagevec_count(&pvec); i++) {
 		struct buffer_head *bh, *head;
-		struct folio *folio = fbatch.folios[i];
+		struct page *page = pvec.pages[i];
 
-		folio_lock(folio);
-		if (unlikely(folio->mapping != mapping)) {
-			/* Exclude folios removed from the address space */
-			folio_unlock(folio);
+		lock_page(page);
+		if (unlikely(page->mapping != mapping)) {
+			/* Exclude pages removed from the address space */
+			unlock_page(page);
 			continue;
 		}
-		head = folio_buffers(folio);
-		if (!head)
-			head = create_empty_buffers(folio,
-					i_blocksize(inode), 0);
-		folio_unlock(folio);
+		if (!page_has_buffers(page))
+			create_empty_buffers(page, i_blocksize(inode), 0);
+		unlock_page(page);
 
-		bh = head;
+		bh = head = page_buffers(page);
 		do {
 			if (!buffer_dirty(bh) || buffer_async_write(bh))
 				continue;
@@ -744,13 +742,13 @@ static size_t nilfs_lookup_dirty_data_buffers(struct inode *inode,
 			list_add_tail(&bh->b_assoc_buffers, listp);
 			ndirties++;
 			if (unlikely(ndirties >= nlimit)) {
-				folio_batch_release(&fbatch);
+				pagevec_release(&pvec);
 				cond_resched();
 				return ndirties;
 			}
 		} while (bh = bh->b_this_page, bh != head);
 	}
-	folio_batch_release(&fbatch);
+	pagevec_release(&pvec);
 	cond_resched();
 	goto repeat;
 }
@@ -760,19 +758,20 @@ static void nilfs_lookup_dirty_node_buffers(struct inode *inode,
 {
 	struct nilfs_inode_info *ii = NILFS_I(inode);
 	struct inode *btnc_inode = ii->i_assoc_inode;
-	struct folio_batch fbatch;
+	struct pagevec pvec;
 	struct buffer_head *bh, *head;
 	unsigned int i;
 	pgoff_t index = 0;
 
 	if (!btnc_inode)
 		return;
-	folio_batch_init(&fbatch);
 
-	while (filemap_get_folios_tag(btnc_inode->i_mapping, &index,
-				(pgoff_t)-1, PAGECACHE_TAG_DIRTY, &fbatch)) {
-		for (i = 0; i < folio_batch_count(&fbatch); i++) {
-			bh = head = folio_buffers(fbatch.folios[i]);
+	pagevec_init(&pvec);
+
+	while (pagevec_lookup_tag(&pvec, btnc_inode->i_mapping, &index,
+					PAGECACHE_TAG_DIRTY)) {
+		for (i = 0; i < pagevec_count(&pvec); i++) {
+			bh = head = page_buffers(pvec.pages[i]);
 			do {
 				if (buffer_dirty(bh) &&
 						!buffer_async_write(bh)) {
@@ -783,7 +782,7 @@ static void nilfs_lookup_dirty_node_buffers(struct inode *inode,
 				bh = bh->b_this_page;
 			} while (bh != head);
 		}
-		folio_batch_release(&fbatch);
+		pagevec_release(&pvec);
 		cond_resched();
 	}
 }
@@ -1612,7 +1611,7 @@ nilfs_segctor_update_payload_blocknr(struct nilfs_sc_info *sci,
 			nblocks = le32_to_cpu(finfo->fi_nblocks);
 			ndatablk = le32_to_cpu(finfo->fi_ndatablk);
 
-			inode = bh->b_folio->mapping->host;
+			inode = bh->b_page->mapping->host;
 
 			if (mode == SC_LSEG_DSYNC)
 				sc_op = &nilfs_sc_dsync_ops;
@@ -1665,68 +1664,68 @@ static int nilfs_segctor_assign(struct nilfs_sc_info *sci, int mode)
 	return 0;
 }
 
-static void nilfs_begin_folio_io(struct folio *folio)
+static void nilfs_begin_page_io(struct page *page)
 {
-	if (!folio || folio_test_writeback(folio))
+	if (!page || PageWriteback(page))
 		/*
 		 * For split b-tree node pages, this function may be called
 		 * twice.  We ignore the 2nd or later calls by this check.
 		 */
 		return;
 
-	folio_lock(folio);
-	folio_clear_dirty_for_io(folio);
-	folio_start_writeback(folio);
-	folio_unlock(folio);
+	lock_page(page);
+	clear_page_dirty_for_io(page);
+	set_page_writeback(page);
+	unlock_page(page);
 }
 
 static void nilfs_segctor_prepare_write(struct nilfs_sc_info *sci)
 {
 	struct nilfs_segment_buffer *segbuf;
-	struct folio *bd_folio = NULL, *fs_folio = NULL;
+	struct page *bd_page = NULL, *fs_page = NULL;
 
 	list_for_each_entry(segbuf, &sci->sc_segbufs, sb_list) {
 		struct buffer_head *bh;
 
 		list_for_each_entry(bh, &segbuf->sb_segsum_buffers,
 				    b_assoc_buffers) {
-			if (bh->b_folio != bd_folio) {
-				if (bd_folio) {
-					folio_lock(bd_folio);
-					folio_clear_dirty_for_io(bd_folio);
-					folio_start_writeback(bd_folio);
-					folio_unlock(bd_folio);
+			if (bh->b_page != bd_page) {
+				if (bd_page) {
+					lock_page(bd_page);
+					clear_page_dirty_for_io(bd_page);
+					set_page_writeback(bd_page);
+					unlock_page(bd_page);
 				}
-				bd_folio = bh->b_folio;
+				bd_page = bh->b_page;
 			}
 		}
 
 		list_for_each_entry(bh, &segbuf->sb_payload_buffers,
 				    b_assoc_buffers) {
-			set_buffer_async_write(bh);
 			if (bh == segbuf->sb_super_root) {
-				if (bh->b_folio != bd_folio) {
-					folio_lock(bd_folio);
-					folio_clear_dirty_for_io(bd_folio);
-					folio_start_writeback(bd_folio);
-					folio_unlock(bd_folio);
-					bd_folio = bh->b_folio;
+				if (bh->b_page != bd_page) {
+					lock_page(bd_page);
+					clear_page_dirty_for_io(bd_page);
+					set_page_writeback(bd_page);
+					unlock_page(bd_page);
+					bd_page = bh->b_page;
 				}
 				break;
 			}
-			if (bh->b_folio != fs_folio) {
-				nilfs_begin_folio_io(fs_folio);
-				fs_folio = bh->b_folio;
+			set_buffer_async_write(bh);
+			if (bh->b_page != fs_page) {
+				nilfs_begin_page_io(fs_page);
+				fs_page = bh->b_page;
 			}
 		}
 	}
-	if (bd_folio) {
-		folio_lock(bd_folio);
-		folio_clear_dirty_for_io(bd_folio);
-		folio_start_writeback(bd_folio);
-		folio_unlock(bd_folio);
+	if (bd_page) {
+		lock_page(bd_page);
+		clear_page_dirty_for_io(bd_page);
+		set_page_writeback(bd_page);
+		unlock_page(bd_page);
 	}
-	nilfs_begin_folio_io(fs_folio);
+	nilfs_begin_page_io(fs_page);
 }
 
 static int nilfs_segctor_write(struct nilfs_sc_info *sci,
@@ -1739,18 +1738,17 @@ static int nilfs_segctor_write(struct nilfs_sc_info *sci,
 	return ret;
 }
 
-static void nilfs_end_folio_io(struct folio *folio, int err)
+static void nilfs_end_page_io(struct page *page, int err)
 {
-	if (!folio)
+	if (!page)
 		return;
 
-	if (buffer_nilfs_node(folio_buffers(folio)) &&
-			!folio_test_writeback(folio)) {
+	if (buffer_nilfs_node(page_buffers(page)) && !PageWriteback(page)) {
 		/*
 		 * For b-tree node pages, this function may be called twice
 		 * or more because they might be split in a segment.
 		 */
-		if (folio_test_dirty(folio)) {
+		if (PageDirty(page)) {
 			/*
 			 * For pages holding split b-tree node buffers, dirty
 			 * flag on the buffers may be cleared discretely.
@@ -1758,30 +1756,30 @@ static void nilfs_end_folio_io(struct folio *folio, int err)
 			 * remaining buffers, and it must be cancelled if
 			 * all the buffers get cleaned later.
 			 */
-			folio_lock(folio);
-			if (nilfs_folio_buffers_clean(folio))
-				__nilfs_clear_folio_dirty(folio);
-			folio_unlock(folio);
+			lock_page(page);
+			if (nilfs_page_buffers_clean(page))
+				__nilfs_clear_page_dirty(page);
+			unlock_page(page);
 		}
 		return;
 	}
 
 	if (!err) {
-		if (!nilfs_folio_buffers_clean(folio))
-			filemap_dirty_folio(folio->mapping, folio);
-		folio_clear_error(folio);
+		if (!nilfs_page_buffers_clean(page))
+			__set_page_dirty_nobuffers(page);
+		ClearPageError(page);
 	} else {
-		filemap_dirty_folio(folio->mapping, folio);
-		folio_set_error(folio);
+		__set_page_dirty_nobuffers(page);
+		SetPageError(page);
 	}
 
-	folio_end_writeback(folio);
+	end_page_writeback(page);
 }
 
 static void nilfs_abort_logs(struct list_head *logs, int err)
 {
 	struct nilfs_segment_buffer *segbuf;
-	struct folio *bd_folio = NULL, *fs_folio = NULL;
+	struct page *bd_page = NULL, *fs_page = NULL;
 	struct buffer_head *bh;
 
 	if (list_empty(logs))
@@ -1791,34 +1789,34 @@ static void nilfs_abort_logs(struct list_head *logs, int err)
 		list_for_each_entry(bh, &segbuf->sb_segsum_buffers,
 				    b_assoc_buffers) {
 			clear_buffer_uptodate(bh);
-			if (bh->b_folio != bd_folio) {
-				if (bd_folio)
-					folio_end_writeback(bd_folio);
-				bd_folio = bh->b_folio;
+			if (bh->b_page != bd_page) {
+				if (bd_page)
+					end_page_writeback(bd_page);
+				bd_page = bh->b_page;
 			}
 		}
 
 		list_for_each_entry(bh, &segbuf->sb_payload_buffers,
 				    b_assoc_buffers) {
-			clear_buffer_async_write(bh);
 			if (bh == segbuf->sb_super_root) {
 				clear_buffer_uptodate(bh);
-				if (bh->b_folio != bd_folio) {
-					folio_end_writeback(bd_folio);
-					bd_folio = bh->b_folio;
+				if (bh->b_page != bd_page) {
+					end_page_writeback(bd_page);
+					bd_page = bh->b_page;
 				}
 				break;
 			}
-			if (bh->b_folio != fs_folio) {
-				nilfs_end_folio_io(fs_folio, err);
-				fs_folio = bh->b_folio;
+			clear_buffer_async_write(bh);
+			if (bh->b_page != fs_page) {
+				nilfs_end_page_io(fs_page, err);
+				fs_page = bh->b_page;
 			}
 		}
 	}
-	if (bd_folio)
-		folio_end_writeback(bd_folio);
+	if (bd_page)
+		end_page_writeback(bd_page);
 
-	nilfs_end_folio_io(fs_folio, err);
+	nilfs_end_page_io(fs_page, err);
 }
 
 static void nilfs_segctor_abort_construction(struct nilfs_sc_info *sci,
@@ -1860,7 +1858,7 @@ static void nilfs_set_next_segment(struct the_nilfs *nilfs,
 static void nilfs_segctor_complete_write(struct nilfs_sc_info *sci)
 {
 	struct nilfs_segment_buffer *segbuf;
-	struct folio *bd_folio = NULL, *fs_folio = NULL;
+	struct page *bd_page = NULL, *fs_page = NULL;
 	struct the_nilfs *nilfs = sci->sc_super->s_fs_info;
 	int update_sr = false;
 
@@ -1871,21 +1869,21 @@ static void nilfs_segctor_complete_write(struct nilfs_sc_info *sci)
 				    b_assoc_buffers) {
 			set_buffer_uptodate(bh);
 			clear_buffer_dirty(bh);
-			if (bh->b_folio != bd_folio) {
-				if (bd_folio)
-					folio_end_writeback(bd_folio);
-				bd_folio = bh->b_folio;
+			if (bh->b_page != bd_page) {
+				if (bd_page)
+					end_page_writeback(bd_page);
+				bd_page = bh->b_page;
 			}
 		}
 		/*
-		 * We assume that the buffers which belong to the same folio
+		 * We assume that the buffers which belong to the same page
 		 * continue over the buffer list.
-		 * Under this assumption, the last BHs of folios is
-		 * identifiable by the discontinuity of bh->b_folio
-		 * (folio != fs_folio).
+		 * Under this assumption, the last BHs of pages is
+		 * identifiable by the discontinuity of bh->b_page
+		 * (page != fs_page).
 		 *
 		 * For B-tree node blocks, however, this assumption is not
-		 * guaranteed.  The cleanup code of B-tree node folios needs
+		 * guaranteed.  The cleanup code of B-tree node pages needs
 		 * special care.
 		 */
 		list_for_each_entry(bh, &segbuf->sb_payload_buffers,
@@ -1896,18 +1894,20 @@ static void nilfs_segctor_complete_write(struct nilfs_sc_info *sci)
 				 BIT(BH_Delay) | BIT(BH_NILFS_Volatile) |
 				 BIT(BH_NILFS_Redirected));
 
-			set_mask_bits(&bh->b_state, clear_bits, set_bits);
 			if (bh == segbuf->sb_super_root) {
-				if (bh->b_folio != bd_folio) {
-					folio_end_writeback(bd_folio);
-					bd_folio = bh->b_folio;
+				set_buffer_uptodate(bh);
+				clear_buffer_dirty(bh);
+				if (bh->b_page != bd_page) {
+					end_page_writeback(bd_page);
+					bd_page = bh->b_page;
 				}
 				update_sr = true;
 				break;
 			}
-			if (bh->b_folio != fs_folio) {
-				nilfs_end_folio_io(fs_folio, 0);
-				fs_folio = bh->b_folio;
+			set_mask_bits(&bh->b_state, clear_bits, set_bits);
+			if (bh->b_page != fs_page) {
+				nilfs_end_page_io(fs_page, 0);
+				fs_page = bh->b_page;
 			}
 		}
 
@@ -1921,13 +1921,13 @@ static void nilfs_segctor_complete_write(struct nilfs_sc_info *sci)
 		}
 	}
 	/*
-	 * Since folios may continue over multiple segment buffers,
-	 * end of the last folio must be checked outside of the loop.
+	 * Since pages may continue over multiple segment buffers,
+	 * end of the last page must be checked outside of the loop.
 	 */
-	if (bd_folio)
-		folio_end_writeback(bd_folio);
+	if (bd_page)
+		end_page_writeback(bd_page);
 
-	nilfs_end_folio_io(fs_folio, 0);
+	nilfs_end_page_io(fs_page, 0);
 
 	nilfs_drop_collected_inodes(&sci->sc_dirty_files);
 
@@ -2278,6 +2278,7 @@ int nilfs_construct_segment(struct super_block *sb)
 	struct the_nilfs *nilfs = sb->s_fs_info;
 	struct nilfs_sc_info *sci = nilfs->ns_writer;
 	struct nilfs_transaction_info *ti;
+	int err;
 
 	if (sb_rdonly(sb) || unlikely(!sci))
 		return -EROFS;
@@ -2285,7 +2286,8 @@ int nilfs_construct_segment(struct super_block *sb)
 	/* A call inside transactions causes a deadlock. */
 	BUG_ON((ti = current->journal_info) && ti->ti_magic == NILFS_TI_MAGIC);
 
-	return nilfs_segctor_sync(sci);
+	err = nilfs_segctor_sync(sci);
+	return err;
 }
 
 /**
@@ -2588,7 +2590,6 @@ static int nilfs_segctor_thread(void *arg)
 		   "segctord starting. Construction interval = %lu seconds, CP frequency < %lu seconds",
 		   sci->sc_interval / HZ, sci->sc_mjcp_freq / HZ);
 
-	set_freezable();
 	spin_lock(&sci->sc_state_lock);
  loop:
 	for (;;) {
@@ -2789,7 +2790,7 @@ static void nilfs_segctor_destroy(struct nilfs_sc_info *sci)
 
 	down_write(&nilfs->ns_segctor_sem);
 
-	timer_shutdown_sync(&sci->sc_timer);
+	del_timer_sync(&sci->sc_timer);
 	kfree(sci);
 }
 

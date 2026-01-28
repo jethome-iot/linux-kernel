@@ -16,7 +16,6 @@
 #include <crypto/sha1.h>
 #include <crypto/sha2.h>
 
-#define SA_ENGINE_STATUS		0x0008
 #define SA_ENGINE_ENABLE_CONTROL	0x1000
 
 struct sa_tfm_ctx;
@@ -170,7 +169,7 @@ struct sa_tfm_ctx;
  * the following range, so avoid using it.
  */
 #define SA_UNSAFE_DATA_SZ_MIN	240
-#define SA_UNSAFE_DATA_SZ_MAX	255
+#define SA_UNSAFE_DATA_SZ_MAX	256
 
 struct sa_match_data;
 

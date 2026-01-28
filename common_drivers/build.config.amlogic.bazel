@@ -1,0 +1,99 @@
+COMMON_DRIVERS=${KERNEL_DIR}
+KERNEL_DIR=common
+. ${ROOT_DIR}/${KERNEL_DIR}/build.config.common
+. ${ROOT_DIR}/${KERNEL_DIR}/build.config.aarch64
+# . ${ROOT_DIR}/${KERNEL_DIR}/build.config.gki.aarch64
+. ${COMMON_DRIVERS}/project/build.config.project
+. ${COMMON_DRIVERS}/project/build.config.gki10
+
+KCONFIG_EXT_MODULES_PREFIX=$(realpath ${ROOT_DIR} --relative-to ${KERNEL_DIR})/
+
+BUILD_INITRAMFS=1
+LZ4_RAMDISK=1
+DEFCONFIG=amlogic_gki10_defconfig
+
+GKI_CHECK_CONFIG_WHITE_LIST="
+	CONFIG_STMMAC_ETH
+"
+
+function pre_defconfig_cmds() {
+	KCONFIG_DEFCONFIG=${ROOT_DIR}/${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG}
+	local temp_file=`mktemp /tmp/config.XXXXXXXXXXXX`
+
+	if [[ -z ${ANDROID_PROJECT} ]]; then
+		echo "CONFIG_AMLOGIC_SERIAL_MESON=y" > ${temp_file}
+		echo "CONFIG_AMLOGIC_SERIAL_MESON_CONSOLE=y" >> ${temp_file}
+		echo "CONFIG_AMLOGIC_SERIAL_EARLY_CONSOLE=y" >> ${temp_file}
+		echo "CONFIG_DEVTMPFS=y" >> ${temp_file}
+	fi
+
+	if [[ ${GKI_CONFIG} == gki_20 ]]; then
+		KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r ${ROOT_DIR}/${KERNEL_DIR}/arch/arm64/configs/gki_defconfig ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_gki.fragment ${temp_file}
+	else
+		KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r ${ROOT_DIR}/${KERNEL_DIR}/arch/arm64/configs/gki_defconfig ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_gki.fragment ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_gki.10 ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_gki.debug ${temp_file}
+	fi
+
+	if [[ ${UPGRADE_PROJECT} == r || ${UPGRADE_PROJECT} == R || ${UPGRADE_PROJECT} == s || ${UPGRADE_PROJECT} == S || ${UPGRADE_PROJECT} == u || ${UPGRADE_PROJECT} == U ]]; then
+		KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r ${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_upgrade.defconfig
+	fi
+
+	if [[ ${UPGRADE_PROJECT} == p || ${UPGRADE_PROJECT} == P ]]; then
+		KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r ${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_upgrade_p.defconfig
+	fi
+
+	if [[ ${UPGRADE_PROJECT} == r || ${UPGRADE_PROJECT} == R ]] && [[ "${CONFIG_BOOTIMAGE}" == "user" ]]; then
+		KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r ${KCONFIG_DEFCONFIG} ${AMLOGIC_R_USER_DIFFCONFIG}
+	fi
+
+	if [[ -n ${DEV_CONFIGS} ]]; then
+		local config_list=$(echo ${DEV_CONFIGS}|sed 's/+/ /g')
+		for config_name in ${config_list[@]}
+		do
+			if [[ -f ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/${config_name} ]]; then
+				config_file=${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/${config_name}
+				KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r ${KCONFIG_DEFCONFIG} ${config_file}
+			else
+				echo "ERROR: config file ${config_name} is not in the right path!!"
+				exit
+			fi
+		done
+	fi
+
+	if [[ -n ${KASAN} ]]; then
+		cat ${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_kasan.defconfig > ${temp_file}
+		KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r \
+				 ${KCONFIG_DEFCONFIG} \
+				${temp_file}
+	fi
+
+	if [[ -n ${CHECK_GKI_20} ]]; then
+		echo > ${temp_file}
+		for configs in ${GKI_CHECK_CONFIG_WHITE_LIST}; do
+			echo "${configs}=n" >> ${temp_file}
+		done
+		KCONFIG_CONFIG=${KCONFIG_DEFCONFIG} ${ROOT_DIR}/${KERNEL_DIR}/scripts/kconfig/merge_config.sh -m -r \
+				${ROOT_DIR}/${KERNEL_DIR}/arch/arm64/configs/gki_defconfig \
+				${ROOT_DIR}/${KERNEL_DIR}/${COMMON_DRIVERS_DIR}/arch/arm64/configs/amlogic_gki.fragment \
+				${temp_file}
+	fi
+
+	rm ${temp_file}
+}
+export -f pre_defconfig_cmds
+PRE_DEFCONFIG_CMDS=pre_defconfig_cmds
+
+function post_defconfig_cmds() {
+	rm -f ${ROOT_DIR}/${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG}
+}
+export -f post_defconfig_cmds
+POST_DEFCONFIG_CMDS=post_defconfig_cmds
+
+MAKE_GOALS="
+modules
+dtbs
+android_overlay_dt.dtbo
+adt4_overlay_dt.dtbo
+"
+
+KMI_SYMBOL_LIST=android/abi_gki_aarch64_amlogic
+GKI_MODULES_LIST=android/gki_aarch64_modules

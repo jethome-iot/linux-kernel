@@ -780,7 +780,7 @@ static void wmi_evt_ready(struct wil6210_vif *vif, int id, void *d, int len)
 		return; /* FW load will fail after timeout */
 	}
 	/* ignore MAC address, we already have it from the boot loader */
-	strscpy(wiphy->fw_version, wil->fw_version, sizeof(wiphy->fw_version));
+	strlcpy(wiphy->fw_version, wil->fw_version, sizeof(wiphy->fw_version));
 
 	if (len > offsetof(struct wmi_ready_event, rfc_read_calib_result)) {
 		wil_dbg_wmi(wil, "rfc calibration result %d\n",
@@ -870,6 +870,7 @@ static void wmi_evt_rx_mgmt(struct wil6210_vif *vif, int id, void *d, int len)
 		struct cfg80211_bss *bss;
 		struct cfg80211_inform_bss bss_data = {
 			.chan = channel,
+			.scan_width = NL80211_BSS_CHAN_WIDTH_20,
 			.signal = signal,
 			.boottime_ns = ktime_to_ns(ktime_get_boottime()),
 		};
@@ -1198,7 +1199,7 @@ static void wmi_evt_eapol_rx(struct wil6210_vif *vif, int id, void *d, int len)
 	eth->h_proto = cpu_to_be16(ETH_P_PAE);
 	skb_put_data(skb, evt->eapol, eapol_len);
 	skb->protocol = eth_type_trans(skb, ndev);
-	if (likely(netif_rx(skb) == NET_RX_SUCCESS)) {
+	if (likely(netif_rx_ni(skb) == NET_RX_SUCCESS)) {
 		ndev->stats.rx_packets++;
 		ndev->stats.rx_bytes += sz;
 		if (stats) {
@@ -1388,6 +1389,7 @@ wmi_evt_sched_scan_result(struct wil6210_vif *vif, int id, void *d, int len)
 	u32 d_len;
 	struct cfg80211_bss *bss;
 	struct cfg80211_inform_bss bss_data = {
+		.scan_width = NL80211_BSS_CHAN_WIDTH_20,
 		.boottime_ns = ktime_to_ns(ktime_get_boottime()),
 	};
 
@@ -2095,7 +2097,7 @@ int wmi_echo(struct wil6210_priv *wil)
 			WIL_WMI_CALL_GENERAL_TO_MS);
 }
 
-int wmi_set_mac_address(struct wil6210_priv *wil, const void *addr)
+int wmi_set_mac_address(struct wil6210_priv *wil, void *addr)
 {
 	struct wil6210_vif *vif = ndev_to_vif(wil->main_ndev);
 	struct wmi_set_mac_address_cmd cmd;

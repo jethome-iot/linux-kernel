@@ -63,7 +63,7 @@ static int verbose = 1;
 module_param(verbose, int, 0644);
 MODULE_PARM_DESC(verbose,"be verbose (default: on)");
 
-static int debug;
+static int debug = 0;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug,"enable/disable debug messages, also prints more "
 		 "detailed sense codes on scsi errors (default: off)");
@@ -184,21 +184,20 @@ static int ch_find_errno(struct scsi_sense_hdr *sshdr)
 
 static int
 ch_do_scsi(scsi_changer *ch, unsigned char *cmd, int cmd_len,
-	   void *buffer, unsigned int buflength, enum req_op op)
+	   void *buffer, unsigned buflength,
+	   enum dma_data_direction direction)
 {
 	int errno, retries = 0, timeout, result;
 	struct scsi_sense_hdr sshdr;
-	const struct scsi_exec_args exec_args = {
-		.sshdr = &sshdr,
-	};
 
 	timeout = (cmd[0] == INITIALIZE_ELEMENT_STATUS)
 		? timeout_init : timeout_move;
 
  retry:
 	errno = 0;
-	result = scsi_execute_cmd(ch->device, cmd, op, buffer, buflength,
-				  timeout * HZ, MAX_RETRIES, &exec_args);
+	result = scsi_execute_req(ch->device, cmd, direction, buffer,
+				  buflength, &sshdr, timeout * HZ,
+				  MAX_RETRIES, NULL);
 	if (result < 0)
 		return result;
 	if (scsi_sense_valid(&sshdr)) {
@@ -240,7 +239,7 @@ ch_read_element_status(scsi_changer *ch, u_int elem, char *data)
 	u_char  *buffer;
 	int     result;
 
-	buffer = kmalloc(512, GFP_KERNEL);
+	buffer = kmalloc(512, GFP_KERNEL | GFP_DMA);
 	if(!buffer)
 		return -ENOMEM;
 
@@ -255,7 +254,7 @@ ch_read_element_status(scsi_changer *ch, u_int elem, char *data)
 	cmd[5] = 1;
 	cmd[9] = 255;
 	if (0 == (result = ch_do_scsi(ch, cmd, 12,
-				      buffer, 256, REQ_OP_DRV_IN))) {
+				      buffer, 256, DMA_FROM_DEVICE))) {
 		if (((buffer[16] << 8) | buffer[17]) != elem) {
 			DPRINTK("asked for element 0x%02x, got 0x%02x\n",
 				elem,(buffer[16] << 8) | buffer[17]);
@@ -285,7 +284,7 @@ ch_init_elem(scsi_changer *ch)
 	memset(cmd,0,sizeof(cmd));
 	cmd[0] = INITIALIZE_ELEMENT_STATUS;
 	cmd[1] = (ch->device->lun & 0x7) << 5;
-	err = ch_do_scsi(ch, cmd, 6, NULL, 0, REQ_OP_DRV_IN);
+	err = ch_do_scsi(ch, cmd, 6, NULL, 0, DMA_NONE);
 	VPRINTK(KERN_INFO, "... finished\n");
 	return err;
 }
@@ -298,7 +297,7 @@ ch_readconfig(scsi_changer *ch)
 	int     result,id,lun,i;
 	u_int   elem;
 
-	buffer = kzalloc(512, GFP_KERNEL);
+	buffer = kzalloc(512, GFP_KERNEL | GFP_DMA);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -307,10 +306,10 @@ ch_readconfig(scsi_changer *ch)
 	cmd[1] = (ch->device->lun & 0x7) << 5;
 	cmd[2] = 0x1d;
 	cmd[4] = 255;
-	result = ch_do_scsi(ch, cmd, 10, buffer, 255, REQ_OP_DRV_IN);
+	result = ch_do_scsi(ch, cmd, 10, buffer, 255, DMA_FROM_DEVICE);
 	if (0 != result) {
 		cmd[1] |= (1<<3);
-		result  = ch_do_scsi(ch, cmd, 10, buffer, 255, REQ_OP_DRV_IN);
+		result  = ch_do_scsi(ch, cmd, 10, buffer, 255, DMA_FROM_DEVICE);
 	}
 	if (0 == result) {
 		ch->firsts[CHET_MT] =
@@ -435,7 +434,7 @@ ch_position(scsi_changer *ch, u_int trans, u_int elem, int rotate)
 	cmd[4]  = (elem  >> 8) & 0xff;
 	cmd[5]  =  elem        & 0xff;
 	cmd[8]  = rotate ? 1 : 0;
-	return ch_do_scsi(ch, cmd, 10, NULL, 0, REQ_OP_DRV_IN);
+	return ch_do_scsi(ch, cmd, 10, NULL, 0, DMA_NONE);
 }
 
 static int
@@ -456,7 +455,7 @@ ch_move(scsi_changer *ch, u_int trans, u_int src, u_int dest, int rotate)
 	cmd[6]  = (dest  >> 8) & 0xff;
 	cmd[7]  =  dest        & 0xff;
 	cmd[10] = rotate ? 1 : 0;
-	return ch_do_scsi(ch, cmd, 12, NULL, 0, REQ_OP_DRV_IN);
+	return ch_do_scsi(ch, cmd, 12, NULL,0, DMA_NONE);
 }
 
 static int
@@ -482,7 +481,7 @@ ch_exchange(scsi_changer *ch, u_int trans, u_int src,
 	cmd[9]  =  dest2       & 0xff;
 	cmd[10] = (rotate1 ? 1 : 0) | (rotate2 ? 2 : 0);
 
-	return ch_do_scsi(ch, cmd, 12, NULL, 0, REQ_OP_DRV_IN);
+	return ch_do_scsi(ch, cmd, 12, NULL, 0, DMA_NONE);
 }
 
 static void
@@ -532,7 +531,7 @@ ch_set_voltag(scsi_changer *ch, u_int elem,
 	memcpy(buffer,tag,32);
 	ch_check_voltag(buffer);
 
-	result = ch_do_scsi(ch, cmd, 12, buffer, 256, REQ_OP_DRV_OUT);
+	result = ch_do_scsi(ch, cmd, 12, buffer, 256, DMA_TO_DEVICE);
 	kfree(buffer);
 	return result;
 }
@@ -659,23 +658,19 @@ static long ch_ioctl(struct file *file,
 		memset(&vparams,0,sizeof(vparams));
 		if (ch->counts[CHET_V1]) {
 			vparams.cvp_n1  = ch->counts[CHET_V1];
-			strscpy(vparams.cvp_label1, vendor_labels[0],
-				sizeof(vparams.cvp_label1));
+			strncpy(vparams.cvp_label1,vendor_labels[0],16);
 		}
 		if (ch->counts[CHET_V2]) {
 			vparams.cvp_n2  = ch->counts[CHET_V2];
-			strscpy(vparams.cvp_label2, vendor_labels[1],
-				sizeof(vparams.cvp_label2));
+			strncpy(vparams.cvp_label2,vendor_labels[1],16);
 		}
 		if (ch->counts[CHET_V3]) {
 			vparams.cvp_n3  = ch->counts[CHET_V3];
-			strscpy(vparams.cvp_label3, vendor_labels[2],
-				sizeof(vparams.cvp_label3));
+			strncpy(vparams.cvp_label3,vendor_labels[2],16);
 		}
 		if (ch->counts[CHET_V4]) {
 			vparams.cvp_n4  = ch->counts[CHET_V4];
-			strscpy(vparams.cvp_label4, vendor_labels[3],
-				sizeof(vparams.cvp_label4));
+			strncpy(vparams.cvp_label4,vendor_labels[3],16);
 		}
 		if (copy_to_user(argp, &vparams, sizeof(vparams)))
 			return -EFAULT;
@@ -788,7 +783,7 @@ static long ch_ioctl(struct file *file,
 			return -EINVAL;
 		elem = ch->firsts[cge.cge_type] + cge.cge_unit;
 
-		buffer = kmalloc(512, GFP_KERNEL);
+		buffer = kmalloc(512, GFP_KERNEL | GFP_DMA);
 		if (!buffer)
 			return -ENOMEM;
 		mutex_lock(&ch->lock);
@@ -804,7 +799,8 @@ static long ch_ioctl(struct file *file,
 		ch_cmd[5] = 1;
 		ch_cmd[9] = 255;
 
-		result = ch_do_scsi(ch, ch_cmd, 12, buffer, 256, REQ_OP_DRV_IN);
+		result = ch_do_scsi(ch, ch_cmd, 12,
+				    buffer, 256, DMA_FROM_DEVICE);
 		if (!result) {
 			cge.cge_status = buffer[18];
 			cge.cge_flags = 0;
@@ -881,8 +877,7 @@ static long ch_ioctl(struct file *file,
 	}
 
 	default:
-		return scsi_ioctl(ch->device, file->f_mode & FMODE_WRITE, cmd,
-				  argp);
+		return scsi_ioctl(ch->device, NULL, file->f_mode, cmd, argp);
 
 	}
 }
@@ -1000,7 +995,7 @@ static int __init init_ch_module(void)
 	int rc;
 
 	printk(KERN_INFO "SCSI Media Changer driver v" VERSION " \n");
-        ch_sysfs_class = class_create("scsi_changer");
+        ch_sysfs_class = class_create(THIS_MODULE, "scsi_changer");
         if (IS_ERR(ch_sysfs_class)) {
 		rc = PTR_ERR(ch_sysfs_class);
 		return rc;

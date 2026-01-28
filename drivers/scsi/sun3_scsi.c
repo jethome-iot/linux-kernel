@@ -334,7 +334,7 @@ static int sun3scsi_dma_residual(struct NCR5380_hostdata *hostdata)
 static int sun3scsi_dma_xfer_len(struct NCR5380_hostdata *hostdata,
                                  struct scsi_cmnd *cmd)
 {
-	int wanted_len = NCR5380_to_ncmd(cmd)->this_residual;
+	int wanted_len = cmd->SCp.this_residual;
 
 	if (wanted_len < DMA_MIN_SIZE || blk_rq_is_passthrough(scsi_cmd_to_rq(cmd)))
 		return 0;
@@ -505,7 +505,7 @@ static struct scsi_host_template sun3_scsi_template = {
 	.sg_tablesize		= 1,
 	.cmd_per_lun		= 2,
 	.dma_boundary		= PAGE_SIZE - 1,
-	.cmd_size		= sizeof(struct NCR5380_cmd),
+	.cmd_size		= NCR5380_CMD_SIZE,
 };
 
 static int __init sun3_scsi_probe(struct platform_device *pdev)
@@ -641,7 +641,7 @@ fail_alloc:
 	return error;
 }
 
-static void __exit sun3_scsi_remove(struct platform_device *pdev)
+static int __exit sun3_scsi_remove(struct platform_device *pdev)
 {
 	struct Scsi_Host *instance = platform_get_drvdata(pdev);
 	struct NCR5380_hostdata *hostdata = shost_priv(instance);
@@ -654,10 +654,11 @@ static void __exit sun3_scsi_remove(struct platform_device *pdev)
 	if (udc_regs)
 		dvma_free(udc_regs);
 	iounmap(ioaddr);
+	return 0;
 }
 
 static struct platform_driver sun3_scsi_driver = {
-	.remove_new = __exit_p(sun3_scsi_remove),
+	.remove = __exit_p(sun3_scsi_remove),
 	.driver = {
 		.name	= DRV_MODULE_NAME,
 	},

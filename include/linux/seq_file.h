@@ -4,7 +4,6 @@
 
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/string_helpers.h>
 #include <linux/bug.h>
 #include <linux/mutex.h>
 #include <linux/cpumask.h>
@@ -136,21 +135,7 @@ static inline void seq_escape_str(struct seq_file *m, const char *src,
 	seq_escape_mem(m, src, strlen(src), flags, esc);
 }
 
-/**
- * seq_escape - print string into buffer, escaping some characters
- * @m: target buffer
- * @s: NULL-terminated string
- * @esc: set of characters that need escaping
- *
- * Puts string into buffer, replacing each occurrence of character from
- * @esc with usual octal escape.
- *
- * Use seq_has_overflowed() to check for errors.
- */
-static inline void seq_escape(struct seq_file *m, const char *s, const char *esc)
-{
-	seq_escape_str(m, s, ESCAPE_OCTAL, esc);
-}
+void seq_escape(struct seq_file *m, const char *s, const char *esc);
 
 void seq_hex_dump(struct seq_file *m, const char *prefix_str, int prefix_type,
 		  int rowsize, int groupsize, const void *buf, size_t len,
@@ -162,7 +147,6 @@ int seq_dentry(struct seq_file *, struct dentry *, const char *);
 int seq_path_root(struct seq_file *m, const struct path *path,
 		  const struct path *root, const char *esc);
 
-void *single_start(struct seq_file *, loff_t *);
 int single_open(struct file *, int (*)(struct seq_file *, void *), void *);
 int single_open_size(struct file *, int (*)(struct seq_file *, void *), void *, size_t);
 int single_release(struct inode *, struct file *);
@@ -207,25 +191,10 @@ static const struct file_operations __name ## _fops = {			\
 	.release	= single_release,				\
 }
 
-#define DEFINE_SHOW_STORE_ATTRIBUTE(__name)				\
-static int __name ## _open(struct inode *inode, struct file *file)	\
-{									\
-	return single_open(file, __name ## _show, inode->i_private);	\
-}									\
-									\
-static const struct file_operations __name ## _fops = {			\
-	.owner		= THIS_MODULE,					\
-	.open		= __name ## _open,				\
-	.read		= seq_read,					\
-	.write		= __name ## _write,				\
-	.llseek		= seq_lseek,					\
-	.release	= single_release,				\
-}
-
 #define DEFINE_PROC_SHOW_ATTRIBUTE(__name)				\
 static int __name ## _open(struct inode *inode, struct file *file)	\
 {									\
-	return single_open(file, __name ## _show, pde_data(inode));	\
+	return single_open(file, __name ## _show, PDE_DATA(inode));	\
 }									\
 									\
 static const struct proc_ops __name ## _proc_ops = {			\
@@ -264,19 +233,18 @@ static inline void seq_show_option(struct seq_file *m, const char *name,
 
 /**
  * seq_show_option_n - display mount options with appropriate escapes
- *		       where @value must be a specific length (i.e.
- *		       not NUL-terminated).
+ *		       where @value must be a specific length.
  * @m: the seq_file handle
  * @name: the mount option name
  * @value: the mount option name's value, cannot be NULL
- * @length: the exact length of @value to display, must be constant expression
+ * @length: the length of @value to display
  *
  * This is a macro since this uses "length" to define the size of the
  * stack buffer.
  */
 #define seq_show_option_n(m, name, value, length) {	\
 	char val_buf[length + 1];			\
-	memcpy(val_buf, value, length);			\
+	strncpy(val_buf, value, length);		\
 	val_buf[length] = '\0';				\
 	seq_show_option(m, name, val_buf);		\
 }

@@ -307,7 +307,7 @@ out_free_cf:
 
 }
 
-static void electra_cf_remove(struct platform_device *ofdev)
+static int electra_cf_remove(struct platform_device *ofdev)
 {
 	struct device *device = &ofdev->dev;
 	struct electra_cf_socket *cf;
@@ -317,7 +317,7 @@ static void electra_cf_remove(struct platform_device *ofdev)
 	cf->active = 0;
 	pcmcia_unregister_socket(&cf->socket);
 	free_irq(cf->irq, cf);
-	timer_shutdown_sync(&cf->timer);
+	del_timer_sync(&cf->timer);
 
 	iounmap(cf->io_virt);
 	iounmap(cf->mem_base);
@@ -326,6 +326,8 @@ static void electra_cf_remove(struct platform_device *ofdev)
 	release_region(cf->io_base, cf->io_size);
 
 	kfree(cf);
+
+	return 0;
 }
 
 static const struct of_device_id electra_cf_match[] = {
@@ -342,7 +344,7 @@ static struct platform_driver electra_cf_driver = {
 		.of_match_table = electra_cf_match,
 	},
 	.probe	  = electra_cf_probe,
-	.remove_new = electra_cf_remove,
+	.remove   = electra_cf_remove,
 };
 
 module_platform_driver(electra_cf_driver);

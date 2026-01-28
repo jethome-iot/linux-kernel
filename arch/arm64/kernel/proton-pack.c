@@ -574,7 +574,7 @@ void __init spectre_v4_patch_fw_mitigation_enable(struct alt_instr *alt,
 	if (spectre_v4_mitigations_off())
 		return;
 
-	if (cpus_have_cap(ARM64_SSBS))
+	if (cpus_have_final_cap(ARM64_SSBS))
 		return;
 
 	if (spectre_v4_mitigations_dynamic())
@@ -966,26 +966,21 @@ static void this_cpu_set_vectors(enum arm64_bp_harden_el1_vectors slot)
 {
 	const char *v = arm64_get_bp_hardening_vector(slot);
 
+	if (slot < 0)
+		return;
+
 	__this_cpu_write(this_cpu_vector, v);
 
 	/*
 	 * When KPTI is in use, the vectors are switched when exiting to
 	 * user-space.
 	 */
-	if (cpus_have_cap(ARM64_UNMAP_KERNEL_AT_EL0))
+	if (arm64_kernel_unmapped_at_el0())
 		return;
 
 	write_sysreg(v, vbar_el1);
 	isb();
 }
-
-static bool __read_mostly __nospectre_bhb;
-static int __init parse_spectre_bhb_param(char *str)
-{
-	__nospectre_bhb = true;
-	return 0;
-}
-early_param("nospectre_bhb", parse_spectre_bhb_param);
 
 void spectre_bhb_enable_mitigation(const struct arm64_cpu_capabilities *entry)
 {
@@ -1000,7 +995,7 @@ void spectre_bhb_enable_mitigation(const struct arm64_cpu_capabilities *entry)
 		/* No point mitigating Spectre-BHB alone. */
 	} else if (!IS_ENABLED(CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY)) {
 		pr_info_once("spectre-bhb mitigation disabled by compile time option\n");
-	} else if (cpu_mitigations_off() || __nospectre_bhb) {
+	} else if (cpu_mitigations_off()) {
 		pr_info_once("spectre-bhb mitigation disabled by command line option\n");
 	} else if (supports_ecbhb(SCOPE_LOCAL_CPU)) {
 		state = SPECTRE_MITIGATED;

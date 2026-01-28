@@ -15,7 +15,6 @@
 #include "xfs_inode.h"
 #include "xfs_trans.h"
 #include "xfs_bmap.h"
-#include "xfs_da_btree.h"
 #include "xfs_attr.h"
 #include "xfs_attr_sf.h"
 #include "xfs_attr_leaf.h"
@@ -56,13 +55,15 @@ xfs_attr_shortform_list(
 	struct xfs_attrlist_cursor_kern	*cursor = &context->cursor;
 	struct xfs_inode		*dp = context->dp;
 	struct xfs_attr_sf_sort		*sbuf, *sbp;
-	struct xfs_attr_sf_hdr		*sf = dp->i_af.if_data;
+	struct xfs_attr_shortform	*sf;
 	struct xfs_attr_sf_entry	*sfe;
 	int				sbsize, nsbuf, count, i;
 	int				error = 0;
 
+	ASSERT(dp->i_afp != NULL);
+	sf = (struct xfs_attr_shortform *)dp->i_afp->if_u1.if_data;
 	ASSERT(sf != NULL);
-	if (!sf->count)
+	if (!sf->hdr.count)
 		return 0;
 
 	trace_xfs_attr_list_sf(context);
@@ -78,8 +79,8 @@ xfs_attr_shortform_list(
 	 */
 	if (context->bufsize == 0 ||
 	    (XFS_ISRESET_CURSOR(cursor) &&
-	     (dp->i_af.if_bytes + sf->count * 16) < context->bufsize)) {
-		for (i = 0, sfe = xfs_attr_sf_firstentry(sf); i < sf->count; i++) {
+	     (dp->i_afp->if_bytes + sf->hdr.count * 16) < context->bufsize)) {
+		for (i = 0, sfe = &sf->list[0]; i < sf->hdr.count; i++) {
 			if (XFS_IS_CORRUPT(context->dp->i_mount,
 					   !xfs_attr_namecheck(sfe->nameval,
 							       sfe->namelen)))
@@ -108,7 +109,7 @@ xfs_attr_shortform_list(
 	/*
 	 * It didn't all fit, so we have to sort everything on hashval.
 	 */
-	sbsize = sf->count * sizeof(*sbuf);
+	sbsize = sf->hdr.count * sizeof(*sbuf);
 	sbp = sbuf = kmem_alloc(sbsize, KM_NOFS);
 
 	/*
@@ -116,10 +117,10 @@ xfs_attr_shortform_list(
 	 * the relevant info from only those that match into a buffer.
 	 */
 	nsbuf = 0;
-	for (i = 0, sfe = xfs_attr_sf_firstentry(sf); i < sf->count; i++) {
+	for (i = 0, sfe = &sf->list[0]; i < sf->hdr.count; i++) {
 		if (unlikely(
 		    ((char *)sfe < (char *)sf) ||
-		    ((char *)sfe >= ((char *)sf + dp->i_af.if_bytes)))) {
+		    ((char *)sfe >= ((char *)sf + dp->i_afp->if_bytes)))) {
 			XFS_CORRUPTION_ERROR("xfs_attr_shortform_list",
 					     XFS_ERRLEVEL_LOW,
 					     context->dp->i_mount, sfe,
@@ -511,7 +512,7 @@ xfs_attr_list_ilocked(
 	 */
 	if (!xfs_inode_hasattr(dp))
 		return 0;
-	if (dp->i_af.if_format == XFS_DINODE_FMT_LOCAL)
+	if (dp->i_afp->if_format == XFS_DINODE_FMT_LOCAL)
 		return xfs_attr_shortform_list(context);
 	if (xfs_attr_is_leaf(dp))
 		return xfs_attr_leaf_list(context);

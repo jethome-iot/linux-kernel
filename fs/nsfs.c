@@ -21,7 +21,6 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 static const struct file_operations ns_file_operations = {
 	.llseek		= no_llseek,
 	.unlocked_ioctl = ns_ioctl,
-	.compat_ioctl   = compat_ptr_ioctl,
 };
 
 static char *ns_dname(struct dentry *dentry, char *buffer, int buflen)
@@ -29,7 +28,7 @@ static char *ns_dname(struct dentry *dentry, char *buffer, int buflen)
 	struct inode *inode = d_inode(dentry);
 	const struct proc_ns_operations *ns_ops = dentry->d_fsdata;
 
-	return dynamic_dname(buffer, buflen, "%s:[%lu]",
+	return dynamic_dname(dentry, buffer, buflen, "%s:[%lu]",
 		ns_ops->name, inode->i_ino);
 }
 
@@ -84,15 +83,18 @@ slow:
 		return -ENOMEM;
 	}
 	inode->i_ino = ns->inum;
-	simple_inode_init_ts(inode);
+	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 	inode->i_flags |= S_IMMUTABLE;
 	inode->i_mode = S_IFREG | S_IRUGO;
 	inode->i_fop = &ns_file_operations;
 	inode->i_private = ns;
 
-	dentry = d_make_root(inode);	/* not the normal use, but... */
-	if (!dentry)
+	dentry = d_alloc_anon(mnt->mnt_sb);
+	if (!dentry) {
+		iput(inode);
 		return -ENOMEM;
+	}
+	d_instantiate(dentry, inode);
 	dentry->d_fsdata = (void *)ns->ops;
 	d = atomic_long_cmpxchg(&ns->stashed, 0, (unsigned long)dentry);
 	if (d) {
@@ -232,9 +234,27 @@ bool proc_ns_file(const struct file *file)
 	return file->f_op == &ns_file_operations;
 }
 
+struct file *proc_ns_fget(int fd)
+{
+	struct file *file;
+
+	file = fget(fd);
+	if (!file)
+		return ERR_PTR(-EBADF);
+
+	if (file->f_op != &ns_file_operations)
+		goto out_invalid;
+
+	return file;
+
+out_invalid:
+	fput(file);
+	return ERR_PTR(-EINVAL);
+}
+
 /**
  * ns_match() - Returns true if current namespace matches dev/ino provided.
- * @ns: current namespace
+ * @ns_common: current ns
  * @dev: dev_t from nsfs that will be matched against current nsfs
  * @ino: ino_t from nsfs that will be matched against current nsfs
  *

@@ -147,7 +147,7 @@ adv748x_csi2_get_pad_format(struct v4l2_subdev *sd,
 	struct adv748x_csi2 *tx = adv748x_sd_to_csi2(sd);
 
 	if (which == V4L2_SUBDEV_FORMAT_TRY)
-		return v4l2_subdev_state_get_format(sd_state, pad);
+		return v4l2_subdev_get_try_format(sd, sd_state, pad);
 
 	return &tx->format;
 }
@@ -222,7 +222,23 @@ static int adv748x_csi2_get_mbus_config(struct v4l2_subdev *sd, unsigned int pad
 		return -EINVAL;
 
 	config->type = V4L2_MBUS_CSI2_DPHY;
-	config->bus.mipi_csi2.num_data_lanes = tx->active_lanes;
+	switch (tx->active_lanes) {
+	case 1:
+		config->flags = V4L2_MBUS_CSI2_1_LANE;
+		break;
+
+	case 2:
+		config->flags = V4L2_MBUS_CSI2_2_LANE;
+		break;
+
+	case 3:
+		config->flags = V4L2_MBUS_CSI2_3_LANE;
+		break;
+
+	case 4:
+		config->flags = V4L2_MBUS_CSI2_4_LANE;
+		break;
+	}
 
 	return 0;
 }
@@ -300,6 +316,9 @@ int adv748x_csi2_init(struct adv748x_state *state, struct adv748x_csi2 *tx)
 			    MEDIA_ENT_F_VID_IF_BRIDGE,
 			    is_txa(tx) ? "txa" : "txb");
 
+	/* Ensure that matching is based upon the endpoint fwnodes */
+	tx->sd.fwnode = of_fwnode_handle(state->endpoints[tx->port]);
+
 	/* Register internal ops for incremental subdev registration */
 	tx->sd.internal_ops = &adv748x_csi2_internal_ops;
 
@@ -311,14 +330,9 @@ int adv748x_csi2_init(struct adv748x_state *state, struct adv748x_csi2 *tx)
 	if (ret)
 		return ret;
 
-	ret = v4l2_async_subdev_endpoint_add(&tx->sd,
-					     of_fwnode_handle(state->endpoints[tx->port]));
-	if (ret)
-		goto err_free_media;
-
 	ret = adv748x_csi2_init_controls(tx);
 	if (ret)
-		goto err_cleanup_subdev;
+		goto err_free_media;
 
 	ret = v4l2_async_register_subdev(&tx->sd);
 	if (ret)
@@ -328,8 +342,6 @@ int adv748x_csi2_init(struct adv748x_state *state, struct adv748x_csi2 *tx)
 
 err_free_ctrl:
 	v4l2_ctrl_handler_free(&tx->ctrl_hdl);
-err_cleanup_subdev:
-	v4l2_subdev_cleanup(&tx->sd);
 err_free_media:
 	media_entity_cleanup(&tx->sd.entity);
 
@@ -344,5 +356,4 @@ void adv748x_csi2_cleanup(struct adv748x_csi2 *tx)
 	v4l2_async_unregister_subdev(&tx->sd);
 	media_entity_cleanup(&tx->sd.entity);
 	v4l2_ctrl_handler_free(&tx->ctrl_hdl);
-	v4l2_subdev_cleanup(&tx->sd);
 }

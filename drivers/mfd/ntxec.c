@@ -175,7 +175,6 @@ static int ntxec_probe(struct i2c_client *client)
 	/* Bail out if we encounter an unknown firmware version */
 	switch (version) {
 	case NTXEC_VERSION_KOBO_AURA:
-	case NTXEC_VERSION_TOLINO_VISION:
 		subdevs = ntxec_subdev;
 		n_subdevs = ARRAY_SIZE(ntxec_subdev);
 		break;
@@ -240,13 +239,15 @@ static int ntxec_probe(struct i2c_client *client)
 	return res;
 }
 
-static void ntxec_remove(struct i2c_client *client)
+static int ntxec_remove(struct i2c_client *client)
 {
 	if (client == poweroff_restart_client) {
 		poweroff_restart_client = NULL;
 		pm_power_off = NULL;
 		unregister_restart_handler(&ntxec_restart_handler);
 	}
+
+	return 0;
 }
 
 static const struct of_device_id of_ntxec_match_table[] = {
@@ -260,7 +261,7 @@ static struct i2c_driver ntxec_driver = {
 		.name = "ntxec",
 		.of_match_table = of_ntxec_match_table,
 	},
-	.probe = ntxec_probe,
+	.probe_new = ntxec_probe,
 	.remove = ntxec_remove,
 };
 module_i2c_driver(ntxec_driver);

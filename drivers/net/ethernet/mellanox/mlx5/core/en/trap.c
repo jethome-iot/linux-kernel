@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
 /* Copyright (c) 2020 Mellanox Technologies */
 
+#include <net/page_pool.h>
 #include "en/txrx.h"
 #include "en/params.h"
 #include "en/trap.h"
@@ -13,26 +14,19 @@ static int mlx5e_trap_napi_poll(struct napi_struct *napi, int budget)
 	bool busy = false;
 	int work_done = 0;
 
-	rcu_read_lock();
-
 	ch_stats->poll++;
 
 	work_done = mlx5e_poll_rx_cq(&rq->cq, budget);
 	busy |= work_done == budget;
 	busy |= rq->post_wqes(rq);
 
-	if (busy) {
-		work_done = budget;
-		goto out;
-	}
+	if (busy)
+		return budget;
 
 	if (unlikely(!napi_complete_done(napi, work_done)))
-		goto out;
+		return work_done;
 
 	mlx5e_cq_arm(&rq->cq);
-
-out:
-	rcu_read_unlock();
 	return work_done;
 }
 
@@ -68,13 +62,11 @@ static int mlx5e_open_trap_rq(struct mlx5e_priv *priv, struct mlx5e_trap *t)
 
 	node = dev_to_node(mdev->device);
 
-	ccp.netdev   = priv->netdev;
-	ccp.wq       = priv->wq;
 	ccp.node     = node;
 	ccp.ch_stats = t->stats;
 	ccp.napi     = &t->napi;
 	ccp.ix       = 0;
-	err = mlx5e_open_cq(priv->mdev, trap_moder, &rq_param->cqp, &ccp, &rq->cq);
+	err = mlx5e_open_cq(priv, trap_moder, &rq_param->cqp, &ccp, &rq->cq);
 	if (err)
 		return err;
 
@@ -129,7 +121,7 @@ static void mlx5e_build_trap_params(struct mlx5_core_dev *mdev,
 
 static struct mlx5e_trap *mlx5e_open_trap(struct mlx5e_priv *priv)
 {
-	int cpu = mlx5_comp_vector_get_cpu(priv->mdev, 0);
+	int cpu = cpumask_first(mlx5_comp_irq_get_affinity_mask(priv->mdev, 0));
 	struct net_device *netdev = priv->netdev;
 	struct mlx5e_trap *t;
 	int err;
@@ -145,10 +137,10 @@ static struct mlx5e_trap *mlx5e_open_trap(struct mlx5e_priv *priv)
 	t->tstamp   = &priv->tstamp;
 	t->pdev     = mlx5_core_dma_dev(priv->mdev);
 	t->netdev   = priv->netdev;
-	t->mkey_be  = cpu_to_be32(priv->mdev->mlx5e_res.hw_objs.mkey);
+	t->mkey_be  = cpu_to_be32(priv->mdev->mlx5e_res.hw_objs.mkey.key);
 	t->stats    = &priv->trap_stats.ch;
 
-	netif_napi_add(netdev, &t->napi, mlx5e_trap_napi_poll);
+	netif_napi_add(netdev, &t->napi, mlx5e_trap_napi_poll, 64);
 
 	err = mlx5e_open_trap_rq(priv, t);
 	if (unlikely(err))
@@ -180,7 +172,6 @@ static void mlx5e_activate_trap(struct mlx5e_trap *trap)
 {
 	napi_enable(&trap->napi);
 	mlx5e_activate_rq(&trap->rq);
-	mlx5e_trigger_napi_sched(&trap->napi);
 }
 
 void mlx5e_deactivate_trap(struct mlx5e_priv *priv)
@@ -231,12 +222,12 @@ static int mlx5e_handle_action_trap(struct mlx5e_priv *priv, int trap_id)
 
 	switch (trap_id) {
 	case DEVLINK_TRAP_GENERIC_ID_INGRESS_VLAN_FILTER:
-		err = mlx5e_add_vlan_trap(priv->fs, trap_id, mlx5e_trap_get_tirn(priv->en_trap));
+		err = mlx5e_add_vlan_trap(priv, trap_id, mlx5e_trap_get_tirn(priv->en_trap));
 		if (err)
 			goto err_out;
 		break;
 	case DEVLINK_TRAP_GENERIC_ID_DMAC_FILTER:
-		err = mlx5e_add_mac_trap(priv->fs, trap_id, mlx5e_trap_get_tirn(priv->en_trap));
+		err = mlx5e_add_mac_trap(priv, trap_id, mlx5e_trap_get_tirn(priv->en_trap));
 		if (err)
 			goto err_out;
 		break;
@@ -257,10 +248,10 @@ static int mlx5e_handle_action_drop(struct mlx5e_priv *priv, int trap_id)
 {
 	switch (trap_id) {
 	case DEVLINK_TRAP_GENERIC_ID_INGRESS_VLAN_FILTER:
-		mlx5e_remove_vlan_trap(priv->fs);
+		mlx5e_remove_vlan_trap(priv);
 		break;
 	case DEVLINK_TRAP_GENERIC_ID_DMAC_FILTER:
-		mlx5e_remove_mac_trap(priv->fs);
+		mlx5e_remove_mac_trap(priv);
 		break;
 	default:
 		netdev_warn(priv->netdev, "%s: Unknown trap id %d\n", __func__, trap_id);

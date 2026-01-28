@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+if REGULATOR
+
+config AMLOGIC_REGULATOR
+	tristate "Amlogic regulator devices support"
+	default n
+	help
+	  regulator devices support
+	  select y for built-in
+	  select m for ko
+	  select n for disable
+
+if AMLOGIC_REGULATOR
+source "$(COMMON_DRIVERS_DIR)/drivers/regulator/meson_pmic6b/Kconfig"
+endif
+
+config AMLOGIC_PWM_REGULATOR
+	bool "PWM voltage regulator for AMLOGIC define"
+	depends on REGULATOR_PWM
+	help
+	  This driver supports some feature of PWM regulators.
+	  such as:
+	  1. need use regulator to delay dvfs voltage setting;
+	  2. deal with problem of voltage by changed to max booting to kernel;
+
+endif

@@ -22,7 +22,6 @@
 #include "xfs_trace.h"
 #include "xfs_buf_item.h"
 #include "xfs_log.h"
-#include "xfs_errortag.h"
 
 /*
  * xfs_da_btree.c
@@ -73,7 +72,7 @@ STATIC int	xfs_da3_blk_unlink(xfs_da_state_t *state,
 				  xfs_da_state_blk_t *save_blk);
 
 
-struct kmem_cache	*xfs_da_state_cache;	/* anchor for dir/attr state */
+kmem_zone_t *xfs_da_state_zone;	/* anchor for state struct zone */
 
 /*
  * Allocate a dir-state structure.
@@ -85,7 +84,7 @@ xfs_da_state_alloc(
 {
 	struct xfs_da_state	*state;
 
-	state = kmem_cache_zalloc(xfs_da_state_cache, GFP_NOFS | __GFP_NOFAIL);
+	state = kmem_cache_zalloc(xfs_da_state_zone, GFP_NOFS | __GFP_NOFAIL);
 	state->args = args;
 	state->mp = args->dp->i_mount;
 	return state;
@@ -114,18 +113,7 @@ xfs_da_state_free(xfs_da_state_t *state)
 #ifdef DEBUG
 	memset((char *)state, 0, sizeof(*state));
 #endif /* DEBUG */
-	kmem_cache_free(xfs_da_state_cache, state);
-}
-
-void
-xfs_da_state_reset(
-	struct xfs_da_state	*state,
-	struct xfs_da_args	*args)
-{
-	xfs_da_state_kill_altpath(state);
-	memset(state, 0, sizeof(struct xfs_da_state));
-	state->args = args;
-	state->mp = state->args->dp->i_mount;
+	kmem_cache_free(xfs_da_state_zone, state);
 }
 
 static inline int xfs_dabuf_nfsb(struct xfs_mount *mp, int whichfork)
@@ -421,25 +409,6 @@ xfs_da3_node_read_mapped(
 	return xfs_da3_node_set_type(tp, *bpp);
 }
 
-/*
- * Copy src directory/attr leaf/node buffer to the dst.
- * For v5 file systems make sure the right blkno is stamped in.
- */
-void
-xfs_da_buf_copy(
-	struct xfs_buf *dst,
-	struct xfs_buf *src,
-	size_t size)
-{
-	struct xfs_da3_blkinfo *da3 = dst->b_addr;
-
-	memcpy(dst->b_addr, src->b_addr, size);
-	dst->b_ops = src->b_ops;
-	xfs_trans_buf_copy_type(dst, src);
-	if (xfs_has_crc(dst->b_mount))
-		da3->blkno = cpu_to_be64(xfs_buf_daddr(dst));
-}
-
 /*========================================================================
  * Routines used for growing the Btree.
  *========================================================================*/
@@ -512,9 +481,6 @@ xfs_da3_split(
 	int			i;
 
 	trace_xfs_da_split(state->args);
-
-	if (XFS_TEST_ERROR(false, state->mp, XFS_ERRTAG_DA_LEAF_SPLIT))
-		return -EIO;
 
 	/*
 	 * Walk back up the tree splitting/inserting/adjusting as necessary.
@@ -709,6 +675,12 @@ xfs_da3_root_split(
 		btree = icnodehdr.btree;
 		size = (int)((char *)&btree[icnodehdr.count] - (char *)oldroot);
 		level = icnodehdr.level;
+
+		/*
+		 * we are about to copy oldroot to bp, so set up the type
+		 * of bp while we know exactly what it will be.
+		 */
+		xfs_trans_buf_set_type(tp, bp, XFS_BLFT_DA_NODE_BUF);
 	} else {
 		struct xfs_dir3_icleaf_hdr leafhdr;
 
@@ -720,17 +692,31 @@ xfs_da3_root_split(
 		size = (int)((char *)&leafhdr.ents[leafhdr.count] -
 			(char *)leaf);
 		level = 0;
+
+		/*
+		 * we are about to copy oldroot to bp, so set up the type
+		 * of bp while we know exactly what it will be.
+		 */
+		xfs_trans_buf_set_type(tp, bp, XFS_BLFT_DIR_LEAFN_BUF);
 	}
 
 	/*
-	 * Copy old root to new buffer and log it.
+	 * we can copy most of the information in the node from one block to
+	 * another, but for CRC enabled headers we have to make sure that the
+	 * block specific identifiers are kept intact. We update the buffer
+	 * directly for this.
 	 */
-	xfs_da_buf_copy(bp, blk1->bp, size);
+	memcpy(node, oldroot, size);
+	if (oldroot->hdr.info.magic == cpu_to_be16(XFS_DA3_NODE_MAGIC) ||
+	    oldroot->hdr.info.magic == cpu_to_be16(XFS_DIR3_LEAFN_MAGIC)) {
+		struct xfs_da3_intnode *node3 = (struct xfs_da3_intnode *)node;
+
+		node3->hdr.info.blkno = cpu_to_be64(xfs_buf_daddr(bp));
+	}
 	xfs_trans_log_buf(tp, bp, 0, size - 1);
 
-	/*
-	 * Update blk1 to point to new buffer.
-	 */
+	bp->b_ops = blk1->bp->b_ops;
+	xfs_trans_buf_copy_type(bp, blk1->bp);
 	blk1->bp = bp;
 	blk1->blkno = blkno;
 
@@ -878,6 +864,7 @@ xfs_da3_node_rebalance(
 {
 	struct xfs_da_intnode	*node1;
 	struct xfs_da_intnode	*node2;
+	struct xfs_da_intnode	*tmpnode;
 	struct xfs_da_node_entry *btree1;
 	struct xfs_da_node_entry *btree2;
 	struct xfs_da_node_entry *btree_s;
@@ -907,7 +894,9 @@ xfs_da3_node_rebalance(
 	    ((be32_to_cpu(btree2[0].hashval) < be32_to_cpu(btree1[0].hashval)) ||
 	     (be32_to_cpu(btree2[nodehdr2.count - 1].hashval) <
 			be32_to_cpu(btree1[nodehdr1.count - 1].hashval)))) {
-		swap(node1, node2);
+		tmpnode = node1;
+		node1 = node2;
+		node2 = tmpnode;
 		xfs_da3_node_hdr_from_disk(dp->i_mount, &nodehdr1, node1);
 		xfs_da3_node_hdr_from_disk(dp->i_mount, &nodehdr2, node2);
 		btree1 = nodehdr1.btree;
@@ -1219,14 +1208,21 @@ xfs_da3_root_join(
 	xfs_da_blkinfo_onlychild_validate(bp->b_addr, oldroothdr.level);
 
 	/*
-	 * Copy child to root buffer and log it.
+	 * This could be copying a leaf back into the root block in the case of
+	 * there only being a single leaf block left in the tree. Hence we have
+	 * to update the b_ops pointer as well to match the buffer type change
+	 * that could occur. For dir3 blocks we also need to update the block
+	 * number in the buffer header.
 	 */
-	xfs_da_buf_copy(root_blk->bp, bp, args->geo->blksize);
+	memcpy(root_blk->bp->b_addr, bp->b_addr, args->geo->blksize);
+	root_blk->bp->b_ops = bp->b_ops;
+	xfs_trans_buf_copy_type(root_blk->bp, bp);
+	if (oldroothdr.magic == XFS_DA3_NODE_MAGIC) {
+		struct xfs_da3_blkinfo *da3 = root_blk->bp->b_addr;
+		da3->blkno = cpu_to_be64(xfs_buf_daddr(root_blk->bp));
+	}
 	xfs_trans_log_buf(args->trans, root_blk->bp, 0,
 			  args->geo->blksize - 1);
-	/*
-	 * Now we can drop the child buffer.
-	 */
 	error = xfs_da_shrink_inode(args, child, bp);
 	return error;
 }
@@ -2184,8 +2180,8 @@ xfs_da_grow_inode_int(
 		 */
 		mapp = kmem_alloc(sizeof(*mapp) * count, 0);
 		for (b = *bno, mapi = 0; b < *bno + count; ) {
+			nmap = min(XFS_BMAP_MAX_NMAP, count);
 			c = (int)(*bno + count - b);
-			nmap = min(XFS_BMAP_MAX_NMAP, c);
 			error = xfs_bmapi_write(tp, dp, b, c,
 					xfs_bmapi_aflag(w)|XFS_BMAPI_METADATA,
 					args->total, &mapp[mapi], &nmap);
@@ -2309,10 +2305,9 @@ xfs_da3_swap_lastblock(
 	/*
 	 * Copy the last block into the dead buffer and log it.
 	 */
-	xfs_da_buf_copy(dead_buf, last_buf, args->geo->blksize);
+	memcpy(dead_buf->b_addr, last_buf->b_addr, args->geo->blksize);
 	xfs_trans_log_buf(tp, dead_buf, 0, args->geo->blksize - 1);
 	dead_info = dead_buf->b_addr;
-
 	/*
 	 * Get values from the moved block.
 	 */

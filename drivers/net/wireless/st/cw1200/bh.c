@@ -327,12 +327,18 @@ static int cw1200_bh_rx_helper(struct cw1200_common *priv,
 	if (WARN_ON(wsm_handle_rx(priv, wsm_id, wsm, &skb_rx)))
 		goto err;
 
-	dev_kfree_skb(skb_rx);
+	if (skb_rx) {
+		dev_kfree_skb(skb_rx);
+		skb_rx = NULL;
+	}
 
 	return 0;
 
 err:
-	dev_kfree_skb(skb_rx);
+	if (skb_rx) {
+		dev_kfree_skb(skb_rx);
+		skb_rx = NULL;
+	}
 	return -1;
 }
 

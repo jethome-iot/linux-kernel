@@ -23,9 +23,7 @@ MODULE_LICENSE("GPL v2");
 
 static DEFINE_MUTEX(unit_mutex);
 static LIST_HEAD(unit_list);
-static const struct class xillybus_class = {
-	.name = "xillybus",
-};
+static struct class *xillybus_class;
 
 #define UNITNAMELEN 16
 
@@ -123,7 +121,7 @@ int xillybus_init_chrdev(struct device *dev,
 		len -= namelen + 1;
 		idt += namelen + 1;
 
-		device = device_create(&xillybus_class,
+		device = device_create(xillybus_class,
 				       NULL,
 				       MKDEV(unit->major,
 					     i + unit->lowest_minor),
@@ -154,7 +152,7 @@ int xillybus_init_chrdev(struct device *dev,
 
 unroll_device_create:
 	for (i--; i >= 0; i--)
-		device_destroy(&xillybus_class, MKDEV(unit->major,
+		device_destroy(xillybus_class, MKDEV(unit->major,
 						     i + unit->lowest_minor));
 
 	cdev_del(unit->cdev);
@@ -176,17 +174,18 @@ void xillybus_cleanup_chrdev(void *private_data,
 			     struct device *dev)
 {
 	int minor;
-	struct xilly_unit *unit = NULL, *iter;
+	struct xilly_unit *unit;
+	bool found = false;
 
 	mutex_lock(&unit_mutex);
 
-	list_for_each_entry(iter, &unit_list, list_entry)
-		if (iter->private_data == private_data) {
-			unit = iter;
+	list_for_each_entry(unit, &unit_list, list_entry)
+		if (unit->private_data == private_data) {
+			found = true;
 			break;
 		}
 
-	if (!unit) {
+	if (!found) {
 		dev_err(dev, "Weird bug: Failed to find unit\n");
 		mutex_unlock(&unit_mutex);
 		return;
@@ -195,7 +194,7 @@ void xillybus_cleanup_chrdev(void *private_data,
 	for (minor = unit->lowest_minor;
 	     minor < (unit->lowest_minor + unit->num_nodes);
 	     minor++)
-		device_destroy(&xillybus_class, MKDEV(unit->major, minor));
+		device_destroy(xillybus_class, MKDEV(unit->major, minor));
 
 	cdev_del(unit->cdev);
 
@@ -217,39 +216,46 @@ int xillybus_find_inode(struct inode *inode,
 {
 	int minor = iminor(inode);
 	int major = imajor(inode);
-	struct xilly_unit *unit = NULL, *iter;
+	struct xilly_unit *unit;
+	bool found = false;
 
 	mutex_lock(&unit_mutex);
 
-	list_for_each_entry(iter, &unit_list, list_entry)
-		if (iter->major == major &&
-		    minor >= iter->lowest_minor &&
-		    minor < (iter->lowest_minor + iter->num_nodes)) {
-			unit = iter;
+	list_for_each_entry(unit, &unit_list, list_entry)
+		if (unit->major == major &&
+		    minor >= unit->lowest_minor &&
+		    minor < (unit->lowest_minor + unit->num_nodes)) {
+			found = true;
 			break;
 		}
 
-	if (!unit) {
-		mutex_unlock(&unit_mutex);
+	mutex_unlock(&unit_mutex);
+
+	if (!found)
 		return -ENODEV;
-	}
 
 	*private_data = unit->private_data;
 	*index = minor - unit->lowest_minor;
 
-	mutex_unlock(&unit_mutex);
 	return 0;
 }
 EXPORT_SYMBOL(xillybus_find_inode);
 
 static int __init xillybus_class_init(void)
 {
-	return class_register(&xillybus_class);
+	xillybus_class = class_create(THIS_MODULE, "xillybus");
+
+	if (IS_ERR(xillybus_class)) {
+		pr_warn("Failed to register xillybus class\n");
+
+		return PTR_ERR(xillybus_class);
+	}
+	return 0;
 }
 
 static void __exit xillybus_class_exit(void)
 {
-	class_unregister(&xillybus_class);
+	class_destroy(xillybus_class);
 }
 
 module_init(xillybus_class_init);

@@ -6,7 +6,6 @@
 #include <linux/hugetlb.h>
 #include <linux/mman.h>
 #include <linux/mmzone.h>
-#include <linux/memblock.h>
 #include <linux/proc_fs.h>
 #include <linux/percpu.h>
 #include <linux/seq_file.h>
@@ -17,10 +16,9 @@
 #ifdef CONFIG_CMA
 #include <linux/cma.h>
 #endif
-#include <linux/zswap.h>
 #include <asm/page.h>
 #include "internal.h"
-
+#include <trace/hooks/mm.h>
 void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
@@ -88,13 +86,6 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 	show_val_kb(m, "SwapTotal:      ", i.totalswap);
 	show_val_kb(m, "SwapFree:       ", i.freeswap);
-#ifdef CONFIG_ZSWAP
-	seq_printf(m,  "Zswap:          %8lu kB\n",
-		   (unsigned long)(zswap_pool_total_size >> 10));
-	seq_printf(m,  "Zswapped:       %8lu kB\n",
-		   (unsigned long)atomic_read(&zswap_stored_pages) <<
-		   (PAGE_SHIFT - 10));
-#endif
 	show_val_kb(m, "Dirty:          ",
 		    global_node_page_state(NR_FILE_DIRTY));
 	show_val_kb(m, "Writeback:      ",
@@ -133,8 +124,6 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "VmallocChunk:   ", 0ul);
 	show_val_kb(m, "Percpu:         ", pcpu_nr_pages());
 
-	memtest_report_meminfo(m);
-
 #ifdef CONFIG_MEMORY_FAILURE
 	seq_printf(m, "HardwareCorrupted: %5lu kB\n",
 		   atomic_long_read(&num_poisoned_pages) << (PAGE_SHIFT - 10));
@@ -158,11 +147,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "CmaFree:        ",
 		    global_zone_page_state(NR_FREE_CMA_PAGES));
 #endif
-
-#ifdef CONFIG_UNACCEPTED_MEMORY
-	show_val_kb(m, "Unaccepted:     ",
-		    global_zone_page_state(NR_UNACCEPTED));
-#endif
+	trace_android_vh_meminfo_proc_show(m);
 
 	hugetlb_report_meminfo(m);
 
@@ -173,10 +158,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 static int __init proc_meminfo_init(void)
 {
-	struct proc_dir_entry *pde;
-
-	pde = proc_create_single("meminfo", 0, NULL, meminfo_proc_show);
-	pde_make_permanent(pde);
+	proc_create_single("meminfo", 0, NULL, meminfo_proc_show);
 	return 0;
 }
 fs_initcall(proc_meminfo_init);

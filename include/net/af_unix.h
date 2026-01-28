@@ -11,21 +11,22 @@
 void unix_inflight(struct user_struct *user, struct file *fp);
 void unix_notinflight(struct user_struct *user, struct file *fp);
 void unix_destruct_scm(struct sk_buff *skb);
-void io_uring_destruct_scm(struct sk_buff *skb);
 void unix_gc(void);
 void wait_for_unix_gc(void);
 struct sock *unix_get_socket(struct file *filp);
 struct sock *unix_peer_get(struct sock *sk);
 
-#define UNIX_HASH_MOD	(256 - 1)
-#define UNIX_HASH_SIZE	(256 * 2)
+#define UNIX_HASH_SIZE	256
 #define UNIX_HASH_BITS	8
 
 extern unsigned int unix_tot_inflight;
+extern spinlock_t unix_table_lock;
+extern struct hlist_head unix_socket_table[2 * UNIX_HASH_SIZE];
 
 struct unix_address {
 	refcount_t	refcnt;
 	int		len;
+	unsigned int	hash;
 	struct sockaddr_un name[];
 };
 
@@ -55,7 +56,7 @@ struct unix_sock {
 	struct mutex		iolock, bindlock;
 	struct sock		*peer;
 	struct list_head	link;
-	atomic_long_t		inflight;
+	unsigned long		inflight;
 	spinlock_t		lock;
 	unsigned long		gc_flags;
 #define UNIX_GC_CANDIDATE	0
@@ -68,8 +69,10 @@ struct unix_sock {
 #endif
 };
 
-#define unix_sk(ptr) container_of_const(ptr, struct unix_sock, sk)
-#define unix_peer(sk) (unix_sk(sk)->peer)
+static inline struct unix_sock *unix_sk(const struct sock *sk)
+{
+	return (struct unix_sock *)sk;
+}
 
 #define unix_state_lock(s)	spin_lock(&unix_sk(s)->lock)
 #define unix_state_unlock(s)	spin_unlock(&unix_sk(s)->lock)

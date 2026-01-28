@@ -8,7 +8,6 @@
 #ifndef __ASM_M68K_PROCESSOR_H
 #define __ASM_M68K_PROCESSOR_H
 
-#include <linux/preempt.h>
 #include <linux/thread_info.h>
 #include <asm/fpu.h>
 #include <asm/ptrace.h>
@@ -146,8 +145,12 @@ static inline void start_thread(struct pt_regs * regs, unsigned long pc,
 /* Forward declaration, a strange C thing */
 struct task_struct;
 
-unsigned long __get_wchan(struct task_struct *p);
-void show_registers(struct pt_regs *regs);
+/* Free all resources held by a thread. */
+static inline void release_thread(struct task_struct *dead_task)
+{
+}
+
+unsigned long get_wchan(struct task_struct *p);
 
 #define	KSTK_EIP(tsk)	\
     ({			\

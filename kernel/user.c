@@ -18,17 +18,9 @@
 #include <linux/interrupt.h>
 #include <linux/export.h>
 #include <linux/user_namespace.h>
-#include <linux/binfmts.h>
 #include <linux/proc_ns.h>
 
-#if IS_ENABLED(CONFIG_BINFMT_MISC)
-struct binfmt_misc init_binfmt_misc = {
-	.entries = LIST_HEAD_INIT(init_binfmt_misc.entries),
-	.enabled = true,
-	.entries_lock = __RW_LOCK_UNLOCKED(init_binfmt_misc.entries_lock),
-};
-EXPORT_SYMBOL_GPL(init_binfmt_misc);
-#endif
+#include <trace/hooks/user.h>
 
 /*
  * userns count is 1 for root user, 1 for init_uts_ns,
@@ -76,9 +68,6 @@ struct user_namespace init_user_ns = {
 #ifdef CONFIG_KEYS
 	.keyring_name_list = LIST_HEAD_INIT(init_user_ns.keyring_name_list),
 	.keyring_sem = __RWSEM_INITIALIZER(init_user_ns.keyring_sem),
-#endif
-#if IS_ENABLED(CONFIG_BINFMT_MISC)
-	.binfmt_misc = &init_binfmt_misc,
 #endif
 };
 EXPORT_SYMBOL_GPL(init_user_ns);
@@ -165,6 +154,7 @@ static void user_epoll_free(struct user_struct *up)
 static void free_user(struct user_struct *up, unsigned long flags)
 	__releases(&uidhash_lock)
 {
+	trace_android_vh_free_user(up);
 	uid_hash_remove(up);
 	spin_unlock_irqrestore(&uidhash_lock, flags);
 	user_epoll_free(up);
@@ -187,6 +177,7 @@ struct user_struct *find_user(kuid_t uid)
 	spin_unlock_irqrestore(&uidhash_lock, flags);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(find_user);
 
 void free_uid(struct user_struct *up)
 {
@@ -216,6 +207,7 @@ struct user_struct *alloc_uid(kuid_t uid)
 
 		new->uid = uid;
 		refcount_set(&new->__count, 1);
+		trace_android_vh_alloc_uid(new);
 		if (user_epoll_alloc(new)) {
 			kmem_cache_free(uid_cachep, new);
 			return NULL;

@@ -22,12 +22,10 @@
  *
  */
 
-#include "gem/i915_gem_internal.h"
 #include "gem/i915_gem_pm.h"
 #include "gem/selftests/igt_gem_utils.h"
 #include "gem/selftests/mock_context.h"
 #include "gt/intel_gt.h"
-#include "gt/intel_gt_print.h"
 
 #include "i915_selftest.h"
 
@@ -119,7 +117,7 @@ static int igt_evict_something(void *arg)
 
 	/* Everything is pinned, nothing should happen */
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_evict_something(&ggtt->vm, NULL,
+	err = i915_gem_evict_something(&ggtt->vm,
 				       I915_GTT_PAGE_SIZE, 0, 0,
 				       0, U64_MAX,
 				       0);
@@ -134,7 +132,7 @@ static int igt_evict_something(void *arg)
 
 	/* Everything is unpinned, we should be able to evict something */
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_evict_something(&ggtt->vm, NULL,
+	err = i915_gem_evict_something(&ggtt->vm,
 				       I915_GTT_PAGE_SIZE, 0, 0,
 				       0, U64_MAX,
 				       0);
@@ -206,7 +204,7 @@ static int igt_evict_for_vma(void *arg)
 
 	/* Everything is pinned, nothing should happen */
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_evict_for_node(&ggtt->vm, NULL, &target, 0);
+	err = i915_gem_evict_for_node(&ggtt->vm, &target, 0);
 	mutex_unlock(&ggtt->vm.mutex);
 	if (err != -ENOSPC) {
 		pr_err("i915_gem_evict_for_node on a full GGTT returned err=%d\n",
@@ -218,7 +216,7 @@ static int igt_evict_for_vma(void *arg)
 
 	/* Everything is unpinned, we should be able to evict the node */
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_evict_for_node(&ggtt->vm, NULL, &target, 0);
+	err = i915_gem_evict_for_node(&ggtt->vm, &target, 0);
 	mutex_unlock(&ggtt->vm.mutex);
 	if (err) {
 		pr_err("i915_gem_evict_for_node returned err=%d\n",
@@ -246,7 +244,7 @@ static int igt_evict_for_cache_color(void *arg)
 	struct drm_mm_node target = {
 		.start = I915_GTT_PAGE_SIZE * 2,
 		.size = I915_GTT_PAGE_SIZE,
-		.color = i915_gem_get_pat_index(gt->i915, I915_CACHE_LLC),
+		.color = I915_CACHE_LLC,
 	};
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
@@ -299,7 +297,7 @@ static int igt_evict_for_cache_color(void *arg)
 
 	/* Remove just the second vma */
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_evict_for_node(&ggtt->vm, NULL, &target, 0);
+	err = i915_gem_evict_for_node(&ggtt->vm, &target, 0);
 	mutex_unlock(&ggtt->vm.mutex);
 	if (err) {
 		pr_err("[0]i915_gem_evict_for_node returned err=%d\n", err);
@@ -309,10 +307,10 @@ static int igt_evict_for_cache_color(void *arg)
 	/* Attempt to remove the first *pinned* vma, by removing the (empty)
 	 * neighbour -- this should fail.
 	 */
-	target.color = i915_gem_get_pat_index(gt->i915, I915_CACHE_L3_LLC);
+	target.color = I915_CACHE_L3_LLC;
 
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_evict_for_node(&ggtt->vm, NULL, &target, 0);
+	err = i915_gem_evict_for_node(&ggtt->vm, &target, 0);
 	mutex_unlock(&ggtt->vm.mutex);
 	if (!err) {
 		pr_err("[1]i915_gem_evict_for_node returned err=%d\n", err);
@@ -333,7 +331,6 @@ static int igt_evict_vm(void *arg)
 {
 	struct intel_gt *gt = arg;
 	struct i915_ggtt *ggtt = gt->ggtt;
-	struct i915_gem_ww_ctx ww;
 	LIST_HEAD(objects);
 	int err;
 
@@ -345,7 +342,7 @@ static int igt_evict_vm(void *arg)
 
 	/* Everything is pinned, nothing should happen */
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_evict_vm(&ggtt->vm, NULL, NULL);
+	err = i915_gem_evict_vm(&ggtt->vm);
 	mutex_unlock(&ggtt->vm.mutex);
 	if (err) {
 		pr_err("i915_gem_evict_vm on a full GGTT returned err=%d]\n",
@@ -355,12 +352,9 @@ static int igt_evict_vm(void *arg)
 
 	unpin_ggtt(ggtt);
 
-	for_i915_gem_ww(&ww, err, false) {
-		mutex_lock(&ggtt->vm.mutex);
-		err = i915_gem_evict_vm(&ggtt->vm, &ww, NULL);
-		mutex_unlock(&ggtt->vm.mutex);
-	}
-
+	mutex_lock(&ggtt->vm.mutex);
+	err = i915_gem_evict_vm(&ggtt->vm);
+	mutex_unlock(&ggtt->vm.mutex);
 	if (err) {
 		pr_err("i915_gem_evict_vm on a full GGTT returned err=%d]\n",
 		       err);
@@ -408,7 +402,7 @@ static int igt_evict_contexts(void *arg)
 	/* Reserve a block so that we know we have enough to fit a few rq */
 	memset(&hole, 0, sizeof(hole));
 	mutex_lock(&ggtt->vm.mutex);
-	err = i915_gem_gtt_insert(&ggtt->vm, NULL, &hole,
+	err = i915_gem_gtt_insert(&ggtt->vm, &hole,
 				  PRETEND_GGTT_SIZE, 0, I915_COLOR_UNEVICTABLE,
 				  0, ggtt->vm.total,
 				  PIN_NOEVICT);
@@ -428,7 +422,7 @@ static int igt_evict_contexts(void *arg)
 			goto out_locked;
 		}
 
-		if (i915_gem_gtt_insert(&ggtt->vm, NULL, &r->node,
+		if (i915_gem_gtt_insert(&ggtt->vm, &r->node,
 					1ul << 20, 0, I915_COLOR_UNEVICTABLE,
 					0, ggtt->vm.total,
 					PIN_NOEVICT)) {
@@ -448,7 +442,6 @@ static int igt_evict_contexts(void *arg)
 	/* Overfill the GGTT with context objects and so try to evict one. */
 	for_each_engine(engine, gt, id) {
 		struct i915_sw_fence fence;
-		struct i915_request *last = NULL;
 
 		count = 0;
 		onstack_fence_init(&fence);
@@ -486,9 +479,6 @@ static int igt_evict_contexts(void *arg)
 
 			i915_request_add(rq);
 			count++;
-			if (last)
-				i915_request_put(last);
-			last = i915_request_get(rq);
 			err = 0;
 		} while(1);
 		onstack_fence_fini(&fence);
@@ -496,22 +486,6 @@ static int igt_evict_contexts(void *arg)
 			count, engine->name);
 		if (err)
 			break;
-		if (last) {
-			if (i915_request_wait(last, 0, HZ) < 0) {
-				err = -EIO;
-				i915_request_put(last);
-				pr_err("Failed waiting for last request (on %s)",
-				       engine->name);
-				break;
-			}
-			i915_request_put(last);
-		}
-		err = intel_gt_wait_for_idle(engine->gt, HZ * 3);
-		if (err) {
-			gt_err(engine->gt, "Failed to idle GT (on %s)",
-			       engine->name);
-			break;
-		}
 	}
 
 	mutex_lock(&ggtt->vm.mutex);
@@ -552,7 +526,7 @@ int i915_gem_evict_mock_selftests(void)
 		return -ENOMEM;
 
 	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
-		err = i915_subtests(tests, to_gt(i915));
+		err = i915_subtests(tests, &i915->gt);
 
 	mock_destroy_device(i915);
 	return err;
@@ -564,8 +538,8 @@ int i915_gem_evict_live_selftests(struct drm_i915_private *i915)
 		SUBTEST(igt_evict_contexts),
 	};
 
-	if (intel_gt_is_wedged(to_gt(i915)))
+	if (intel_gt_is_wedged(&i915->gt))
 		return 0;
 
-	return intel_gt_live_subtests(tests, to_gt(i915));
+	return intel_gt_live_subtests(tests, &i915->gt);
 }

@@ -14,7 +14,6 @@
 #include <linux/interrupt.h>
 #include <linux/if_vlan.h>
 #include <linux/phylink.h>
-#include <linux/skbuff.h>
 
 /* Packet size info */
 #define XAE_HDR_SIZE			14 /* Size of Ethernet header */
@@ -120,11 +119,11 @@
 #define XAXIDMA_IRQ_ERROR_MASK		0x00004000 /* Error interrupt */
 #define XAXIDMA_IRQ_ALL_MASK		0x00007000 /* All interrupts */
 
-/* Default TX/RX Threshold and delay timer values for SGDMA mode */
+/* Default TX/RX Threshold and waitbound values for SGDMA mode */
 #define XAXIDMA_DFT_TX_THRESHOLD	24
-#define XAXIDMA_DFT_TX_USEC		50
-#define XAXIDMA_DFT_RX_THRESHOLD	1
-#define XAXIDMA_DFT_RX_USEC		50
+#define XAXIDMA_DFT_TX_WAITBOUND	254
+#define XAXIDMA_DFT_RX_THRESHOLD	24
+#define XAXIDMA_DFT_RX_WAITBOUND	254
 
 #define XAXIDMA_BD_CTRL_TXSOF_MASK	0x08000000 /* First tx packet */
 #define XAXIDMA_BD_CTRL_TXEOF_MASK	0x04000000 /* Last tx packet */
@@ -380,22 +379,6 @@ struct axidma_bd {
 #define XAE_NUM_MISC_CLOCKS 3
 
 /**
- * struct skbuf_dma_descriptor - skb for each dma descriptor
- * @sgl: Pointer for sglist.
- * @desc: Pointer to dma descriptor.
- * @dma_address: dma address of sglist.
- * @skb: Pointer to SKB transferred using DMA
- * @sg_len: number of entries in the sglist.
- */
-struct skbuf_dma_descriptor {
-	struct scatterlist sgl[MAX_SKB_FRAGS + 1];
-	struct dma_async_tx_descriptor *desc;
-	dma_addr_t dma_address;
-	struct sk_buff *skb;
-	int sg_len;
-};
-
-/**
  * struct axienet_local - axienet private per device data
  * @ndev:	Pointer for net_device to which it will be attached.
  * @dev:	Pointer to device structure
@@ -403,7 +386,6 @@ struct skbuf_dma_descriptor {
  * @phylink:	Pointer to phylink instance
  * @phylink_config: phylink configuration settings
  * @pcs_phy:	Reference to PCS/PMA PHY if used
- * @pcs:	phylink pcs structure for PCS PHY
  * @switch_x_sgmii: Whether switchable 1000BaseX/SGMII mode is enabled in the core
  * @axi_clk:	AXI4-Lite bus clock
  * @misc_clks:	Misc ethernet clocks (AXI4-Stream, Ref, MGT clocks)
@@ -412,28 +394,6 @@ struct skbuf_dma_descriptor {
  * @regs_start: Resource start for axienet device addresses
  * @regs:	Base address for the axienet_local device address space
  * @dma_regs:	Base address for the axidma device address space
- * @napi_rx:	NAPI RX control structure
- * @rx_dma_cr:  Nominal content of RX DMA control register
- * @rx_bd_v:	Virtual address of the RX buffer descriptor ring
- * @rx_bd_p:	Physical address(start address) of the RX buffer descr. ring
- * @rx_bd_num:	Size of RX buffer descriptor ring
- * @rx_bd_ci:	Stores the index of the Rx buffer descriptor in the ring being
- *		accessed currently.
- * @rx_packets: RX packet count for statistics
- * @rx_bytes:	RX byte count for statistics
- * @rx_stat_sync: Synchronization object for RX stats
- * @napi_tx:	NAPI TX control structure
- * @tx_dma_cr:  Nominal content of TX DMA control register
- * @tx_bd_v:	Virtual address of the TX buffer descriptor ring
- * @tx_bd_p:	Physical address(start address) of the TX buffer descr. ring
- * @tx_bd_num:	Size of TX buffer descriptor ring
- * @tx_bd_ci:	Stores the next Tx buffer descriptor in the ring that may be
- *		complete. Only updated at runtime by TX NAPI poll.
- * @tx_bd_tail:	Stores the index of the next Tx buffer descriptor in the ring
- *              to be populated.
- * @tx_packets: TX packet count for statistics
- * @tx_bytes:	TX byte count for statistics
- * @tx_stat_sync: Synchronization object for TX stats
  * @dma_err_task: Work structure to process Axi DMA errors
  * @tx_irq:	Axidma TX IRQ number
  * @rx_irq:	Axidma RX IRQ number
@@ -441,6 +401,19 @@ struct skbuf_dma_descriptor {
  * @phy_mode:	Phy type to identify between MII/GMII/RGMII/SGMII/1000 Base-X
  * @options:	AxiEthernet option word
  * @features:	Stores the extended features supported by the axienet hw
+ * @tx_bd_v:	Virtual address of the TX buffer descriptor ring
+ * @tx_bd_p:	Physical address(start address) of the TX buffer descr. ring
+ * @tx_bd_num:	Size of TX buffer descriptor ring
+ * @rx_bd_v:	Virtual address of the RX buffer descriptor ring
+ * @rx_bd_p:	Physical address(start address) of the RX buffer descr. ring
+ * @rx_bd_num:	Size of RX buffer descriptor ring
+ * @tx_bd_ci:	Stores the index of the Tx buffer descriptor in the ring being
+ *		accessed currently. Used while alloc. BDs before a TX starts
+ * @tx_bd_tail:	Stores the index of the Tx buffer descriptor in the ring being
+ *		accessed currently. Used while processing BDs after the TX
+ *		completed.
+ * @rx_bd_ci:	Stores the index of the Rx buffer descriptor in the ring being
+ *		accessed currently.
  * @max_frm_size: Stores the maximum size of the frame that can be that
  *		  Txed/Rxed in the existing hardware. If jumbo option is
  *		  supported, the maximum frame size would be 9k. Else it is
@@ -449,28 +422,18 @@ struct skbuf_dma_descriptor {
  * @csum_offload_on_tx_path:	Stores the checksum selection on TX side.
  * @csum_offload_on_rx_path:	Stores the checksum selection on RX side.
  * @coalesce_count_rx:	Store the irq coalesce on RX side.
- * @coalesce_usec_rx:	IRQ coalesce delay for RX
  * @coalesce_count_tx:	Store the irq coalesce on TX side.
- * @coalesce_usec_tx:	IRQ coalesce delay for TX
- * @use_dmaengine: flag to check dmaengine framework usage.
- * @tx_chan:	TX DMA channel.
- * @rx_chan:	RX DMA channel.
- * @tx_skb_ring: Pointer to TX skb ring buffer array.
- * @rx_skb_ring: Pointer to RX skb ring buffer array.
- * @tx_ring_head: TX skb ring buffer head index.
- * @tx_ring_tail: TX skb ring buffer tail index.
- * @rx_ring_head: RX skb ring buffer head index.
- * @rx_ring_tail: RX skb ring buffer tail index.
  */
 struct axienet_local {
 	struct net_device *ndev;
 	struct device *dev;
 
+	struct device_node *phy_node;
+
 	struct phylink *phylink;
 	struct phylink_config phylink_config;
 
 	struct mdio_device *pcs_phy;
-	struct phylink_pcs pcs;
 
 	bool switch_x_sgmii;
 
@@ -484,27 +447,6 @@ struct axienet_local {
 	void __iomem *regs;
 	void __iomem *dma_regs;
 
-	struct napi_struct napi_rx;
-	u32 rx_dma_cr;
-	struct axidma_bd *rx_bd_v;
-	dma_addr_t rx_bd_p;
-	u32 rx_bd_num;
-	u32 rx_bd_ci;
-	u64_stats_t rx_packets;
-	u64_stats_t rx_bytes;
-	struct u64_stats_sync rx_stat_sync;
-
-	struct napi_struct napi_tx;
-	u32 tx_dma_cr;
-	struct axidma_bd *tx_bd_v;
-	dma_addr_t tx_bd_p;
-	u32 tx_bd_num;
-	u32 tx_bd_ci;
-	u32 tx_bd_tail;
-	u64_stats_t tx_packets;
-	u64_stats_t tx_bytes;
-	struct u64_stats_sync tx_stat_sync;
-
 	struct work_struct dma_err_task;
 
 	int tx_irq;
@@ -515,6 +457,16 @@ struct axienet_local {
 	u32 options;
 	u32 features;
 
+	struct axidma_bd *tx_bd_v;
+	dma_addr_t tx_bd_p;
+	u32 tx_bd_num;
+	struct axidma_bd *rx_bd_v;
+	dma_addr_t rx_bd_p;
+	u32 rx_bd_num;
+	u32 tx_bd_ci;
+	u32 tx_bd_tail;
+	u32 rx_bd_ci;
+
 	u32 max_frm_size;
 	u32 rxmem;
 
@@ -522,18 +474,7 @@ struct axienet_local {
 	int csum_offload_on_rx_path;
 
 	u32 coalesce_count_rx;
-	u32 coalesce_usec_rx;
 	u32 coalesce_count_tx;
-	u32 coalesce_usec_tx;
-	u8  use_dmaengine;
-	struct dma_chan *tx_chan;
-	struct dma_chan *rx_chan;
-	struct skbuf_dma_descriptor **tx_skb_ring;
-	struct skbuf_dma_descriptor **rx_skb_ring;
-	int tx_ring_head;
-	int tx_ring_tail;
-	int rx_ring_head;
-	int rx_ring_tail;
 };
 
 /**
@@ -594,58 +535,9 @@ static inline void axienet_iow(struct axienet_local *lp, off_t offset,
 	iowrite32(value, lp->regs + offset);
 }
 
-/**
- * axienet_dma_out32 - Memory mapped Axi DMA register write.
- * @lp:		Pointer to axienet local structure
- * @reg:	Address offset from the base address of the Axi DMA core
- * @value:	Value to be written into the Axi DMA register
- *
- * This function writes the desired value into the corresponding Axi DMA
- * register.
- */
-
-static inline void axienet_dma_out32(struct axienet_local *lp,
-				     off_t reg, u32 value)
-{
-	iowrite32(value, lp->dma_regs + reg);
-}
-
-#if defined(CONFIG_64BIT) && defined(iowrite64)
-/**
- * axienet_dma_out64 - Memory mapped Axi DMA register write.
- * @lp:		Pointer to axienet local structure
- * @reg:	Address offset from the base address of the Axi DMA core
- * @value:	Value to be written into the Axi DMA register
- *
- * This function writes the desired value into the corresponding Axi DMA
- * register.
- */
-static inline void axienet_dma_out64(struct axienet_local *lp,
-				     off_t reg, u64 value)
-{
-	iowrite64(value, lp->dma_regs + reg);
-}
-
-static inline void axienet_dma_out_addr(struct axienet_local *lp, off_t reg,
-					dma_addr_t addr)
-{
-	if (lp->features & XAE_FEATURE_DMA_64BIT)
-		axienet_dma_out64(lp, reg, addr);
-	else
-		axienet_dma_out32(lp, reg, lower_32_bits(addr));
-}
-
-#else /* CONFIG_64BIT */
-
-static inline void axienet_dma_out_addr(struct axienet_local *lp, off_t reg,
-					dma_addr_t addr)
-{
-	axienet_dma_out32(lp, reg, lower_32_bits(addr));
-}
-
-#endif /* CONFIG_64BIT */
-
 /* Function prototypes visible in xilinx_axienet_mdio.c for other files */
+int axienet_mdio_enable(struct axienet_local *lp);
+void axienet_mdio_disable(struct axienet_local *lp);
 int axienet_mdio_setup(struct axienet_local *lp);
 void axienet_mdio_teardown(struct axienet_local *lp);
 

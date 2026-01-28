@@ -66,7 +66,7 @@ struct jmb38x_ms_host {
 struct jmb38x_ms {
 	struct pci_dev        *pdev;
 	int                   host_cnt;
-	struct memstick_host  *hosts[] __counted_by(host_cnt);
+	struct memstick_host  *hosts[];
 };
 
 #define BLOCK_COUNT_MASK       0xffff0000
@@ -927,7 +927,8 @@ static int jmb38x_ms_probe(struct pci_dev *pdev,
 		goto err_out_int;
 	}
 
-	jm = kzalloc(struct_size(jm, hosts, cnt), GFP_KERNEL);
+	jm = kzalloc(sizeof(struct jmb38x_ms)
+		     + cnt * sizeof(struct memstick_host *), GFP_KERNEL);
 	if (!jm) {
 		rc = -ENOMEM;
 		goto err_out_int;

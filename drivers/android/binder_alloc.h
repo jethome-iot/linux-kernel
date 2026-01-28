@@ -9,7 +9,7 @@
 #include <linux/rbtree.h>
 #include <linux/list.h>
 #include <linux/mm.h>
-#include <linux/spinlock.h>
+#include <linux/rtmutex.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
 #include <linux/list_lru.h>
@@ -54,7 +54,7 @@ struct binder_buffer {
 	size_t data_size;
 	size_t offsets_size;
 	size_t extra_buffers_size;
-	unsigned long user_data;
+	void __user *user_data;
 	int pid;
 };
 
@@ -74,8 +74,10 @@ struct binder_lru_page {
  * struct binder_alloc - per-binder proc state for binder allocator
  * @lock:               protects binder_alloc fields
  * @vma:                vm_area_struct passed to mmap_handler
- *                      (invariant after mmap)
- * @mm:                 copy of task->mm (invariant after open)
+ *                      (invarient after mmap)
+ * @tsk:                tid for task that called init for this proc
+ *                      (invariant after init)
+ * @vma_vm_mm:          copy of vma->vm_mm (invarient after mmap)
  * @buffer:             base of per-proc address space mapped via mmap
  * @buffers:            list of all buffers for this proc
  * @free_buffers:       rb tree of buffers available for allocation
@@ -96,16 +98,17 @@ struct binder_lru_page {
  * struct binder_buffer objects used to track the user buffers
  */
 struct binder_alloc {
-	spinlock_t lock;
+	struct mutex mutex;
 	struct vm_area_struct *vma;
-	struct mm_struct *mm;
-	unsigned long buffer;
+	struct mm_struct *vma_vm_mm;
+	void __user *buffer;
 	struct list_head buffers;
 	struct rb_root free_buffers;
 	struct rb_root allocated_buffers;
 	size_t free_async_space;
 	struct binder_lru_page *pages;
 	size_t buffer_size;
+	uint32_t buffer_free;
 	int pid;
 	size_t pages_high;
 	bool oneway_spam_detected;
@@ -141,23 +144,6 @@ void binder_alloc_print_allocated(struct seq_file *m,
 				  struct binder_alloc *alloc);
 void binder_alloc_print_pages(struct seq_file *m,
 			      struct binder_alloc *alloc);
-
-/**
- * binder_alloc_get_free_async_space() - get free space available for async
- * @alloc:	binder_alloc for this proc
- *
- * Return:	the bytes remaining in the address-space for async transactions
- */
-static inline size_t
-binder_alloc_get_free_async_space(struct binder_alloc *alloc)
-{
-	size_t free_async_space;
-
-	spin_lock(&alloc->lock);
-	free_async_space = alloc->free_async_space;
-	spin_unlock(&alloc->lock);
-	return free_async_space;
-}
 
 unsigned long
 binder_alloc_copy_user_to_buffer(struct binder_alloc *alloc,

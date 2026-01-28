@@ -153,7 +153,6 @@ static int shift_state = 0;
 
 static unsigned int ledstate = -1U;			/* undefined */
 static unsigned char ledioctl;
-static bool vt_switch;
 
 /*
  * Notifier list for console keyboard events
@@ -415,12 +414,6 @@ void vt_set_leds_compute_shiftstate(void)
 {
 	unsigned long flags;
 
-	/*
-	 * When VT is switched, the keyboard led needs to be set once.
-	 * Ensure that after the switch is completed, the state of the
-	 * keyboard LED is consistent with the state of the keyboard lock.
-	 */
-	vt_switch = true;
 	set_leds();
 
 	spin_lock_irqsave(&kbd_event_lock, flags);
@@ -606,7 +599,7 @@ static void fn_scroll_back(struct vc_data *vc)
 
 static void fn_show_mem(struct vc_data *vc)
 {
-	show_mem();
+	show_mem(0, NULL);
 }
 
 static void fn_show_state(struct vc_data *vc)
@@ -1262,18 +1255,13 @@ static void kbd_bh(struct tasklet_struct *unused)
 	leds |= (unsigned int)kbd->lockstate << 8;
 	spin_unlock_irqrestore(&led_lock, flags);
 
-	if (vt_switch) {
-		ledstate = ~leds;
-		vt_switch = false;
-	}
-
 	if (leds != ledstate) {
 		kbd_propagate_led_state(ledstate, leds);
 		ledstate = leds;
 	}
 }
 
-#if defined(CONFIG_X86) || defined(CONFIG_ALPHA) ||\
+#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(CONFIG_ALPHA) ||\
     defined(CONFIG_MIPS) || defined(CONFIG_PPC) || defined(CONFIG_SPARC) ||\
     defined(CONFIG_PARISC) || defined(CONFIG_SUPERH) ||\
     (defined(CONFIG_ARM) && defined(CONFIG_KEYBOARD_ATKBD) && !defined(CONFIG_ARCH_RPC))
@@ -1772,10 +1760,12 @@ int vt_do_diacrit(unsigned int cmd, void __user *udp, int perm)
 			return -EINVAL;
 
 		if (ct) {
-			dia = memdup_array_user(a->kbdiacr,
-						ct, sizeof(struct kbdiacr));
+
+			dia = memdup_user(a->kbdiacr,
+					sizeof(struct kbdiacr) * ct);
 			if (IS_ERR(dia))
 				return PTR_ERR(dia);
+
 		}
 
 		spin_lock_irqsave(&kbd_event_lock, flags);
@@ -1809,8 +1799,8 @@ int vt_do_diacrit(unsigned int cmd, void __user *udp, int perm)
 			return -EINVAL;
 
 		if (ct) {
-			buf = memdup_array_user(a->kbdiacruc,
-						ct, sizeof(struct kbdiacruc));
+			buf = memdup_user(a->kbdiacruc,
+					  ct * sizeof(struct kbdiacruc));
 			if (IS_ERR(buf))
 				return PTR_ERR(buf);
 		} 
@@ -2077,15 +2067,12 @@ int vt_do_kdgkb_ioctl(int cmd, struct kbsentry __user *user_kdgkb, int perm)
 			return -ENOMEM;
 
 		spin_lock_irqsave(&func_buf_lock, flags);
-		len = strscpy(kbs, func_table[kb_func] ? : "", len);
+		len = strlcpy(kbs, func_table[kb_func] ? : "", len);
 		spin_unlock_irqrestore(&func_buf_lock, flags);
 
-		if (len < 0) {
-			ret = -ENOSPC;
-			break;
-		}
 		ret = copy_to_user(user_kdgkb->kb_string, kbs, len + 1) ?
 			-EFAULT : 0;
+
 		break;
 	}
 	case KDSKBSENT:

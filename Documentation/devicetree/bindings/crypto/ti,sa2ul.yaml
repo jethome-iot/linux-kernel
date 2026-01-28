@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+# SPDX-License-Identifier: (GPL-2.0-only or BSD-2-Clause)
 %YAML 1.2
 ---
 $id: http://devicetree.org/schemas/crypto/ti,sa2ul.yaml#
@@ -15,7 +15,6 @@ properties:
       - ti,j721e-sa2ul
       - ti,am654-sa2ul
       - ti,am64-sa2ul
-      - ti,am62-sa3ul
 
   reg:
     maxItems: 1
@@ -26,14 +25,16 @@ properties:
   dmas:
     items:
       - description: TX DMA Channel
-      - description: 'RX DMA Channel #1'
-      - description: 'RX DMA Channel #2'
+      - description: RX DMA Channel #1
+      - description: RX DMA Channel #2
 
   dma-names:
     items:
       - const: tx
       - const: rx1
       - const: rx2
+
+  dma-coherent: true
 
   "#address-cells":
     const: 2
@@ -66,21 +67,19 @@ patternProperties:
 required:
   - compatible
   - reg
+  - power-domains
   - dmas
   - dma-names
 
-allOf:
-  - if:
-      properties:
-        compatible:
-          contains:
-            const: ti,am62-sa3ul
-    then:
-      properties:
-        power-domains: false
-    else:
-      required:
-        - power-domains
+if:
+  properties:
+    compatible:
+      enum:
+        - ti,j721e-sa2ul
+        - ti,am654-sa2ul
+then:
+  required:
+    - dma-coherent
 
 additionalProperties: false
 
@@ -95,4 +94,5 @@ examples:
         dmas = <&main_udmap 0xc000>, <&main_udmap 0x4000>,
                <&main_udmap 0x4001>;
         dma-names = "tx", "rx1", "rx2";
+        dma-coherent;
     };

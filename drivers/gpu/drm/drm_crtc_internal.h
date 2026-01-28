@@ -56,9 +56,7 @@ struct drm_plane;
 struct drm_plane_state;
 struct drm_property;
 struct edid;
-struct fwnode_handle;
 struct kref;
-struct seq_file;
 struct work_struct;
 
 /* drm_crtc.c */
@@ -188,7 +186,6 @@ int drm_connector_set_obj_prop(struct drm_mode_object *obj,
 int drm_connector_create_standard_properties(struct drm_device *dev);
 const char *drm_get_connector_force_name(enum drm_connector_force force);
 void drm_connector_free_work_fn(struct work_struct *work);
-struct drm_connector *drm_connector_find_by_fwnode(struct fwnode_handle *fwnode);
 
 /* IOCTL */
 int drm_connector_property_set_ioctl(struct drm_device *dev,
@@ -222,8 +219,6 @@ int drm_mode_addfb2_ioctl(struct drm_device *dev,
 			  void *data, struct drm_file *file_priv);
 int drm_mode_rmfb_ioctl(struct drm_device *dev,
 			void *data, struct drm_file *file_priv);
-int drm_mode_closefb_ioctl(struct drm_device *dev,
-			   void *data, struct drm_file *file_priv);
 int drm_mode_getfb(struct drm_device *dev,
 		   void *data, struct drm_file *file_priv);
 int drm_mode_getfb2_ioctl(struct drm_device *dev,
@@ -234,7 +229,7 @@ int drm_mode_dirtyfb_ioctl(struct drm_device *dev,
 /* drm_atomic.c */
 #ifdef CONFIG_DEBUG_FS
 struct drm_minor;
-void drm_atomic_debugfs_init(struct drm_device *dev);
+void drm_atomic_debugfs_init(struct drm_minor *minor);
 #endif
 
 int __drm_atomic_helper_disable_plane(struct drm_plane *plane,
@@ -253,7 +248,7 @@ int drm_atomic_set_property(struct drm_atomic_state *state,
 			    struct drm_file *file_priv,
 			    struct drm_mode_object *obj,
 			    struct drm_property *prop,
-			    u64 prop_value, bool async_flip);
+			    uint64_t prop_value);
 int drm_atomic_get_property(struct drm_mode_object *obj,
 			    struct drm_property *property, uint64_t *val);
 
@@ -289,17 +284,6 @@ int drm_mode_page_flip_ioctl(struct drm_device *dev,
 
 /* drm_edid.c */
 void drm_mode_fixup_1366x768(struct drm_display_mode *mode);
-int drm_edid_override_show(struct drm_connector *connector, struct seq_file *m);
-int drm_edid_override_set(struct drm_connector *connector, const void *edid, size_t size);
-int drm_edid_override_reset(struct drm_connector *connector);
-
-/* drm_edid_load.c */
-#ifdef CONFIG_DRM_LOAD_EDID_FIRMWARE
-const struct drm_edid *drm_edid_load_firmware(struct drm_connector *connector);
-#else
-static inline const struct drm_edid *
-drm_edid_load_firmware(struct drm_connector *connector)
-{
-	return ERR_PTR(-ENOENT);
-}
-#endif
+void drm_reset_display_info(struct drm_connector *connector);
+u32 drm_add_display_info(struct drm_connector *connector, const struct edid *edid);
+void drm_update_tile_info(struct drm_connector *connector, const struct edid *edid);

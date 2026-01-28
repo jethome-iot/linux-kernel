@@ -1,5 +1,19 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// Copyright 2014 Cisco Systems, Inc.  All rights reserved.
+/*
+ * Copyright 2014 Cisco Systems, Inc.  All rights reserved.
+ *
+ * This program is free software; you may redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; version 2 of the License.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
 #include <linux/mempool.h>
 #include <linux/errno.h>
@@ -328,7 +342,7 @@ snic_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 		SNIC_HOST_ERR(shost, "Tgt %p id %d Not Ready.\n", tgt, tgt->id);
 		atomic64_inc(&snic->s_stats.misc.tgt_not_rdy);
 		sc->result = ret;
-		scsi_done(sc);
+		sc->scsi_done(sc);
 
 		return 0;
 	}
@@ -487,6 +501,7 @@ snic_process_icmnd_cmpl_status(struct snic *snic,
 			       struct scsi_cmnd *sc)
 {
 	u8 scsi_stat = icmnd_cmpl->scsi_status;
+	u64 xfer_len = 0;
 	int ret = 0;
 
 	/* Mark the IO as complete */
@@ -495,11 +510,15 @@ snic_process_icmnd_cmpl_status(struct snic *snic,
 	if (likely(cmpl_stat == SNIC_STAT_IO_SUCCESS)) {
 		sc->result = (DID_OK << 16) | scsi_stat;
 
+		xfer_len = scsi_bufflen(sc);
+
 		/* Update SCSI Cmd with resid value */
 		scsi_set_resid(sc, le32_to_cpu(icmnd_cmpl->resid));
 
-		if (icmnd_cmpl->flags & SNIC_ICMND_CMPL_UNDR_RUN)
+		if (icmnd_cmpl->flags & SNIC_ICMND_CMPL_UNDR_RUN) {
+			xfer_len -= le32_to_cpu(icmnd_cmpl->resid);
 			atomic64_inc(&snic->s_stats.misc.io_under_run);
+		}
 
 		if (icmnd_cmpl->scsi_status == SAM_STAT_TASK_SET_FULL)
 			atomic64_inc(&snic->s_stats.misc.qfull);
@@ -657,7 +676,8 @@ snic_icmnd_cmpl_handler(struct snic *snic, struct snic_fw_req *fwreq)
 		 SNIC_TRC_CMD(sc), SNIC_TRC_CMD_STATE_FLAGS(sc));
 
 
-	scsi_done(sc);
+	if (sc->scsi_done)
+		sc->scsi_done(sc);
 
 	snic_stats_update_io_cmpl(&snic->s_stats);
 } /* end of snic_icmnd_cmpl_handler */
@@ -835,12 +855,14 @@ snic_process_itmf_cmpl(struct snic *snic,
 
 		snic_release_req_buf(snic, rqi, sc);
 
-		SNIC_TRC(snic->shost->host_no, cmnd_id, (ulong) sc,
-			 jiffies_to_msecs(jiffies - start_time),
-			 (ulong) fwreq, SNIC_TRC_CMD(sc),
-			 SNIC_TRC_CMD_STATE_FLAGS(sc));
+		if (sc->scsi_done) {
+			SNIC_TRC(snic->shost->host_no, cmnd_id, (ulong) sc,
+				 jiffies_to_msecs(jiffies - start_time),
+				 (ulong) fwreq, SNIC_TRC_CMD(sc),
+				 SNIC_TRC_CMD_STATE_FLAGS(sc));
 
-		scsi_done(sc);
+			sc->scsi_done(sc);
+		}
 
 		break;
 
@@ -1453,7 +1475,7 @@ snic_abort_finish(struct snic *snic, struct scsi_cmnd *sc)
 		 * Call scsi_done to complete the IO.
 		 */
 		sc->result = (DID_ERROR << 16);
-		scsi_done(sc);
+		sc->scsi_done(sc);
 		break;
 
 	default:
@@ -1833,7 +1855,7 @@ snic_dr_clean_single_req(struct snic *snic,
 	snic_release_req_buf(snic, rqi, sc);
 
 	sc->result = (DID_ERROR << 16);
-	scsi_done(sc);
+	sc->scsi_done(sc);
 
 	ret = 0;
 
@@ -1850,7 +1872,7 @@ snic_dr_clean_pending_req(struct snic *snic, struct scsi_cmnd *lr_sc)
 {
 	struct scsi_device *lr_sdev = lr_sc->device;
 	u32 tag = 0;
-	int ret;
+	int ret = FAILED;
 
 	for (tag = 0; tag < snic->max_tag_id; tag++) {
 		if (tag == snic_cmd_tag(lr_sc))
@@ -1859,6 +1881,7 @@ snic_dr_clean_pending_req(struct snic *snic, struct scsi_cmnd *lr_sc)
 		ret = snic_dr_clean_single_req(snic, tag, lr_sdev);
 		if (ret) {
 			SNIC_HOST_ERR(snic->shost, "clean_err:tag = %d\n", tag);
+
 			goto clean_err;
 		}
 	}
@@ -1866,19 +1889,24 @@ snic_dr_clean_pending_req(struct snic *snic, struct scsi_cmnd *lr_sc)
 	schedule_timeout(msecs_to_jiffies(100));
 
 	/* Walk through all the cmds and check abts status. */
-	if (snic_is_abts_pending(snic, lr_sc))
-		goto clean_err;
+	if (snic_is_abts_pending(snic, lr_sc)) {
+		ret = FAILED;
 
+		goto clean_err;
+	}
+
+	ret = 0;
 	SNIC_SCSI_DBG(snic->shost, "clean_pending_req: Success.\n");
 
-	return 0;
+	return ret;
 
 clean_err:
+	ret = FAILED;
 	SNIC_HOST_ERR(snic->shost,
 		      "Failed to Clean Pending IOs on %s device.\n",
 		      dev_name(&lr_sdev->sdev_gendev));
 
-	return FAILED;
+	return ret;
 
 } /* end of snic_dr_clean_pending_req */
 
@@ -2472,12 +2500,14 @@ cleanup:
 		/* Update IO stats */
 		snic_stats_update_io_cmpl(&snic->s_stats);
 
-		SNIC_TRC(snic->shost->host_no, tag, (ulong) sc,
-			 jiffies_to_msecs(jiffies - st_time), 0,
-			 SNIC_TRC_CMD(sc),
-			 SNIC_TRC_CMD_STATE_FLAGS(sc));
+		if (sc->scsi_done) {
+			SNIC_TRC(snic->shost->host_no, tag, (ulong) sc,
+				 jiffies_to_msecs(jiffies - st_time), 0,
+				 SNIC_TRC_CMD(sc),
+				 SNIC_TRC_CMD_STATE_FLAGS(sc));
 
-		scsi_done(sc);
+			sc->scsi_done(sc);
+		}
 	}
 } /* end of snic_scsi_cleanup */
 

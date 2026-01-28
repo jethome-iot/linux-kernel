@@ -136,7 +136,7 @@ asmlinkage void __exception_irq_entry icoll_handle_irq(struct pt_regs *regs)
 
 	irqnr = __raw_readl(icoll_priv.stat);
 	__raw_writel(irqnr, icoll_priv.vector);
-	generic_handle_domain_irq(icoll_domain, irqnr);
+	handle_domain_irq(icoll_domain, irqnr, regs);
 }
 
 static int icoll_irq_domain_map(struct irq_domain *d, unsigned int virq,
@@ -201,7 +201,6 @@ static int __init icoll_of_init(struct device_node *np,
 	stmp_reset_block(icoll_priv.ctrl);
 
 	icoll_add_domain(np, ICOLL_NUM_IRQS);
-	set_handle_irq(icoll_handle_irq);
 
 	return 0;
 }

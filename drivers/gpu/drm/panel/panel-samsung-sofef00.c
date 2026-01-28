@@ -8,7 +8,9 @@
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/regulator/consumer.h>
+#include <linux/swab.h>
 #include <linux/backlight.h>
 
 #include <video/mipi_display.h>
@@ -23,6 +25,7 @@ struct sofef00_panel {
 	struct regulator *supply;
 	struct gpio_desc *reset_gpio;
 	const struct drm_display_mode *mode;
+	bool prepared;
 };
 
 static inline
@@ -30,6 +33,14 @@ struct sofef00_panel *to_sofef00_panel(struct drm_panel *panel)
 {
 	return container_of(panel, struct sofef00_panel, panel);
 }
+
+#define dsi_dcs_write_seq(dsi, seq...) do {				\
+		static const u8 d[] = { seq };				\
+		int ret;						\
+		ret = mipi_dsi_dcs_write_buffer(dsi, d, ARRAY_SIZE(d));	\
+		if (ret < 0)						\
+			return ret;					\
+	} while (0)
 
 static void sofef00_panel_reset(struct sofef00_panel *ctx)
 {
@@ -56,7 +67,7 @@ static int sofef00_panel_on(struct sofef00_panel *ctx)
 	}
 	usleep_range(10000, 11000);
 
-	mipi_dsi_dcs_write_seq(dsi, 0xf0, 0x5a, 0x5a);
+	dsi_dcs_write_seq(dsi, 0xf0, 0x5a, 0x5a);
 
 	ret = mipi_dsi_dcs_set_tear_on(dsi, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
 	if (ret < 0) {
@@ -64,13 +75,13 @@ static int sofef00_panel_on(struct sofef00_panel *ctx)
 		return ret;
 	}
 
-	mipi_dsi_dcs_write_seq(dsi, 0xf0, 0xa5, 0xa5);
-	mipi_dsi_dcs_write_seq(dsi, 0xf0, 0x5a, 0x5a);
-	mipi_dsi_dcs_write_seq(dsi, 0xb0, 0x07);
-	mipi_dsi_dcs_write_seq(dsi, 0xb6, 0x12);
-	mipi_dsi_dcs_write_seq(dsi, 0xf0, 0xa5, 0xa5);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
-	mipi_dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
+	dsi_dcs_write_seq(dsi, 0xf0, 0xa5, 0xa5);
+	dsi_dcs_write_seq(dsi, 0xf0, 0x5a, 0x5a);
+	dsi_dcs_write_seq(dsi, 0xb0, 0x07);
+	dsi_dcs_write_seq(dsi, 0xb6, 0x12);
+	dsi_dcs_write_seq(dsi, 0xf0, 0xa5, 0xa5);
+	dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
+	dsi_dcs_write_seq(dsi, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
 
 	ret = mipi_dsi_dcs_set_display_on(dsi);
 	if (ret < 0) {
@@ -112,6 +123,9 @@ static int sofef00_panel_prepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
+	if (ctx->prepared)
+		return 0;
+
 	ret = regulator_enable(ctx->supply);
 	if (ret < 0) {
 		dev_err(dev, "Failed to enable regulator: %d\n", ret);
@@ -127,6 +141,7 @@ static int sofef00_panel_prepare(struct drm_panel *panel)
 		return ret;
 	}
 
+	ctx->prepared = true;
 	return 0;
 }
 
@@ -136,12 +151,16 @@ static int sofef00_panel_unprepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
+	if (!ctx->prepared)
+		return 0;
+
 	ret = sofef00_panel_off(ctx);
 	if (ret < 0)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
 	regulator_disable(ctx->supply);
 
+	ctx->prepared = false;
 	return 0;
 }
 
@@ -202,9 +221,13 @@ static int sofef00_panel_bl_update_status(struct backlight_device *bl)
 {
 	struct mipi_dsi_device *dsi = bl_get_data(bl);
 	int err;
-	u16 brightness = (u16)backlight_get_brightness(bl);
+	u16 brightness;
 
-	err = mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
+	brightness = (u16)backlight_get_brightness(bl);
+	// This panel needs the high and low bytes swapped for the brightness value
+	brightness = __swab16(brightness);
+
+	err = mipi_dsi_dcs_set_display_brightness(dsi, brightness);
 	if (err < 0)
 		return err;
 
@@ -247,14 +270,18 @@ static int sofef00_panel_probe(struct mipi_dsi_device *dsi)
 	}
 
 	ctx->supply = devm_regulator_get(dev, "vddio");
-	if (IS_ERR(ctx->supply))
-		return dev_err_probe(dev, PTR_ERR(ctx->supply),
-				     "Failed to get vddio regulator\n");
+	if (IS_ERR(ctx->supply)) {
+		ret = PTR_ERR(ctx->supply);
+		dev_err(dev, "Failed to get vddio regulator: %d\n", ret);
+		return ret;
+	}
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(ctx->reset_gpio))
-		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
-				     "Failed to get reset-gpios\n");
+	if (IS_ERR(ctx->reset_gpio)) {
+		ret = PTR_ERR(ctx->reset_gpio);
+		dev_warn(dev, "Failed to get reset-gpios: %d\n", ret);
+		return ret;
+	}
 
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
@@ -282,7 +309,7 @@ static int sofef00_panel_probe(struct mipi_dsi_device *dsi)
 	return 0;
 }
 
-static void sofef00_panel_remove(struct mipi_dsi_device *dsi)
+static int sofef00_panel_remove(struct mipi_dsi_device *dsi)
 {
 	struct sofef00_panel *ctx = mipi_dsi_get_drvdata(dsi);
 	int ret;
@@ -292,6 +319,8 @@ static void sofef00_panel_remove(struct mipi_dsi_device *dsi)
 		dev_err(&dsi->dev, "Failed to detach from DSI host: %d\n", ret);
 
 	drm_panel_remove(&ctx->panel);
+
+	return 0;
 }
 
 static const struct of_device_id sofef00_panel_of_match[] = {

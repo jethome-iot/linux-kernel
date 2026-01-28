@@ -5,7 +5,6 @@
 
 #include <linux/sort.h>
 
-#include "intel_engine_regs.h"
 #include "intel_gt_clock_utils.h"
 
 #include "selftest_llc.h"
@@ -36,19 +35,6 @@ static int cmp_u32(const void *A, const void *B)
 		return 0;
 }
 
-static u32 read_timestamp(struct intel_engine_cs *engine)
-{
-	struct drm_i915_private *i915 = engine->i915;
-
-	/* On i965 the first read tends to give a stale value */
-	ENGINE_READ_FW(engine, RING_TIMESTAMP);
-
-	if (GRAPHICS_VER(i915) == 5 || IS_G4X(i915))
-		return ENGINE_READ_FW(engine, RING_TIMESTAMP_UDW);
-	else
-		return ENGINE_READ_FW(engine, RING_TIMESTAMP);
-}
-
 static void measure_clocks(struct intel_engine_cs *engine,
 			   u32 *out_cycles, ktime_t *out_dt)
 {
@@ -57,15 +43,15 @@ static void measure_clocks(struct intel_engine_cs *engine,
 	int i;
 
 	for (i = 0; i < 5; i++) {
-		local_irq_disable();
-		cycles[i] = -read_timestamp(engine);
+		preempt_disable();
+		cycles[i] = -ENGINE_READ_FW(engine, RING_TIMESTAMP);
 		dt[i] = ktime_get();
 
 		udelay(1000);
 
-		cycles[i] += read_timestamp(engine);
 		dt[i] = ktime_sub(ktime_get(), dt[i]);
-		local_irq_enable();
+		cycles[i] += ENGINE_READ_FW(engine, RING_TIMESTAMP);
+		preempt_enable();
 	}
 
 	/* Use the median of both cycle/dt; close enough */
@@ -81,7 +67,6 @@ static int live_gt_clocks(void *arg)
 	struct intel_gt *gt = arg;
 	struct intel_engine_cs *engine;
 	enum intel_engine_id id;
-	intel_wakeref_t wakeref;
 	int err = 0;
 
 	if (!gt->clock_frequency) { /* unknown */
@@ -92,7 +77,26 @@ static int live_gt_clocks(void *arg)
 	if (GRAPHICS_VER(gt->i915) < 4) /* Any CS_TIMESTAMP? */
 		return 0;
 
-	wakeref = intel_gt_pm_get(gt);
+	if (GRAPHICS_VER(gt->i915) == 5)
+		/*
+		 * XXX CS_TIMESTAMP low dword is dysfunctional?
+		 *
+		 * Ville's experiments indicate the high dword still works,
+		 * but at a correspondingly reduced frequency.
+		 */
+		return 0;
+
+	if (GRAPHICS_VER(gt->i915) == 4)
+		/*
+		 * XXX CS_TIMESTAMP appears gibberish
+		 *
+		 * Ville's experiments indicate that it mostly appears 'stuck'
+		 * in that we see the register report the same cycle count
+		 * for a couple of reads.
+		 */
+		return 0;
+
+	intel_gt_pm_get(gt);
 	intel_uncore_forcewake_get(gt->uncore, FORCEWAKE_ALL);
 
 	for_each_engine(engine, gt, id) {
@@ -129,7 +133,7 @@ static int live_gt_clocks(void *arg)
 	}
 
 	intel_uncore_forcewake_put(gt->uncore, FORCEWAKE_ALL);
-	intel_gt_pm_put(gt, wakeref);
+	intel_gt_pm_put(gt);
 
 	return err;
 }
@@ -189,10 +193,10 @@ int intel_gt_pm_live_selftests(struct drm_i915_private *i915)
 		SUBTEST(live_gt_resume),
 	};
 
-	if (intel_gt_is_wedged(to_gt(i915)))
+	if (intel_gt_is_wedged(&i915->gt))
 		return 0;
 
-	return intel_gt_live_subtests(tests, to_gt(i915));
+	return intel_gt_live_subtests(tests, &i915->gt);
 }
 
 int intel_gt_pm_late_selftests(struct drm_i915_private *i915)
@@ -206,8 +210,8 @@ int intel_gt_pm_late_selftests(struct drm_i915_private *i915)
 		SUBTEST(live_rc6_ctx_wa),
 	};
 
-	if (intel_gt_is_wedged(to_gt(i915)))
+	if (intel_gt_is_wedged(&i915->gt))
 		return 0;
 
-	return intel_gt_live_subtests(tests, to_gt(i915));
+	return intel_gt_live_subtests(tests, &i915->gt);
 }

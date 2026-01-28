@@ -82,13 +82,9 @@ struct zoned_disk_info {
 };
 
 struct scsi_disk {
+	struct scsi_driver *driver;	/* always &sd_template */
 	struct scsi_device *device;
-
-	/*
-	 * disk_dev is used to show attributes in /sys/class/scsi_disk/,
-	 * but otherwise not really needed.  Do not use for refcounting.
-	 */
-	struct device	disk_dev;
+	struct device	dev;
 	struct gendisk	*disk;
 	struct opal_dev *opal_dev;
 #ifdef CONFIG_BLK_DEV_ZONED
@@ -114,7 +110,6 @@ struct scsi_disk {
 	atomic_t	openers;
 	sector_t	capacity;	/* size in logical blocks */
 	int		max_retries;
-	u32		min_xfer_blocks;
 	u32		max_xfer_blocks;
 	u32		opt_xfer_blocks;
 	u32		max_ws_blocks;
@@ -130,8 +125,6 @@ struct scsi_disk {
 	u8		protection_type;/* Data Integrity Field */
 	u8		provisioning_mode;
 	u8		zeroing_mode;
-	u8		nr_actuators;		/* Number of actuators */
-	bool		suspended;	/* Disk is suspended (stopped) */
 	unsigned	ATO : 1;	/* state of disk ATO bit */
 	unsigned	cache_override : 1; /* temp override of WCE,RCD */
 	unsigned	WCE : 1;	/* state of disk WCE bit */
@@ -151,12 +144,15 @@ struct scsi_disk {
 	unsigned	urswrz : 1;
 	unsigned	security : 1;
 	unsigned	ignore_medium_access_errors : 1;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
-#define to_scsi_disk(obj) container_of(obj, struct scsi_disk, disk_dev)
+#define to_scsi_disk(obj) container_of(obj,struct scsi_disk,dev)
 
 static inline struct scsi_disk *scsi_disk(struct gendisk *disk)
 {
-	return disk->private_data;
+	return container_of(disk->private_data, struct scsi_disk, driver);
 }
 
 #define sd_printk(prefix, sdsk, fmt, a...)				\
@@ -242,7 +238,7 @@ static inline int sd_is_zoned(struct scsi_disk *sdkp)
 
 #ifdef CONFIG_BLK_DEV_ZONED
 
-void sd_zbc_free_zone_info(struct scsi_disk *sdkp);
+void sd_zbc_release_disk(struct scsi_disk *sdkp);
 int sd_zbc_read_zones(struct scsi_disk *sdkp, u8 buf[SD_BUF_SIZE]);
 int sd_zbc_revalidate_zones(struct scsi_disk *sdkp);
 blk_status_t sd_zbc_setup_zone_mgmt_cmnd(struct scsi_cmnd *cmd,
@@ -257,7 +253,7 @@ blk_status_t sd_zbc_prepare_zone_append(struct scsi_cmnd *cmd, sector_t *lba,
 
 #else /* CONFIG_BLK_DEV_ZONED */
 
-static inline void sd_zbc_free_zone_info(struct scsi_disk *sdkp) {}
+static inline void sd_zbc_release_disk(struct scsi_disk *sdkp) {}
 
 static inline int sd_zbc_read_zones(struct scsi_disk *sdkp, u8 buf[SD_BUF_SIZE])
 {

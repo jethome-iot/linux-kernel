@@ -9,6 +9,7 @@
 
 #include <linux/types.h>
 #include <linux/module.h>
+#include <linux/ip.h>
 #include <linux/in.h>
 #include <net/ip.h>
 #include <net/sock.h>
@@ -39,16 +40,15 @@ int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len
 	saddr = inet->inet_saddr;
 	if (ipv4_is_multicast(usin->sin_addr.s_addr)) {
 		if (!oif || netif_index_is_l3_master(sock_net(sk), oif))
-			oif = READ_ONCE(inet->mc_index);
+			oif = inet->mc_index;
 		if (!saddr)
-			saddr = READ_ONCE(inet->mc_addr);
-	} else if (!oif) {
-		oif = READ_ONCE(inet->uc_index);
+			saddr = inet->mc_addr;
 	}
 	fl4 = &inet->cork.fl.u.ip4;
-	rt = ip_route_connect(fl4, usin->sin_addr.s_addr, saddr, oif,
-			      sk->sk_protocol, inet->inet_sport,
-			      usin->sin_port, sk);
+	rt = ip_route_connect(fl4, usin->sin_addr.s_addr, saddr,
+			      RT_CONN_FLAGS(sk), oif,
+			      sk->sk_protocol,
+			      inet->inet_sport, usin->sin_port, sk);
 	if (IS_ERR(rt)) {
 		err = PTR_ERR(rt);
 		if (err == -ENETUNREACH)
@@ -73,7 +73,7 @@ int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len
 	reuseport_has_conns_set(sk);
 	sk->sk_state = TCP_ESTABLISHED;
 	sk_set_txhash(sk);
-	atomic_set(&inet->inet_id, get_random_u16());
+	inet->inet_id = prandom_u32();
 
 	sk_dst_set(sk, &rt->dst);
 	err = 0;

@@ -27,8 +27,6 @@
 #include "dispnv04/hw.h"
 #include "nouveau_encoder.h"
 
-#include <subdev/gsp.h>
-
 #include <linux/io-mapping.h>
 #include <linux/firmware.h>
 
@@ -1803,8 +1801,6 @@ parse_dcb_entry(struct drm_device *dev, void *data, int idx, u8 *outp)
 			ret = parse_dcb20_entry(dev, dcb, conn, conf, entry);
 		else
 			ret = parse_dcb15_entry(dev, dcb, conn, conf, entry);
-		entry->id = idx;
-
 		if (!ret)
 			return 1; /* stop parsing */
 
@@ -2049,6 +2045,7 @@ nouveau_run_vbios_init(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	struct nvbios *bios = &drm->vbios;
+	int ret = 0;
 
 	/* Reset the BIOS head to 0. */
 	bios->state.crtchead = 0;
@@ -2061,7 +2058,7 @@ nouveau_run_vbios_init(struct drm_device *dev)
 		bios->fp.lvds_init_run = false;
 	}
 
-	return 0;
+	return ret;
 }
 
 static bool
@@ -2089,18 +2086,15 @@ nouveau_bios_init(struct drm_device *dev)
 	int ret;
 
 	/* only relevant for PCI devices */
-	if (!dev_is_pci(dev->dev) ||
-	    nvkm_gsp_rm(nvxx_device(&drm->client.device)->gsp))
+	if (!dev_is_pci(dev->dev))
 		return 0;
 
 	if (!NVInitVBIOS(dev))
 		return -ENODEV;
 
-	if (drm->client.device.info.family < NV_DEVICE_INFO_V0_TESLA) {
-		ret = parse_dcb_table(dev, bios);
-		if (ret)
-			return ret;
-	}
+	ret = parse_dcb_table(dev, bios);
+	if (ret)
+		return ret;
 
 	if (!bios->major_version)	/* we don't run version 0 bios */
 		return 0;

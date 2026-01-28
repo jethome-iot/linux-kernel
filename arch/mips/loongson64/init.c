@@ -103,9 +103,6 @@ void __init szmem(unsigned int node)
 	if (loongson_sysconf.vgabios_addr)
 		memblock_reserve(virt_to_phys((void *)loongson_sysconf.vgabios_addr),
 				SZ_256K);
-	/* set nid for reserved memory */
-	memblock_set_node((u64)node << 44, (u64)(node + 1) << 44,
-			&memblock.reserved, node);
 }
 
 #ifndef CONFIG_NUMA
@@ -197,7 +194,6 @@ static __init void reserve_pio_range(void)
 
 		if (of_range_parser_init(&parser, np)) {
 			pr_info("Failed to parse resources.\n");
-			of_node_put(np);
 			break;
 		}
 

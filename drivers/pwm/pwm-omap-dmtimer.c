@@ -37,6 +37,7 @@
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <clocksource/timer-ti-dm.h>
@@ -54,6 +55,7 @@
  * struct pwm_omap_dmtimer_chip - Structure representing a pwm chip
  *				  corresponding to omap dmtimer.
  * @chip:		PWM chip structure representing PWM controller
+ * @mutex:		Mutex to protect pwm apply state
  * @dm_timer:		Pointer to omap dm timer.
  * @pdata:		Pointer to omap dm timer ops.
  * @dm_timer_pdev:	Pointer to omap dm timer platform device
@@ -61,6 +63,7 @@
 struct pwm_omap_dmtimer_chip {
 	struct pwm_chip chip;
 	/* Mutex to protect pwm apply state */
+	struct mutex mutex;
 	struct omap_dm_timer *dm_timer;
 	const struct omap_dm_timer_ops *pdata;
 	struct platform_device *dm_timer_pdev;
@@ -274,11 +277,13 @@ static int pwm_omap_dmtimer_apply(struct pwm_chip *chip,
 				  const struct pwm_state *state)
 {
 	struct pwm_omap_dmtimer_chip *omap = to_pwm_omap_dmtimer_chip(chip);
-	int ret;
+	int ret = 0;
+
+	mutex_lock(&omap->mutex);
 
 	if (pwm_omap_dmtimer_is_enabled(omap) && !state->enabled) {
 		omap->pdata->stop(omap->dm_timer);
-		return 0;
+		goto unlock_mutex;
 	}
 
 	if (pwm_omap_dmtimer_polarity(omap) != state->polarity)
@@ -287,7 +292,7 @@ static int pwm_omap_dmtimer_apply(struct pwm_chip *chip,
 	ret = pwm_omap_dmtimer_config(chip, pwm, state->duty_cycle,
 				      state->period);
 	if (ret)
-		return ret;
+		goto unlock_mutex;
 
 	if (!pwm_omap_dmtimer_is_enabled(omap) && state->enabled) {
 		omap->pdata->set_pwm(omap->dm_timer,
@@ -298,11 +303,15 @@ static int pwm_omap_dmtimer_apply(struct pwm_chip *chip,
 		pwm_omap_dmtimer_start(omap);
 	}
 
-	return 0;
+unlock_mutex:
+	mutex_unlock(&omap->mutex);
+
+	return ret;
 }
 
 static const struct pwm_ops pwm_omap_dmtimer_ops = {
 	.apply = pwm_omap_dmtimer_apply,
+	.owner = THIS_MODULE,
 };
 
 static int pwm_omap_dmtimer_probe(struct platform_device *pdev)
@@ -396,6 +405,8 @@ static int pwm_omap_dmtimer_probe(struct platform_device *pdev)
 	omap->chip.ops = &pwm_omap_dmtimer_ops;
 	omap->chip.npwm = 1;
 
+	mutex_init(&omap->mutex);
+
 	ret = pwmchip_add(&omap->chip);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to register PWM\n");
@@ -430,7 +441,7 @@ err_find_timer_pdev:
 	return ret;
 }
 
-static void pwm_omap_dmtimer_remove(struct platform_device *pdev)
+static int pwm_omap_dmtimer_remove(struct platform_device *pdev)
 {
 	struct pwm_omap_dmtimer_chip *omap = platform_get_drvdata(pdev);
 
@@ -442,6 +453,10 @@ static void pwm_omap_dmtimer_remove(struct platform_device *pdev)
 	omap->pdata->free(omap->dm_timer);
 
 	put_device(&omap->dm_timer_pdev->dev);
+
+	mutex_destroy(&omap->mutex);
+
+	return 0;
 }
 
 static const struct of_device_id pwm_omap_dmtimer_of_match[] = {
@@ -453,10 +468,10 @@ MODULE_DEVICE_TABLE(of, pwm_omap_dmtimer_of_match);
 static struct platform_driver pwm_omap_dmtimer_driver = {
 	.driver = {
 		.name = "omap-dmtimer-pwm",
-		.of_match_table = pwm_omap_dmtimer_of_match,
+		.of_match_table = of_match_ptr(pwm_omap_dmtimer_of_match),
 	},
 	.probe = pwm_omap_dmtimer_probe,
-	.remove_new = pwm_omap_dmtimer_remove,
+	.remove	= pwm_omap_dmtimer_remove,
 };
 module_platform_driver(pwm_omap_dmtimer_driver);
 

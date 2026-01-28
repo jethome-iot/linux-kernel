@@ -75,9 +75,16 @@
 
 static inline uint8_t bbt_get_entry(struct nand_chip *chip, int block)
 {
+#if !IS_ENABLED(CONFIG_AMLOGIC_MTD_NAND)
 	uint8_t entry = chip->bbt[block >> BBT_ENTRY_SHIFT];
 	entry >>= (block & BBT_ENTRY_MASK) * 2;
 	return entry & BBT_ENTRY_MASK;
+#else
+	if (chip->bbt)
+		return	chip->bbt[block];
+
+	return 1;
+#endif
 }
 
 static inline void bbt_mark_entry(struct nand_chip *chip, int block,
@@ -313,7 +320,7 @@ static int scan_read_oob(struct nand_chip *this, uint8_t *buf, loff_t offs,
 			 size_t len)
 {
 	struct mtd_info *mtd = nand_to_mtd(this);
-	struct mtd_oob_ops ops = { };
+	struct mtd_oob_ops ops;
 	int res, ret = 0;
 
 	ops.mode = MTD_OPS_PLACE_OOB;
@@ -354,7 +361,7 @@ static int scan_write_bbt(struct nand_chip *this, loff_t offs, size_t len,
 			  uint8_t *buf, uint8_t *oob)
 {
 	struct mtd_info *mtd = nand_to_mtd(this);
-	struct mtd_oob_ops ops = { };
+	struct mtd_oob_ops ops;
 
 	ops.mode = MTD_OPS_PLACE_OOB;
 	ops.ooboffs = 0;
@@ -416,7 +423,7 @@ static int scan_block_fast(struct nand_chip *this, struct nand_bbt_descr *bd,
 {
 	struct mtd_info *mtd = nand_to_mtd(this);
 
-	struct mtd_oob_ops ops = { };
+	struct mtd_oob_ops ops;
 	int ret, page_offset;
 
 	ops.ooblen = mtd->oobsize;
@@ -756,7 +763,7 @@ static int write_bbt(struct nand_chip *this, uint8_t *buf,
 	uint8_t rcode = td->reserved_block_code;
 	size_t retlen, len = 0;
 	loff_t to;
-	struct mtd_oob_ops ops = { };
+	struct mtd_oob_ops ops;
 
 	ops.ooblen = mtd->oobsize;
 	ops.ooboffs = 0;
@@ -1454,10 +1461,7 @@ int nand_isbad_bbt(struct nand_chip *this, loff_t offs, int allowbbt)
 
 	pr_debug("nand_isbad_bbt(): bbt info for offs 0x%08x: (block %d) 0x%02x\n",
 		 (unsigned int)offs, block, res);
-
-	if (mtd_check_expert_analysis_mode())
-		return 0;
-
+#if !IS_ENABLED(CONFIG_AMLOGIC_MTD_NAND)
 	switch (res) {
 	case BBT_BLOCK_GOOD:
 		return 0;
@@ -1467,6 +1471,9 @@ int nand_isbad_bbt(struct nand_chip *this, loff_t offs, int allowbbt)
 		return allowbbt ? 0 : 1;
 	}
 	return 1;
+#else
+	return res ? 1 : 0;
+#endif
 }
 
 /**

@@ -7,6 +7,7 @@
  *
  * See kernel/stop_machine.c
  */
+#include "sched.h"
 
 #ifdef CONFIG_SMP
 static int
@@ -23,7 +24,7 @@ balance_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 #endif /* CONFIG_SMP */
 
 static void
-wakeup_preempt_stop(struct rq *rq, struct task_struct *p, int flags)
+check_preempt_curr_stop(struct rq *rq, struct task_struct *p, int flags)
 {
 	/* we're never preempted */
 }
@@ -70,7 +71,21 @@ static void yield_task_stop(struct rq *rq)
 
 static void put_prev_task_stop(struct rq *rq, struct task_struct *prev)
 {
-	update_curr_common(rq);
+	struct task_struct *curr = rq->curr;
+	u64 delta_exec;
+
+	delta_exec = rq_clock_task(rq) - curr->se.exec_start;
+	if (unlikely((s64)delta_exec < 0))
+		delta_exec = 0;
+
+	schedstat_set(curr->stats.exec_max,
+		      max(curr->stats.exec_max, delta_exec));
+
+	curr->se.sum_exec_runtime += delta_exec;
+	account_group_exec_runtime(curr, delta_exec);
+
+	curr->se.exec_start = rq_clock_task(rq);
+	cgroup_account_cputime(curr, delta_exec);
 }
 
 /*
@@ -109,7 +124,7 @@ DEFINE_SCHED_CLASS(stop) = {
 	.dequeue_task		= dequeue_task_stop,
 	.yield_task		= yield_task_stop,
 
-	.wakeup_preempt		= wakeup_preempt_stop,
+	.check_preempt_curr	= check_preempt_curr_stop,
 
 	.pick_next_task		= pick_next_task_stop,
 	.put_prev_task		= put_prev_task_stop,

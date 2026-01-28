@@ -43,12 +43,13 @@ static const struct regmap_config adau7118_regmap_config = {
 	.val_bits = 8,
 	.reg_defaults = adau7118_reg_defaults,
 	.num_reg_defaults = ARRAY_SIZE(adau7118_reg_defaults),
-	.cache_type = REGCACHE_MAPLE,
+	.cache_type = REGCACHE_RBTREE,
 	.max_register = ADAU7118_REG_RESET,
 	.volatile_reg = adau7118_volatile,
 };
 
-static int adau7118_probe_i2c(struct i2c_client *i2c)
+static int adau7118_probe_i2c(struct i2c_client *i2c,
+			      const struct i2c_device_id *id)
 {
 	struct regmap *map;
 

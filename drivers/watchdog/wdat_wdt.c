@@ -269,7 +269,7 @@ static int wdat_wdt_stop(struct watchdog_device *wdd)
 
 static int wdat_wdt_ping(struct watchdog_device *wdd)
 {
-	return wdat_wdt_run_action(to_wdat_wdt(wdd), ACPI_WDAT_RESET, wdd->timeout, NULL);
+	return wdat_wdt_run_action(to_wdat_wdt(wdd), ACPI_WDAT_RESET, 0, NULL);
 }
 
 static int wdat_wdt_set_timeout(struct watchdog_device *wdd,
@@ -301,12 +301,13 @@ static const struct watchdog_info wdat_wdt_info = {
 	.identity = "wdat_wdt",
 };
 
-static struct watchdog_ops wdat_wdt_ops = {
+static const struct watchdog_ops wdat_wdt_ops = {
 	.owner = THIS_MODULE,
 	.start = wdat_wdt_start,
 	.stop = wdat_wdt_stop,
 	.ping = wdat_wdt_ping,
 	.set_timeout = wdat_wdt_set_timeout,
+	.get_timeleft = wdat_wdt_get_timeleft,
 };
 
 static int wdat_wdt_probe(struct platform_device *pdev)
@@ -341,8 +342,8 @@ static int wdat_wdt_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	wdat->period = tbl->timer_period;
-	wdat->wdd.min_timeout = DIV_ROUND_UP(wdat->period * tbl->min_count, 1000);
-	wdat->wdd.max_timeout = wdat->period * tbl->max_count / 1000;
+	wdat->wdd.min_hw_heartbeat_ms = wdat->period * tbl->min_count;
+	wdat->wdd.max_hw_heartbeat_ms = wdat->period * tbl->max_count;
 	wdat->stopped_in_sleep = tbl->flags & ACPI_WDAT_STOPPED;
 	wdat->wdd.info = &wdat_wdt_info;
 	wdat->wdd.ops = &wdat_wdt_ops;
@@ -435,9 +436,6 @@ static int wdat_wdt_probe(struct platform_device *pdev)
 		list_add_tail(&instr->node, instructions);
 	}
 
-	if (wdat->instructions[ACPI_WDAT_GET_CURRENT_COUNTDOWN])
-		wdat_wdt_ops.get_timeleft = wdat_wdt_get_timeleft;
-
 	wdat_wdt_boot_status(wdat);
 	wdat_wdt_set_running(wdat);
 
@@ -452,7 +450,8 @@ static int wdat_wdt_probe(struct platform_device *pdev)
 	 * watchdog properly after it has opened the device. In some cases
 	 * the BIOS default is too short and causes immediate reboot.
 	 */
-	if (watchdog_timeout_invalid(&wdat->wdd, timeout)) {
+	if (timeout * 1000 < wdat->wdd.min_hw_heartbeat_ms ||
+	    timeout * 1000 > wdat->wdd.max_hw_heartbeat_ms) {
 		dev_warn(dev, "Invalid timeout %d given, using %d\n",
 			 timeout, WDAT_DEFAULT_TIMEOUT);
 		timeout = WDAT_DEFAULT_TIMEOUT;
@@ -464,10 +463,10 @@ static int wdat_wdt_probe(struct platform_device *pdev)
 
 	watchdog_set_nowayout(&wdat->wdd, nowayout);
 	watchdog_stop_on_reboot(&wdat->wdd);
-	watchdog_stop_on_unregister(&wdat->wdd);
 	return devm_watchdog_register_device(dev, &wdat->wdd);
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int wdat_wdt_suspend_noirq(struct device *dev)
 {
 	struct wdat_wdt *wdat = dev_get_drvdata(dev);
@@ -528,16 +527,18 @@ static int wdat_wdt_resume_noirq(struct device *dev)
 
 	return wdat_wdt_start(&wdat->wdd);
 }
+#endif
 
 static const struct dev_pm_ops wdat_wdt_pm_ops = {
-	NOIRQ_SYSTEM_SLEEP_PM_OPS(wdat_wdt_suspend_noirq, wdat_wdt_resume_noirq)
+	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(wdat_wdt_suspend_noirq,
+				      wdat_wdt_resume_noirq)
 };
 
 static struct platform_driver wdat_wdt_driver = {
 	.probe = wdat_wdt_probe,
 	.driver = {
 		.name = "wdat_wdt",
-		.pm = pm_sleep_ptr(&wdat_wdt_pm_ops),
+		.pm = &wdat_wdt_pm_ops,
 	},
 };
 

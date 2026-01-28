@@ -11,7 +11,6 @@
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
-#include <linux/regulator/consumer.h>
 
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-fwnode.h>
@@ -102,12 +101,6 @@ struct imx412_mode {
 	struct imx412_reg_list reg_list;
 };
 
-static const char * const imx412_supply_names[] = {
-	"dovdd",	/* Digital I/O power */
-	"avdd",		/* Analog power */
-	"dvdd",		/* Digital core power */
-};
-
 /**
  * struct imx412 - imx412 sensor device structure
  * @dev: Pointer to generic device
@@ -116,7 +109,6 @@ static const char * const imx412_supply_names[] = {
  * @pad: Media pad. Only one pad supported
  * @reset_gpio: Sensor reset gpio
  * @inclk: Sensor input clock
- * @supplies: Regulator supplies
  * @ctrl_handler: V4L2 control handler
  * @link_freq_ctrl: Pointer to link frequency control
  * @pclk_ctrl: Pointer to pixel clock control
@@ -127,6 +119,7 @@ static const char * const imx412_supply_names[] = {
  * @vblank: Vertical blanking in lines
  * @cur_mode: Pointer to current selected sensor mode
  * @mutex: Mutex for serializing sensor controls
+ * @streaming: Flag indicating streaming state
  */
 struct imx412 {
 	struct device *dev;
@@ -135,7 +128,6 @@ struct imx412 {
 	struct media_pad pad;
 	struct gpio_desc *reset_gpio;
 	struct clk *inclk;
-	struct regulator_bulk_data supplies[ARRAY_SIZE(imx412_supply_names)];
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *link_freq_ctrl;
 	struct v4l2_ctrl *pclk_ctrl;
@@ -148,6 +140,7 @@ struct imx412 {
 	u32 vblank;
 	const struct imx412_mode *cur_mode;
 	struct mutex mutex;
+	bool streaming;
 };
 
 static const s64 link_freq[] = {
@@ -721,7 +714,7 @@ static int imx412_get_pad_format(struct v4l2_subdev *sd,
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
 		struct v4l2_mbus_framefmt *framefmt;
 
-		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
+		framefmt = v4l2_subdev_get_try_format(sd, sd_state, fmt->pad);
 		fmt->format = *framefmt;
 	} else {
 		imx412_fill_pad_format(imx412, imx412->cur_mode, fmt);
@@ -756,7 +749,7 @@ static int imx412_set_pad_format(struct v4l2_subdev *sd,
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
 		struct v4l2_mbus_framefmt *framefmt;
 
-		framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
+		framefmt = v4l2_subdev_get_try_format(sd, sd_state, fmt->pad);
 		*framefmt = fmt->format;
 	} else {
 		ret = imx412_update_controls(imx412, mode);
@@ -770,14 +763,14 @@ static int imx412_set_pad_format(struct v4l2_subdev *sd,
 }
 
 /**
- * imx412_init_state() - Initialize sub-device state
+ * imx412_init_pad_cfg() - Initialize sub-device pad configuration
  * @sd: pointer to imx412 V4L2 sub-device structure
  * @sd_state: V4L2 sub-device configuration
  *
  * Return: 0 if successful, error code otherwise.
  */
-static int imx412_init_state(struct v4l2_subdev *sd,
-			     struct v4l2_subdev_state *sd_state)
+static int imx412_init_pad_cfg(struct v4l2_subdev *sd,
+			       struct v4l2_subdev_state *sd_state)
 {
 	struct imx412 *imx412 = to_imx412(sd);
 	struct v4l2_subdev_format fmt = { 0 };
@@ -855,6 +848,11 @@ static int imx412_set_stream(struct v4l2_subdev *sd, int enable)
 
 	mutex_lock(&imx412->mutex);
 
+	if (imx412->streaming == enable) {
+		mutex_unlock(&imx412->mutex);
+		return 0;
+	}
+
 	if (enable) {
 		ret = pm_runtime_resume_and_get(imx412->dev);
 		if (ret)
@@ -867,6 +865,8 @@ static int imx412_set_stream(struct v4l2_subdev *sd, int enable)
 		imx412_stop_streaming(imx412);
 		pm_runtime_put(imx412->dev);
 	}
+
+	imx412->streaming = enable;
 
 	mutex_unlock(&imx412->mutex);
 
@@ -946,16 +946,6 @@ static int imx412_parse_hw_config(struct imx412 *imx412)
 		return -EINVAL;
 	}
 
-	/* Get optional DT defined regulators */
-	for (i = 0; i < ARRAY_SIZE(imx412_supply_names); i++)
-		imx412->supplies[i].supply = imx412_supply_names[i];
-
-	ret = devm_regulator_bulk_get(imx412->dev,
-				      ARRAY_SIZE(imx412_supply_names),
-				      imx412->supplies);
-	if (ret)
-		return ret;
-
 	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
 	if (!ep)
 		return -ENXIO;
@@ -997,6 +987,7 @@ static const struct v4l2_subdev_video_ops imx412_video_ops = {
 };
 
 static const struct v4l2_subdev_pad_ops imx412_pad_ops = {
+	.init_cfg = imx412_init_pad_cfg,
 	.enum_mbus_code = imx412_enum_mbus_code,
 	.enum_frame_size = imx412_enum_frame_size,
 	.get_fmt = imx412_get_pad_format,
@@ -1006,10 +997,6 @@ static const struct v4l2_subdev_pad_ops imx412_pad_ops = {
 static const struct v4l2_subdev_ops imx412_subdev_ops = {
 	.video = &imx412_video_ops,
 	.pad = &imx412_pad_ops,
-};
-
-static const struct v4l2_subdev_internal_ops imx412_internal_ops = {
-	.init_state = imx412_init_state,
 };
 
 /**
@@ -1023,13 +1010,6 @@ static int imx412_power_on(struct device *dev)
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct imx412 *imx412 = to_imx412(sd);
 	int ret;
-
-	ret = regulator_bulk_enable(ARRAY_SIZE(imx412_supply_names),
-				    imx412->supplies);
-	if (ret < 0) {
-		dev_err(dev, "failed to enable regulators\n");
-		return ret;
-	}
 
 	gpiod_set_value_cansleep(imx412->reset_gpio, 0);
 
@@ -1045,8 +1025,6 @@ static int imx412_power_on(struct device *dev)
 
 error_reset:
 	gpiod_set_value_cansleep(imx412->reset_gpio, 1);
-	regulator_bulk_disable(ARRAY_SIZE(imx412_supply_names),
-			       imx412->supplies);
 
 	return ret;
 }
@@ -1065,9 +1043,6 @@ static int imx412_power_off(struct device *dev)
 	clk_disable_unprepare(imx412->inclk);
 
 	gpiod_set_value_cansleep(imx412->reset_gpio, 1);
-
-	regulator_bulk_disable(ARRAY_SIZE(imx412_supply_names),
-			       imx412->supplies);
 
 	return 0;
 }
@@ -1166,7 +1141,6 @@ static int imx412_init_controls(struct imx412 *imx412)
 static int imx412_probe(struct i2c_client *client)
 {
 	struct imx412 *imx412;
-	const char *name;
 	int ret;
 
 	imx412 = devm_kzalloc(&client->dev, sizeof(*imx412), GFP_KERNEL);
@@ -1174,13 +1148,9 @@ static int imx412_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	imx412->dev = &client->dev;
-	name = device_get_match_data(&client->dev);
-	if (!name)
-		return -ENODEV;
 
 	/* Initialize subdev */
 	v4l2_i2c_subdev_init(&imx412->sd, client, &imx412_subdev_ops);
-	imx412->sd.internal_ops = &imx412_internal_ops;
 
 	ret = imx412_parse_hw_config(imx412);
 	if (ret) {
@@ -1216,8 +1186,6 @@ static int imx412_probe(struct i2c_client *client)
 	/* Initialize subdev */
 	imx412->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
 	imx412->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
-
-	v4l2_i2c_subdev_set_name(&imx412->sd, client, name, NULL);
 
 	/* Initialize source pad */
 	imx412->pad.flags = MEDIA_PAD_FL_SOURCE;
@@ -1258,7 +1226,7 @@ error_mutex_destroy:
  *
  * Return: 0 if successful, error code otherwise.
  */
-static void imx412_remove(struct i2c_client *client)
+static int imx412_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct imx412 *imx412 = to_imx412(sd);
@@ -1273,6 +1241,8 @@ static void imx412_remove(struct i2c_client *client)
 	pm_runtime_set_suspended(&client->dev);
 
 	mutex_destroy(&imx412->mutex);
+
+	return 0;
 }
 
 static const struct dev_pm_ops imx412_pm_ops = {
@@ -1280,15 +1250,14 @@ static const struct dev_pm_ops imx412_pm_ops = {
 };
 
 static const struct of_device_id imx412_of_match[] = {
-	{ .compatible = "sony,imx412", .data = "imx412" },
-	{ .compatible = "sony,imx577", .data = "imx577" },
+	{ .compatible = "sony,imx412" },
 	{ }
 };
 
 MODULE_DEVICE_TABLE(of, imx412_of_match);
 
 static struct i2c_driver imx412_driver = {
-	.probe = imx412_probe,
+	.probe_new = imx412_probe,
 	.remove = imx412_remove,
 	.driver = {
 		.name = "imx412",

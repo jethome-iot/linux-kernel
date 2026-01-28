@@ -20,7 +20,7 @@
 #include <media/dvb_frontend.h>
 #include "drxk.h"
 #include "drxk_hard.h"
-#include <linux/int_log.h>
+#include <media/dvb_math.h>
 
 static int power_down_dvbt(struct drxk_state *state, bool set_power_mode);
 static int power_down_qam(struct drxk_state *state);
@@ -229,8 +229,13 @@ static int i2c_write(struct drxk_state *state, u8 adr, u8 *data, int len)
 	struct i2c_msg msg = {
 	    .addr = adr, .flags = 0, .buf = data, .len = len };
 
-	dprintk(3, ": %*ph\n", len, data);
-
+	dprintk(3, ":");
+	if (debug > 2) {
+		int i;
+		for (i = 0; i < len; i++)
+			pr_cont(" %02x", data[i]);
+		pr_cont("\n");
+	}
 	status = drxk_i2c_transfer(state, &msg, 1);
 	if (status >= 0 && status != 1)
 		status = -EIO;
@@ -262,7 +267,16 @@ static int i2c_read(struct drxk_state *state,
 		pr_err("i2c read error at addr 0x%02x\n", adr);
 		return status;
 	}
-	dprintk(3, ": read from %*ph, value = %*ph\n", len, msg, alen, answ);
+	if (debug > 2) {
+		int i;
+		dprintk(2, ": read from");
+		for (i = 0; i < len; i++)
+			pr_cont(" %02x", msg[i]);
+		pr_cont(", value = ");
+		for (i = 0; i < alen; i++)
+			pr_cont(" %02x", answ[i]);
+		pr_cont("\n");
+	}
 	return 0;
 }
 
@@ -427,8 +441,13 @@ static int write_block(struct drxk_state *state, u32 address,
 		}
 		memcpy(&state->chunk[adr_length], p_block, chunk);
 		dprintk(2, "(0x%08x, 0x%02x)\n", address, flags);
-		if (p_block)
-			dprintk(2, "%*ph\n", chunk, p_block);
+		if (debug > 1) {
+			int i;
+			if (p_block)
+				for (i = 0; i < chunk; i++)
+					pr_cont(" %02x", p_block[i]);
+			pr_cont("\n");
+		}
 		status = i2c_write(state, state->demod_address,
 				   &state->chunk[0], chunk + adr_length);
 		if (status < 0) {
@@ -1566,7 +1585,7 @@ static int ctrl_power_mode(struct drxk_state *state, enum drx_power_mode *mode)
 		sio_cc_pwd_mode = SIO_CC_PWD_MODE_LEVEL_OSC;
 		break;
 	default:
-		/* Unknown sleep mode */
+		/* Unknow sleep mode */
 		return -EINVAL;
 	}
 
@@ -3497,7 +3516,7 @@ static int set_dvbt_standard(struct drxk_state *state,
 	status = write16(state, IQM_AF_CLP_LEN__A, 0);
 	if (status < 0)
 		goto error;
-	/* window size for sense pre-SAW detection */
+	/* window size for for sense pre-SAW detection */
 	status = write16(state, IQM_AF_SNS_LEN__A, 0);
 	if (status < 0)
 		goto error;
@@ -3701,6 +3720,7 @@ static int set_dvbt(struct drxk_state *state, u16 intermediate_freqk_hz,
 {
 	u16 cmd_result = 0;
 	u16 transmission_params = 0;
+	u16 operation_mode = 0;
 	u32 iqm_rc_rate_ofs = 0;
 	u32 bandwidth = 0;
 	u16 param1;
@@ -3739,8 +3759,10 @@ static int set_dvbt(struct drxk_state *state, u16 intermediate_freqk_hz,
 	/* mode */
 	switch (state->props.transmission_mode) {
 	case TRANSMISSION_MODE_AUTO:
-	case TRANSMISSION_MODE_8K:
 	default:
+		operation_mode |= OFDM_SC_RA_RAM_OP_AUTO_MODE__M;
+		fallthrough;	/* try first guess DRX_FFTMODE_8K */
+	case TRANSMISSION_MODE_8K:
 		transmission_params |= OFDM_SC_RA_RAM_OP_PARAM_MODE_8K;
 		break;
 	case TRANSMISSION_MODE_2K:
@@ -3751,7 +3773,9 @@ static int set_dvbt(struct drxk_state *state, u16 intermediate_freqk_hz,
 	/* guard */
 	switch (state->props.guard_interval) {
 	default:
-	case GUARD_INTERVAL_AUTO: /* try first guess DRX_GUARD_1DIV4 */
+	case GUARD_INTERVAL_AUTO:
+		operation_mode |= OFDM_SC_RA_RAM_OP_AUTO_GUARD__M;
+		fallthrough;	/* try first guess DRX_GUARD_1DIV4 */
 	case GUARD_INTERVAL_1_4:
 		transmission_params |= OFDM_SC_RA_RAM_OP_PARAM_GUARD_4;
 		break;
@@ -3770,7 +3794,11 @@ static int set_dvbt(struct drxk_state *state, u16 intermediate_freqk_hz,
 	switch (state->props.hierarchy) {
 	case HIERARCHY_AUTO:
 	case HIERARCHY_NONE:
-	default:	/* try first guess SC_RA_RAM_OP_PARAM_HIER_NO */
+	default:
+		operation_mode |= OFDM_SC_RA_RAM_OP_AUTO_HIER__M;
+		/* try first guess SC_RA_RAM_OP_PARAM_HIER_NO */
+		/* transmission_params |= OFDM_SC_RA_RAM_OP_PARAM_HIER_NO; */
+		fallthrough;
 	case HIERARCHY_1:
 		transmission_params |= OFDM_SC_RA_RAM_OP_PARAM_HIER_A1;
 		break;
@@ -3786,7 +3814,9 @@ static int set_dvbt(struct drxk_state *state, u16 intermediate_freqk_hz,
 	/* modulation */
 	switch (state->props.modulation) {
 	case QAM_AUTO:
-	default:	/* try first guess DRX_CONSTELLATION_QAM64 */
+	default:
+		operation_mode |= OFDM_SC_RA_RAM_OP_AUTO_CONST__M;
+		fallthrough;	/* try first guess DRX_CONSTELLATION_QAM64 */
 	case QAM_64:
 		transmission_params |= OFDM_SC_RA_RAM_OP_PARAM_CONST_QAM64;
 		break;
@@ -3827,7 +3857,9 @@ static int set_dvbt(struct drxk_state *state, u16 intermediate_freqk_hz,
 	/* coderate */
 	switch (state->props.code_rate_HP) {
 	case FEC_AUTO:
-	default:	/* try first guess DRX_CODERATE_2DIV3 */
+	default:
+		operation_mode |= OFDM_SC_RA_RAM_OP_AUTO_RATE__M;
+		fallthrough;	/* try first guess DRX_CODERATE_2DIV3 */
 	case FEC_2_3:
 		transmission_params |= OFDM_SC_RA_RAM_OP_PARAM_RATE_2_3;
 		break;

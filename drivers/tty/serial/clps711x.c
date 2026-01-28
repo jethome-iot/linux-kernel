@@ -92,9 +92,8 @@ static irqreturn_t uart_clps711x_int_rx(int irq, void *dev_id)
 {
 	struct uart_port *port = dev_id;
 	struct clps711x_port *s = dev_get_drvdata(port->dev);
-	unsigned int status;
+	unsigned int status, flg;
 	u16 ch;
-	u8 flg;
 
 	for (;;) {
 		u32 sysflg = 0;
@@ -167,7 +166,8 @@ static irqreturn_t uart_clps711x_int_tx(int irq, void *dev_id)
 		u32 sysflg = 0;
 
 		writew(xmit->buf[xmit->tail], port->membase + UARTDR_OFFSET);
-		uart_xmit_advance(port, 1);
+		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+		port->icount.tx++;
 
 		regmap_read(s->syscon, SYSFLG_OFFSET, &sysflg);
 		if (sysflg & SYSFLG_UTXFF)
@@ -251,7 +251,7 @@ static void uart_clps711x_shutdown(struct uart_port *port)
 
 static void uart_clps711x_set_termios(struct uart_port *port,
 				      struct ktermios *termios,
-				      const struct ktermios *old)
+				      struct ktermios *old)
 {
 	u32 ubrlcr;
 	unsigned int baud, quot;
@@ -348,7 +348,7 @@ static const struct uart_ops uart_clps711x_ops = {
 };
 
 #ifdef CONFIG_SERIAL_CLPS711X_CONSOLE
-static void uart_clps711x_console_putchar(struct uart_port *port, unsigned char ch)
+static void uart_clps711x_console_putchar(struct uart_port *port, int ch)
 {
 	struct clps711x_port *s = dev_get_drvdata(port->dev);
 	u32 sysflg = 0;
@@ -451,7 +451,8 @@ static int uart_clps711x_probe(struct platform_device *pdev)
 	if (IS_ERR(uart_clk))
 		return PTR_ERR(uart_clk);
 
-	s->port.membase = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	s->port.membase = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(s->port.membase))
 		return PTR_ERR(s->port.membase);
 
@@ -510,11 +511,11 @@ static int uart_clps711x_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static void uart_clps711x_remove(struct platform_device *pdev)
+static int uart_clps711x_remove(struct platform_device *pdev)
 {
 	struct clps711x_port *s = platform_get_drvdata(pdev);
 
-	uart_remove_one_port(&clps711x_uart, &s->port);
+	return uart_remove_one_port(&clps711x_uart, &s->port);
 }
 
 static const struct of_device_id __maybe_unused clps711x_uart_dt_ids[] = {
@@ -529,7 +530,7 @@ static struct platform_driver clps711x_uart_platform = {
 		.of_match_table	= of_match_ptr(clps711x_uart_dt_ids),
 	},
 	.probe	= uart_clps711x_probe,
-	.remove_new = uart_clps711x_remove,
+	.remove	= uart_clps711x_remove,
 };
 
 static int __init uart_clps711x_init(void)

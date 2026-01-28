@@ -48,7 +48,6 @@
 ########################################################################
 
 #include <linux/linkage.h>
-#include <linux/cfi_types.h>
 
 .text
 
@@ -84,7 +83,7 @@ frame_size = frame_WK + WK_SIZE
 
 # Useful QWORD "arrays" for simpler memory references
 # MSG, DIGEST, K_t, W_t are arrays
-# WK_2(t) points to 1 of 2 qwords at frame.WK depending on t being odd/even
+# WK_2(t) points to 1 of 2 qwords at frame.WK depdending on t being odd/even
 
 # Input message (arg1)
 #define MSG(i)    8*i(msg)
@@ -274,9 +273,9 @@ frame_size = frame_WK + WK_SIZE
 # of SHA512 message blocks.
 # "blocks" is the message length in SHA512 blocks
 ########################################################################
-SYM_TYPED_FUNC_START(sha512_transform_avx)
+SYM_FUNC_START(sha512_transform_avx)
 	test msglen, msglen
-	je .Lnowork
+	je nowork
 
 	# Save GPRs
 	push	%rbx
@@ -291,7 +290,7 @@ SYM_TYPED_FUNC_START(sha512_transform_avx)
 	sub     $frame_size, %rsp
 	and	$~(0x20 - 1), %rsp
 
-.Lupdateblock:
+updateblock:
 
 	# Load state variables
 	mov     DIGEST(0), a_64
@@ -348,7 +347,7 @@ SYM_TYPED_FUNC_START(sha512_transform_avx)
 	# Advance to next message block
 	add     $16*8, msg
 	dec     msglen
-	jnz     .Lupdateblock
+	jnz     updateblock
 
 	# Restore Stack Pointer
 	mov	%rbp, %rsp
@@ -361,7 +360,7 @@ SYM_TYPED_FUNC_START(sha512_transform_avx)
 	pop	%r12
 	pop	%rbx
 
-.Lnowork:
+nowork:
 	RET
 SYM_FUNC_END(sha512_transform_avx)
 

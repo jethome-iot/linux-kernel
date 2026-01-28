@@ -94,6 +94,7 @@ struct iTCO_wdt_private {
 	 * NO_REBOOT flag is Memory-Mapped GCS register bit 5 (TCO version 2),
 	 * or memory-mapped PMC register bit 4 (TCO version 3).
 	 */
+	struct resource *gcs_pmc_res;
 	unsigned long __iomem *gcs_pmc;
 	/* the lock for io operations */
 	spinlock_t io_lock;
@@ -441,10 +442,11 @@ static bool iTCO_wdt_set_running(struct iTCO_wdt_private *p)
  *	Kernel Interfaces
  */
 
-static struct watchdog_info ident = {
+static const struct watchdog_info ident = {
 	.options =		WDIOF_SETTIMEOUT |
 				WDIOF_KEEPALIVEPING |
 				WDIOF_MAGICCLOSE,
+	.firmware_version =	0,
 	.identity =		DRV_NAME,
 };
 
@@ -509,7 +511,10 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 	 */
 	if (p->iTCO_version >= 2 && p->iTCO_version < 6 &&
 	    !pdata->no_reboot_use_pmc) {
-		p->gcs_pmc = devm_platform_ioremap_resource(pdev, ICH_RES_MEM_GCS_PMC);
+		p->gcs_pmc_res = platform_get_resource(pdev,
+						       IORESOURCE_MEM,
+						       ICH_RES_MEM_GCS_PMC);
+		p->gcs_pmc = devm_ioremap_resource(dev, p->gcs_pmc_res);
 		if (IS_ERR(p->gcs_pmc))
 			return PTR_ERR(p->gcs_pmc);
 	}
@@ -562,7 +567,6 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 		break;
 	}
 
-	ident.firmware_version = p->iTCO_version;
 	p->wddev.info = &ident,
 	p->wddev.ops = &iTCO_wdt_ops,
 	p->wddev.bootstatus = 0;
@@ -603,6 +607,7 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
 /*
  * Suspend-to-idle requires this, because it stops the ticks and timekeeping, so
  * the watchdog cannot be pinged while in that state.  In ACPI sleep states the
@@ -610,15 +615,15 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
  */
 
 #ifdef CONFIG_ACPI
-static inline bool __maybe_unused need_suspend(void)
+static inline bool need_suspend(void)
 {
 	return acpi_target_system_state() == ACPI_STATE_S0;
 }
 #else
-static inline bool __maybe_unused need_suspend(void) { return true; }
+static inline bool need_suspend(void) { return true; }
 #endif
 
-static int __maybe_unused iTCO_wdt_suspend_noirq(struct device *dev)
+static int iTCO_wdt_suspend_noirq(struct device *dev)
 {
 	struct iTCO_wdt_private *p = dev_get_drvdata(dev);
 	int ret = 0;
@@ -632,7 +637,7 @@ static int __maybe_unused iTCO_wdt_suspend_noirq(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused iTCO_wdt_resume_noirq(struct device *dev)
+static int iTCO_wdt_resume_noirq(struct device *dev)
 {
 	struct iTCO_wdt_private *p = dev_get_drvdata(dev);
 
@@ -643,15 +648,20 @@ static int __maybe_unused iTCO_wdt_resume_noirq(struct device *dev)
 }
 
 static const struct dev_pm_ops iTCO_wdt_pm = {
-	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(iTCO_wdt_suspend_noirq,
-				      iTCO_wdt_resume_noirq)
+	.suspend_noirq = iTCO_wdt_suspend_noirq,
+	.resume_noirq = iTCO_wdt_resume_noirq,
 };
+
+#define ITCO_WDT_PM_OPS	(&iTCO_wdt_pm)
+#else
+#define ITCO_WDT_PM_OPS	NULL
+#endif /* CONFIG_PM_SLEEP */
 
 static struct platform_driver iTCO_wdt_driver = {
 	.probe          = iTCO_wdt_probe,
 	.driver         = {
 		.name   = DRV_NAME,
-		.pm     = &iTCO_wdt_pm,
+		.pm     = ITCO_WDT_PM_OPS,
 	},
 };
 

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config AMLOGIC_PCIE_V2_HOST
+	tristate "Meson PCIE_V2 controller"
+	depends on AMLOGIC_PCIE
+	depends on PCI && PCI_MSI_IRQ_DOMAIN
+	depends on PCIE_DW_HOST
+	help
+	  Say Y here if you want to enable PCIE controller support on Amlogic
+	  SoCs. The PCIE controller on Amlogic is based on DesignWare hardware
+	  and therefore the driver re-uses the DesignWare core functions to
+	  implement the driver.
+
+config AMLOGIC_PCIE_V3_HOST
+	tristate "Meson PCIE_V3 controller"
+	depends on AMLOGIC_PCIE
+	depends on PCI && PCI_MSI_IRQ_DOMAIN
+	help
+	  Say Y here if you want to enable PCIE controller support on Amlogic
+	  SoCs.
+
+config AMLOGIC_PCIE_V3_EP
+	tristate "Meson PCIE_V3 endpoint controller"
+	depends on PCI
+	depends on OF
+	depends on AMLOGIC_PCIE
+	depends on PCI_ENDPOINT
+	depends on PCI_ENDPOINT_CONFIGFS
+	depends on PCI_EPF_TEST
+	help
+	  Say Y or M  here if you want to support Amlogic PCIe controller in
+	  endpoint mode on Amlogic SoC.

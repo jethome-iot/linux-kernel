@@ -2,7 +2,6 @@
 // Copyright (c) 2011-2017, The Linux Foundation. All rights reserved.
 // Copyright (c) 2018, Linaro Limited
 
-#include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/uaccess.h>
@@ -553,13 +552,13 @@ struct q6afe_port {
 };
 
 struct afe_cmd_remote_lpass_core_hw_vote_request {
-	uint32_t  hw_block_id;
-	char client_name[8];
+        uint32_t  hw_block_id;
+        char client_name[8];
 } __packed;
 
 struct afe_cmd_remote_lpass_core_hw_devote_request {
-	uint32_t  hw_block_id;
-	uint32_t client_handle;
+        uint32_t  hw_block_id;
+        uint32_t client_handle;
 } __packed;
 
 
@@ -1329,11 +1328,11 @@ int q6afe_i2s_port_prepare(struct q6afe_port *port, struct q6afe_i2s_cfg *cfg)
 	pcfg->i2s_cfg.bit_width = cfg->bit_width;
 	pcfg->i2s_cfg.data_format = AFE_LINEAR_PCM_DATA;
 
-	switch (cfg->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
-	case SND_SOC_DAIFMT_BP_FP:
+	switch (cfg->fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBS_CFS:
 		pcfg->i2s_cfg.ws_src = AFE_PORT_CONFIG_I2S_WS_SRC_INTERNAL;
 		break;
-	case SND_SOC_DAIFMT_BC_FC:
+	case SND_SOC_DAIFMT_CBM_CFM:
 		/* CPU is slave */
 		pcfg->i2s_cfg.ws_src = AFE_PORT_CONFIG_I2S_WS_SRC_EXTERNAL;
 		break;

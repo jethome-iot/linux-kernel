@@ -132,9 +132,9 @@ static int pwm_imx_tpm_round_state(struct pwm_chip *chip,
 	return 0;
 }
 
-static int pwm_imx_tpm_get_state(struct pwm_chip *chip,
-				 struct pwm_device *pwm,
-				 struct pwm_state *state)
+static void pwm_imx_tpm_get_state(struct pwm_chip *chip,
+				  struct pwm_device *pwm,
+				  struct pwm_state *state)
 {
 	struct imx_tpm_pwm_chip *tpm = to_imx_tpm_pwm_chip(chip);
 	u32 rate, val, prescale;
@@ -164,8 +164,6 @@ static int pwm_imx_tpm_get_state(struct pwm_chip *chip,
 
 	/* get channel status */
 	state->enabled = FIELD_GET(PWM_IMX_TPM_CnSC_ELS, val) ? true : false;
-
-	return 0;
 }
 
 /* this function is supposed to be called with mutex hold */
@@ -332,6 +330,7 @@ static const struct pwm_ops imx_tpm_pwm_ops = {
 	.free = pwm_imx_tpm_free,
 	.get_state = pwm_imx_tpm_get_state,
 	.apply = pwm_imx_tpm_apply,
+	.owner = THIS_MODULE,
 };
 
 static int pwm_imx_tpm_probe(struct platform_device *pdev)
@@ -350,10 +349,17 @@ static int pwm_imx_tpm_probe(struct platform_device *pdev)
 	if (IS_ERR(tpm->base))
 		return PTR_ERR(tpm->base);
 
-	tpm->clk = devm_clk_get_enabled(&pdev->dev, NULL);
+	tpm->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(tpm->clk))
 		return dev_err_probe(&pdev->dev, PTR_ERR(tpm->clk),
 				     "failed to get PWM clock\n");
+
+	ret = clk_prepare_enable(tpm->clk);
+	if (ret) {
+		dev_err(&pdev->dev,
+			"failed to prepare or enable clock: %d\n", ret);
+		return ret;
+	}
 
 	tpm->chip.dev = &pdev->dev;
 	tpm->chip.ops = &imx_tpm_pwm_ops;
@@ -364,14 +370,27 @@ static int pwm_imx_tpm_probe(struct platform_device *pdev)
 
 	mutex_init(&tpm->lock);
 
-	ret = devm_pwmchip_add(&pdev->dev, &tpm->chip);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "failed to add PWM chip\n");
+	ret = pwmchip_add(&tpm->chip);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to add PWM chip: %d\n", ret);
+		clk_disable_unprepare(tpm->clk);
+	}
+
+	return ret;
+}
+
+static int pwm_imx_tpm_remove(struct platform_device *pdev)
+{
+	struct imx_tpm_pwm_chip *tpm = platform_get_drvdata(pdev);
+
+	pwmchip_remove(&tpm->chip);
+
+	clk_disable_unprepare(tpm->clk);
 
 	return 0;
 }
 
-static int pwm_imx_tpm_suspend(struct device *dev)
+static int __maybe_unused pwm_imx_tpm_suspend(struct device *dev)
 {
 	struct imx_tpm_pwm_chip *tpm = dev_get_drvdata(dev);
 
@@ -390,7 +409,7 @@ static int pwm_imx_tpm_suspend(struct device *dev)
 	return 0;
 }
 
-static int pwm_imx_tpm_resume(struct device *dev)
+static int __maybe_unused pwm_imx_tpm_resume(struct device *dev)
 {
 	struct imx_tpm_pwm_chip *tpm = dev_get_drvdata(dev);
 	int ret = 0;
@@ -402,8 +421,8 @@ static int pwm_imx_tpm_resume(struct device *dev)
 	return ret;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(imx_tpm_pwm_pm,
-				pwm_imx_tpm_suspend, pwm_imx_tpm_resume);
+static SIMPLE_DEV_PM_OPS(imx_tpm_pwm_pm,
+			 pwm_imx_tpm_suspend, pwm_imx_tpm_resume);
 
 static const struct of_device_id imx_tpm_pwm_dt_ids[] = {
 	{ .compatible = "fsl,imx7ulp-pwm", },
@@ -415,9 +434,10 @@ static struct platform_driver imx_tpm_pwm_driver = {
 	.driver = {
 		.name = "imx7ulp-tpm-pwm",
 		.of_match_table = imx_tpm_pwm_dt_ids,
-		.pm = pm_ptr(&imx_tpm_pwm_pm),
+		.pm = &imx_tpm_pwm_pm,
 	},
 	.probe	= pwm_imx_tpm_probe,
+	.remove = pwm_imx_tpm_remove,
 };
 module_platform_driver(imx_tpm_pwm_driver);
 

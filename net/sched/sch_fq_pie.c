@@ -202,7 +202,7 @@ out:
 	return NET_XMIT_CN;
 }
 
-static const struct netlink_range_validation fq_pie_q_range = {
+static struct netlink_range_validation fq_pie_q_range = {
 	.min = 1,
 	.max = 1 << 20,
 };
@@ -289,6 +289,9 @@ static int fq_pie_change(struct Qdisc *sch, struct nlattr *opt,
 	unsigned int len_dropped = 0;
 	unsigned int num_dropped = 0;
 	int err;
+
+	if (!opt)
+		return -EINVAL;
 
 	err = nla_parse_nested(tb, TCA_FQ_PIE_MAX, opt, fq_pie_policy, extack);
 	if (err < 0)
@@ -381,7 +384,6 @@ static void fq_pie_timer(struct timer_list *t)
 	spinlock_t *root_lock; /* to lock qdisc for probability calculations */
 	int max_cnt, i;
 
-	rcu_read_lock();
 	root_lock = qdisc_lock(qdisc_root_sleeping(sch));
 	spin_lock(root_lock);
 
@@ -403,7 +405,6 @@ static void fq_pie_timer(struct timer_list *t)
 	if (tupdate)
 		mod_timer(&q->adapt_timer, jiffies + next);
 	spin_unlock(root_lock);
-	rcu_read_unlock();
 }
 
 static int fq_pie_init(struct Qdisc *sch, struct nlattr *opt,

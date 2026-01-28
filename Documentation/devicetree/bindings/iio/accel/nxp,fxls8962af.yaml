@@ -27,6 +27,8 @@ properties:
   vdd-supply:
     description: phandle to the regulator that provides power to the accelerometer
 
+  spi-max-frequency: true
+
   interrupts:
     maxItems: 1
 
@@ -42,15 +44,12 @@ required:
   - compatible
   - reg
 
-allOf:
-  - $ref: /schemas/spi/spi-peripheral-props.yaml#
-
-unevaluatedProperties: false
+additionalProperties: false
 
 examples:
   - |
     #include <dt-bindings/interrupt-controller/irq.h>
-    i2c {
+    i2c0 {
         #address-cells = <1>;
         #size-cells = <0>;
 
@@ -65,7 +64,7 @@ examples:
     };
   - |
     #include <dt-bindings/interrupt-controller/irq.h>
-    spi {
+    spi0 {
         #address-cells = <1>;
         #size-cells = <0>;
 

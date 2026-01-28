@@ -7,7 +7,6 @@
 #include <linux/atomic.h>
 
 #include "kasan.h"
-#include "../slab.h"
 
 extern struct kasan_stack_ring stack_ring;
 
@@ -30,8 +29,12 @@ static const char *get_common_bug_type(struct kasan_report_info *info)
 void kasan_complete_mode_report_info(struct kasan_report_info *info)
 {
 	unsigned long flags;
-	u64 pos;
+	u64 pos, i;
 	struct kasan_stack_ring_entry *entry;
+	void *ptr;
+	u32 pid;
+	depot_stack_handle_t stack;
+	bool is_free;
 	bool alloc_found = false, free_found = false;
 
 	if ((!info->cache || !info->object) && !info->bug_type) {
@@ -52,18 +55,24 @@ void kasan_complete_mode_report_info(struct kasan_report_info *info)
 	 * entries relevant to the buggy object can be overwritten.
 	 */
 
-	for (u64 i = pos - 1; i != pos - 1 - stack_ring.size; i--) {
+	for (i = pos - 1; i != pos - 1 - stack_ring.size; i--) {
 		if (alloc_found && free_found)
 			break;
 
 		entry = &stack_ring.entries[i % stack_ring.size];
 
-		if (kasan_reset_tag(entry->ptr) != info->object ||
-		    get_tag(entry->ptr) != get_tag(info->access_addr) ||
-		    info->cache->object_size != entry->size)
+		/* Paired with smp_store_release() in save_stack_info(). */
+		ptr = (void *)smp_load_acquire(&entry->ptr);
+
+		if (kasan_reset_tag(ptr) != info->object ||
+		    get_tag(ptr) != get_tag(info->access_addr))
 			continue;
 
-		if (entry->is_free) {
+		pid = READ_ONCE(entry->pid);
+		stack = READ_ONCE(entry->stack);
+		is_free = READ_ONCE(entry->is_free);
+
+		if (is_free) {
 			/*
 			 * Second free of the same object.
 			 * Give up on trying to find the alloc entry.
@@ -71,8 +80,8 @@ void kasan_complete_mode_report_info(struct kasan_report_info *info)
 			if (free_found)
 				break;
 
-			memcpy(&info->free_track, &entry->track,
-			       sizeof(info->free_track));
+			info->free_track.pid = pid;
+			info->free_track.stack = stack;
 			free_found = true;
 
 			/*
@@ -80,14 +89,14 @@ void kasan_complete_mode_report_info(struct kasan_report_info *info)
 			 * a use-after-free.
 			 */
 			if (!info->bug_type)
-				info->bug_type = "slab-use-after-free";
+				info->bug_type = "use-after-free";
 		} else {
 			/* Second alloc of the same object. Give up. */
 			if (alloc_found)
 				break;
 
-			memcpy(&info->alloc_track, &entry->track,
-			       sizeof(info->alloc_track));
+			info->alloc_track.pid = pid;
+			info->alloc_track.stack = stack;
 			alloc_found = true;
 
 			/*

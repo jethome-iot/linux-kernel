@@ -22,8 +22,7 @@ struct nft_redir {
 static const struct nla_policy nft_redir_policy[NFTA_REDIR_MAX + 1] = {
 	[NFTA_REDIR_REG_PROTO_MIN]	= { .type = NLA_U32 },
 	[NFTA_REDIR_REG_PROTO_MAX]	= { .type = NLA_U32 },
-	[NFTA_REDIR_FLAGS]		=
-		NLA_POLICY_MASK(NLA_BE32, NF_NAT_RANGE_MASK),
+	[NFTA_REDIR_FLAGS]		= { .type = NLA_U32 },
 };
 
 static int nft_redir_validate(const struct nft_ctx *ctx,
@@ -69,14 +68,16 @@ static int nft_redir_init(const struct nft_ctx *ctx,
 		priv->flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
 	}
 
-	if (tb[NFTA_REDIR_FLAGS])
+	if (tb[NFTA_REDIR_FLAGS]) {
 		priv->flags = ntohl(nla_get_be32(tb[NFTA_REDIR_FLAGS]));
+		if (priv->flags & ~NF_NAT_RANGE_MASK)
+			return -EINVAL;
+	}
 
 	return nf_ct_netns_get(ctx->net, ctx->family);
 }
 
-static int nft_redir_dump(struct sk_buff *skb,
-			  const struct nft_expr *expr, bool reset)
+static int nft_redir_dump(struct sk_buff *skb, const struct nft_expr *expr)
 {
 	const struct nft_redir *priv = nft_expr_priv(expr);
 
@@ -147,7 +148,6 @@ static const struct nft_expr_ops nft_redir_ipv4_ops = {
 	.destroy	= nft_redir_ipv4_destroy,
 	.dump		= nft_redir_dump,
 	.validate	= nft_redir_validate,
-	.reduce		= NFT_REDUCE_READONLY,
 };
 
 static struct nft_expr_type nft_redir_ipv4_type __read_mostly = {
@@ -175,7 +175,6 @@ static const struct nft_expr_ops nft_redir_ipv6_ops = {
 	.destroy	= nft_redir_ipv6_destroy,
 	.dump		= nft_redir_dump,
 	.validate	= nft_redir_validate,
-	.reduce		= NFT_REDUCE_READONLY,
 };
 
 static struct nft_expr_type nft_redir_ipv6_type __read_mostly = {
@@ -204,7 +203,6 @@ static const struct nft_expr_ops nft_redir_inet_ops = {
 	.destroy	= nft_redir_inet_destroy,
 	.dump		= nft_redir_dump,
 	.validate	= nft_redir_validate,
-	.reduce		= NFT_REDUCE_READONLY,
 };
 
 static struct nft_expr_type nft_redir_inet_type __read_mostly = {

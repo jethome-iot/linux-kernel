@@ -36,9 +36,7 @@
 
 #define TCPC_ALERT_MASK			0x12
 #define TCPC_POWER_STATUS_MASK		0x14
-
-#define TCPC_FAULT_STATUS_MASK			0x15
-#define TCPC_FAULT_STATUS_MASK_VCONN_OC		BIT(1)
+#define TCPC_FAULT_STATUS_MASK		0x15
 
 #define TCPC_EXTENDED_STATUS_MASK		0x16
 #define TCPC_EXTENDED_STATUS_MASK_VSAFE0V	BIT(0)
@@ -106,7 +104,6 @@
 
 #define TCPC_FAULT_STATUS		0x1f
 #define TCPC_FAULT_STATUS_ALL_REG_RST_TO_DEFAULT BIT(7)
-#define TCPC_FAULT_STATUS_VCONN_OC	BIT(1)
 
 #define TCPC_ALERT_EXTENDED		0x21
 
@@ -171,11 +168,6 @@
 /* I2C_WRITE_BYTE_COUNT + 1 when TX_BUF_BYTE_x is only accessible I2C_WRITE_BYTE_COUNT */
 #define TCPC_TRANSMIT_BUFFER_MAX_LEN		31
 
-#define tcpc_presenting_rd(reg, cc) \
-	(!(TCPC_ROLE_CTRL_DRP & (reg)) && \
-	 (((reg) & (TCPC_ROLE_CTRL_## cc ##_MASK << TCPC_ROLE_CTRL_## cc ##_SHIFT)) == \
-	  (TCPC_ROLE_CTRL_CC_RD << TCPC_ROLE_CTRL_## cc ##_SHIFT)))
-
 struct tcpci;
 
 /*
@@ -223,21 +215,4 @@ irqreturn_t tcpci_irq(struct tcpci *tcpci);
 
 struct tcpm_port;
 struct tcpm_port *tcpci_get_tcpm_port(struct tcpci *tcpci);
-
-static inline enum typec_cc_status tcpci_to_typec_cc(unsigned int cc, bool sink)
-{
-	switch (cc) {
-	case 0x1:
-		return sink ? TYPEC_CC_RP_DEF : TYPEC_CC_RA;
-	case 0x2:
-		return sink ? TYPEC_CC_RP_1_5 : TYPEC_CC_RD;
-	case 0x3:
-		if (sink)
-			return TYPEC_CC_RP_3_0;
-		fallthrough;
-	case 0x0:
-	default:
-		return TYPEC_CC_OPEN;
-	}
-}
 #endif /* __LINUX_USB_TCPCI_H */

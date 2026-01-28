@@ -224,14 +224,16 @@ static int p8_i2c_occ_probe(struct i2c_client *client)
 	occ->poll_cmd_data = 0x10;		/* P8 OCC poll data */
 	occ->send_cmd = p8_i2c_occ_send_cmd;
 
-	return occ_setup(occ);
+	return occ_setup(occ, "p8_occ");
 }
 
-static void p8_i2c_occ_remove(struct i2c_client *client)
+static int p8_i2c_occ_remove(struct i2c_client *client)
 {
 	struct occ *occ = dev_get_drvdata(&client->dev);
 
 	occ_shutdown(occ);
+
+	return 0;
 }
 
 static const struct of_device_id p8_i2c_occ_of_match[] = {
@@ -246,7 +248,7 @@ static struct i2c_driver p8_i2c_occ_driver = {
 		.name = "occ-hwmon",
 		.of_match_table = p8_i2c_occ_of_match,
 	},
-	.probe = p8_i2c_occ_probe,
+	.probe_new = p8_i2c_occ_probe,
 	.remove = p8_i2c_occ_remove,
 };
 

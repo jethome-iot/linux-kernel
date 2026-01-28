@@ -998,11 +998,7 @@ static int add_control_with_pfx(struct hda_gen_spec *spec, int type,
 				const char *sfx, int cidx, unsigned long val)
 {
 	char name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
-	int len;
-
-	len = snprintf(name, sizeof(name), "%s %s %s", pfx, dir, sfx);
-	if (snd_BUG_ON(len >= sizeof(name)))
-		return -EINVAL;
+	snprintf(name, sizeof(name), "%s %s %s", pfx, dir, sfx);
 	if (!add_control(spec, type, name, cidx, val))
 		return -ENOMEM;
 	return 0;
@@ -3946,6 +3942,7 @@ static int create_mute_led_cdev(struct hda_codec *codec,
 	cdev->max_brightness = 1;
 	cdev->default_trigger = micmute ? "audio-micmute" : "audio-mute";
 	cdev->brightness_set_blocking = callback;
+	cdev->brightness = ledtrig_audio_get(idx);
 	cdev->flags = LED_CORE_SUSPENDRESUME;
 
 	err = led_classdev_register(&codec->core.dev, cdev);

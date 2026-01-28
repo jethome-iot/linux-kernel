@@ -13,6 +13,7 @@
 #include <linux/mfd/axp20x.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/power_supply.h>
@@ -45,7 +46,7 @@ struct axp20x_ac_power {
 	struct iio_channel *acin_i;
 	bool has_acin_path_sel;
 	unsigned int num_irqs;
-	unsigned int irqs[] __counted_by(num_irqs);
+	unsigned int irqs[];
 };
 
 static irqreturn_t axp20x_ac_power_irq(int irq, void *devid)
@@ -376,9 +377,11 @@ static int axp20x_ac_power_probe(struct platform_device *pdev)
 	/* Request irqs after registering, as irqs may trigger immediately */
 	for (i = 0; i < axp_data->num_irq_names; i++) {
 		irq = platform_get_irq_byname(pdev, axp_data->irq_names[i]);
-		if (irq < 0)
+		if (irq < 0) {
+			dev_err(&pdev->dev, "No IRQ for %s: %d\n",
+				axp_data->irq_names[i], irq);
 			return irq;
-
+		}
 		power->irqs[i] = regmap_irq_get_virq(axp20x->regmap_irqc, irq);
 		ret = devm_request_any_context_irq(&pdev->dev, power->irqs[i],
 						   axp20x_ac_power_irq, 0,

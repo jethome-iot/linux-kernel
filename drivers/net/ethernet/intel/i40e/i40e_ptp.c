@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright(c) 2013 - 2018 Intel Corporation. */
 
+#include "i40e.h"
 #include <linux/ptp_classify.h>
 #include <linux/posix-clock.h>
-#include "i40e.h"
-#include "i40e_devids.h"
 
 /* The XL710 timesync is very much like Intel's 82599 design when it comes to
  * the fundamental clock design. However, the clock operations are much simpler
@@ -28,6 +27,7 @@
 #define I40E_PRTTSYN_CTL1_TSYNTYPE_V2  (2 << \
 					I40E_PRTTSYN_CTL1_TSYNTYPE_SHIFT)
 #define I40E_SUBDEV_ID_25G_PTP_PIN	0xB
+#define to_dev(obj) container_of(obj, struct device, kobj)
 
 enum i40e_ptp_pin {
 	SDP3_2 = 0,
@@ -35,7 +35,7 @@ enum i40e_ptp_pin {
 	GPIO_4
 };
 
-enum i40e_can_set_pins {
+enum i40e_can_set_pins_t {
 	CANT_DO_PINS = -1,
 	CAN_SET_PINS,
 	CAN_DO_PINS
@@ -193,7 +193,7 @@ static bool i40e_is_ptp_pin_dev(struct i40e_hw *hw)
  * return CAN_DO_PINS if pins can be manipulated within a NIC or
  * return CANT_DO_PINS otherwise.
  **/
-static enum i40e_can_set_pins i40e_can_set_pins(struct i40e_pf *pf)
+static enum i40e_can_set_pins_t i40e_can_set_pins(struct i40e_pf *pf)
 {
 	if (!i40e_is_ptp_pin_dev(&pf->hw)) {
 		dev_warn(&pf->pdev->dev,
@@ -335,25 +335,43 @@ static void i40e_ptp_convert_to_hwtstamp(struct skb_shared_hwtstamps *hwtstamps,
 }
 
 /**
- * i40e_ptp_adjfine - Adjust the PHC frequency
+ * i40e_ptp_adjfreq - Adjust the PHC frequency
  * @ptp: The PTP clock structure
- * @scaled_ppm: Scaled parts per million adjustment from base
+ * @ppb: Parts per billion adjustment from the base
  *
- * Adjust the frequency of the PHC by the indicated delta from the base
- * frequency.
- *
- * Scaled parts per million is ppm with a 16 bit binary fractional field.
+ * Adjust the frequency of the PHC by the indicated parts per billion from the
+ * base frequency.
  **/
-static int i40e_ptp_adjfine(struct ptp_clock_info *ptp, long scaled_ppm)
+static int i40e_ptp_adjfreq(struct ptp_clock_info *ptp, s32 ppb)
 {
 	struct i40e_pf *pf = container_of(ptp, struct i40e_pf, ptp_caps);
 	struct i40e_hw *hw = &pf->hw;
-	u64 adj, base_adj;
+	u64 adj, freq, diff;
+	int neg_adj = 0;
 
+	if (ppb < 0) {
+		neg_adj = 1;
+		ppb = -ppb;
+	}
+
+	freq = I40E_PTP_40GB_INCVAL;
+	freq *= ppb;
+	diff = div_u64(freq, 1000000000ULL);
+
+	if (neg_adj)
+		adj = I40E_PTP_40GB_INCVAL - diff;
+	else
+		adj = I40E_PTP_40GB_INCVAL + diff;
+
+	/* At some link speeds, the base incval is so large that directly
+	 * multiplying by ppb would result in arithmetic overflow even when
+	 * using a u64. Avoid this by instead calculating the new incval
+	 * always in terms of the 40GbE clock rate and then multiplying by the
+	 * link speed factor afterwards. This does result in slightly lower
+	 * precision at lower link speeds, but it is fairly minor.
+	 */
 	smp_mb(); /* Force any pending update before accessing. */
-	base_adj = I40E_PTP_40GB_INCVAL * READ_ONCE(pf->ptp_adj_mult);
-
-	adj = adjust_by_scaled_ppm(base_adj, scaled_ppm);
+	adj *= READ_ONCE(pf->ptp_adj_mult);
 
 	wr32(hw, I40E_PRTTSYN_INC_L, adj & 0xFFFFFFFF);
 	wr32(hw, I40E_PRTTSYN_INC_H, adj >> 32);
@@ -680,7 +698,7 @@ void i40e_ptp_rx_hang(struct i40e_pf *pf)
 	 * configured. We don't want to spuriously warn about Rx timestamp
 	 * hangs if we don't care about the timestamps.
 	 */
-	if (!test_bit(I40E_FLAG_PTP_ENA, pf->flags) || !pf->ptp_rx)
+	if (!(pf->flags & I40E_FLAG_PTP) || !pf->ptp_rx)
 		return;
 
 	spin_lock_bh(&pf->ptp_rx_lock);
@@ -733,7 +751,7 @@ void i40e_ptp_tx_hang(struct i40e_pf *pf)
 {
 	struct sk_buff *skb;
 
-	if (!test_bit(I40E_FLAG_PTP_ENA, pf->flags) || !pf->ptp_tx)
+	if (!(pf->flags & I40E_FLAG_PTP) || !pf->ptp_tx)
 		return;
 
 	/* Nothing to do if we're not already waiting for a timestamp */
@@ -771,7 +789,7 @@ void i40e_ptp_tx_hwtstamp(struct i40e_pf *pf)
 	u32 hi, lo;
 	u64 ns;
 
-	if (!test_bit(I40E_FLAG_PTP_ENA, pf->flags) || !pf->ptp_tx)
+	if (!(pf->flags & I40E_FLAG_PTP) || !pf->ptp_tx)
 		return;
 
 	/* don't attempt to timestamp if we don't have an skb */
@@ -818,7 +836,7 @@ void i40e_ptp_rx_hwtstamp(struct i40e_pf *pf, struct sk_buff *skb, u8 index)
 	/* Since we cannot turn off the Rx timestamp logic if the device is
 	 * doing Tx timestamping, check if Rx timestamping is configured.
 	 */
-	if (!test_bit(I40E_FLAG_PTP_ENA, pf->flags) || !pf->ptp_rx)
+	if (!(pf->flags & I40E_FLAG_PTP) || !pf->ptp_rx)
 		return;
 
 	hw = &pf->hw;
@@ -924,7 +942,7 @@ int i40e_ptp_get_ts_config(struct i40e_pf *pf, struct ifreq *ifr)
 {
 	struct hwtstamp_config *config = &pf->tstamp_config;
 
-	if (!test_bit(I40E_FLAG_PTP_ENA, pf->flags))
+	if (!(pf->flags & I40E_FLAG_PTP))
 		return -EOPNOTSUPP;
 
 	return copy_to_user(ifr->ifr_data, config, sizeof(*config)) ?
@@ -1071,7 +1089,7 @@ static void i40e_ptp_set_pins_hw(struct i40e_pf *pf)
 static int i40e_ptp_set_pins(struct i40e_pf *pf,
 			     struct i40e_ptp_pins_settings *pins)
 {
-	enum i40e_can_set_pins pin_caps = i40e_can_set_pins(pf);
+	enum i40e_can_set_pins_t pin_caps = i40e_can_set_pins(pf);
 	int i = 0;
 
 	if (pin_caps == CANT_DO_PINS)
@@ -1133,7 +1151,7 @@ int i40e_ptp_alloc_pins(struct i40e_pf *pf)
 
 	if (!pf->ptp_pins) {
 		dev_warn(&pf->pdev->dev, "Cannot allocate memory for PTP pins structure.\n");
-		return -ENOMEM;
+		return -I40E_ERR_NO_MEMORY;
 	}
 
 	pf->ptp_pins->sdp3_2 = off;
@@ -1187,6 +1205,10 @@ static int i40e_ptp_set_timestamp_mode(struct i40e_pf *pf,
 
 	INIT_WORK(&pf->ptp_extts0_work, i40e_ptp_extts0_work);
 
+	/* Reserved for future extensions. */
+	if (config->flags)
+		return -EINVAL;
+
 	switch (config->tx_type) {
 	case HWTSTAMP_TX_OFF:
 		pf->ptp_tx = false;
@@ -1211,7 +1233,7 @@ static int i40e_ptp_set_timestamp_mode(struct i40e_pf *pf,
 	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
 	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
-		if (!test_bit(I40E_HW_CAP_PTP_L4, pf->hw.caps))
+		if (!(pf->hw_features & I40E_HW_PTP_L4_CAPABLE))
 			return -ERANGE;
 		pf->ptp_rx = true;
 		tsyntype = I40E_PRTTSYN_CTL1_V1MESSTYPE0_MASK |
@@ -1225,7 +1247,7 @@ static int i40e_ptp_set_timestamp_mode(struct i40e_pf *pf,
 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
 	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
-		if (!test_bit(I40E_HW_CAP_PTP_L4, pf->hw.caps))
+		if (!(pf->hw_features & I40E_HW_PTP_L4_CAPABLE))
 			return -ERANGE;
 		fallthrough;
 	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
@@ -1234,7 +1256,7 @@ static int i40e_ptp_set_timestamp_mode(struct i40e_pf *pf,
 		pf->ptp_rx = true;
 		tsyntype = I40E_PRTTSYN_CTL1_V2MESSTYPE0_MASK |
 			   I40E_PRTTSYN_CTL1_TSYNTYPE_V2;
-		if (test_bit(I40E_HW_CAP_PTP_L4, pf->hw.caps)) {
+		if (pf->hw_features & I40E_HW_PTP_L4_CAPABLE) {
 			tsyntype |= I40E_PRTTSYN_CTL1_UDP_ENA_MASK;
 			config->rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
 		} else {
@@ -1308,7 +1330,7 @@ int i40e_ptp_set_ts_config(struct i40e_pf *pf, struct ifreq *ifr)
 	struct hwtstamp_config config;
 	int err;
 
-	if (!test_bit(I40E_FLAG_PTP_ENA, pf->flags))
+	if (!(pf->flags & I40E_FLAG_PTP))
 		return -EOPNOTSUPP;
 
 	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
@@ -1380,11 +1402,11 @@ static long i40e_ptp_create_clock(struct i40e_pf *pf)
 	if (!IS_ERR_OR_NULL(pf->ptp_clock))
 		return 0;
 
-	strscpy(pf->ptp_caps.name, i40e_driver_name,
+	strlcpy(pf->ptp_caps.name, i40e_driver_name,
 		sizeof(pf->ptp_caps.name) - 1);
 	pf->ptp_caps.owner = THIS_MODULE;
 	pf->ptp_caps.max_adj = 999999999;
-	pf->ptp_caps.adjfine = i40e_ptp_adjfine;
+	pf->ptp_caps.adjfreq = i40e_ptp_adjfreq;
 	pf->ptp_caps.adjtime = i40e_ptp_adjtime;
 	pf->ptp_caps.gettimex64 = i40e_ptp_gettimex;
 	pf->ptp_caps.settime64 = i40e_ptp_settime;
@@ -1426,7 +1448,7 @@ static long i40e_ptp_create_clock(struct i40e_pf *pf)
 void i40e_ptp_save_hw_time(struct i40e_pf *pf)
 {
 	/* don't try to access the PTP clock if it's not enabled */
-	if (!test_bit(I40E_FLAG_PTP_ENA, pf->flags))
+	if (!(pf->flags & I40E_FLAG_PTP))
 		return;
 
 	i40e_ptp_gettimex(&pf->ptp_caps, &pf->ptp_prev_hw_time, NULL);
@@ -1480,10 +1502,10 @@ void i40e_ptp_init(struct i40e_pf *pf)
 	/* Only one PF is assigned to control 1588 logic per port. Do not
 	 * enable any support for PFs not assigned via PRTTSYN_CTL0.PF_ID
 	 */
-	pf_id = FIELD_GET(I40E_PRTTSYN_CTL0_PF_ID_MASK,
-			  rd32(hw, I40E_PRTTSYN_CTL0));
+	pf_id = (rd32(hw, I40E_PRTTSYN_CTL0) & I40E_PRTTSYN_CTL0_PF_ID_MASK) >>
+		I40E_PRTTSYN_CTL0_PF_ID_SHIFT;
 	if (hw->pf_id != pf_id) {
-		clear_bit(I40E_FLAG_PTP_ENA, pf->flags);
+		pf->flags &= ~I40E_FLAG_PTP;
 		dev_info(&pf->pdev->dev, "%s: PTP not supported on %s\n",
 			 __func__,
 			 netdev->name);
@@ -1504,7 +1526,7 @@ void i40e_ptp_init(struct i40e_pf *pf)
 
 		if (pf->hw.debug_mask & I40E_DEBUG_LAN)
 			dev_info(&pf->pdev->dev, "PHC enabled\n");
-		set_bit(I40E_FLAG_PTP_ENA, pf->flags);
+		pf->flags |= I40E_FLAG_PTP;
 
 		/* Ensure the clocks are running. */
 		regval = rd32(hw, I40E_PRTTSYN_CTL0);
@@ -1539,7 +1561,7 @@ void i40e_ptp_stop(struct i40e_pf *pf)
 	struct i40e_hw *hw = &pf->hw;
 	u32 regval;
 
-	clear_bit(I40E_FLAG_PTP_ENA, pf->flags);
+	pf->flags &= ~I40E_FLAG_PTP;
 	pf->ptp_tx = false;
 	pf->ptp_rx = false;
 

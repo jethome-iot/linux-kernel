@@ -37,28 +37,28 @@ struct cs47l35 {
 	struct madera_fll fll;
 };
 
-static const struct cs_dsp_region cs47l35_dsp1_regions[] = {
+static const struct wm_adsp_region cs47l35_dsp1_regions[] = {
 	{ .type = WMFW_ADSP2_PM, .base = 0x080000 },
 	{ .type = WMFW_ADSP2_ZM, .base = 0x0e0000 },
 	{ .type = WMFW_ADSP2_XM, .base = 0x0a0000 },
 	{ .type = WMFW_ADSP2_YM, .base = 0x0c0000 },
 };
 
-static const struct cs_dsp_region cs47l35_dsp2_regions[] = {
+static const struct wm_adsp_region cs47l35_dsp2_regions[] = {
 	{ .type = WMFW_ADSP2_PM, .base = 0x100000 },
 	{ .type = WMFW_ADSP2_ZM, .base = 0x160000 },
 	{ .type = WMFW_ADSP2_XM, .base = 0x120000 },
 	{ .type = WMFW_ADSP2_YM, .base = 0x140000 },
 };
 
-static const struct cs_dsp_region cs47l35_dsp3_regions[] = {
+static const struct wm_adsp_region cs47l35_dsp3_regions[] = {
 	{ .type = WMFW_ADSP2_PM, .base = 0x180000 },
 	{ .type = WMFW_ADSP2_ZM, .base = 0x1e0000 },
 	{ .type = WMFW_ADSP2_XM, .base = 0x1a0000 },
 	{ .type = WMFW_ADSP2_YM, .base = 0x1c0000 },
 };
 
-static const struct cs_dsp_region *cs47l35_dsp_regions[] = {
+static const struct wm_adsp_region *cs47l35_dsp_regions[] = {
 	cs47l35_dsp1_regions,
 	cs47l35_dsp2_regions,
 	cs47l35_dsp3_regions,
@@ -1348,10 +1348,6 @@ static int cs47l35_set_fll(struct snd_soc_component *component, int fll_id,
 	}
 }
 
-static const struct snd_soc_dai_ops cs47l35_dai_ops = {
-	.compress_new = snd_soc_new_compress,
-};
-
 static struct snd_soc_dai_driver cs47l35_dai[] = {
 	{
 		.name = "cs47l35-aif1",
@@ -1466,7 +1462,7 @@ static struct snd_soc_dai_driver cs47l35_dai[] = {
 			.rates = MADERA_RATES,
 			.formats = MADERA_FORMATS,
 		},
-		.ops = &cs47l35_dai_ops,
+		.compress_new = &snd_soc_new_compress,
 	},
 	{
 		.name = "cs47l35-dsp-voicectrl",
@@ -1487,7 +1483,7 @@ static struct snd_soc_dai_driver cs47l35_dai[] = {
 			.rates = MADERA_RATES,
 			.formats = MADERA_FORMATS,
 		},
-		.ops = &cs47l35_dai_ops,
+		.compress_new = &snd_soc_new_compress,
 	},
 	{
 		.name = "cs47l35-dsp-trace",
@@ -1510,14 +1506,14 @@ static int cs47l35_open(struct snd_soc_component *component,
 	struct madera *madera = priv->madera;
 	int n_adsp;
 
-	if (strcmp(snd_soc_rtd_to_codec(rtd, 0)->name, "cs47l35-dsp-voicectrl") == 0) {
+	if (strcmp(asoc_rtd_to_codec(rtd, 0)->name, "cs47l35-dsp-voicectrl") == 0) {
 		n_adsp = 2;
-	} else if (strcmp(snd_soc_rtd_to_codec(rtd, 0)->name, "cs47l35-dsp-trace") == 0) {
+	} else if (strcmp(asoc_rtd_to_codec(rtd, 0)->name, "cs47l35-dsp-trace") == 0) {
 		n_adsp = 0;
 	} else {
 		dev_err(madera->dev,
 			"No suitable compressed stream for DAI '%s'\n",
-			snd_soc_rtd_to_codec(rtd, 0)->name);
+			asoc_rtd_to_codec(rtd, 0)->name);
 		return -EINVAL;
 	}
 
@@ -1642,6 +1638,7 @@ static const struct snd_soc_component_driver soc_component_dev_cs47l35 = {
 	.num_dapm_routes	= ARRAY_SIZE(cs47l35_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
+	.non_legacy_dai_naming	= 1,
 };
 
 static int cs47l35_probe(struct platform_device *pdev)
@@ -1689,15 +1686,15 @@ static int cs47l35_probe(struct platform_device *pdev)
 
 	for (i = 0; i < CS47L35_NUM_ADSP; i++) {
 		cs47l35->core.adsp[i].part = "cs47l35";
-		cs47l35->core.adsp[i].cs_dsp.num = i + 1;
-		cs47l35->core.adsp[i].cs_dsp.type = WMFW_ADSP2;
-		cs47l35->core.adsp[i].cs_dsp.rev = 1;
-		cs47l35->core.adsp[i].cs_dsp.dev = madera->dev;
-		cs47l35->core.adsp[i].cs_dsp.regmap = madera->regmap_32bit;
+		cs47l35->core.adsp[i].num = i + 1;
+		cs47l35->core.adsp[i].type = WMFW_ADSP2;
+		cs47l35->core.adsp[i].rev = 1;
+		cs47l35->core.adsp[i].dev = madera->dev;
+		cs47l35->core.adsp[i].regmap = madera->regmap_32bit;
 
-		cs47l35->core.adsp[i].cs_dsp.base = wm_adsp2_control_bases[i];
-		cs47l35->core.adsp[i].cs_dsp.mem = cs47l35_dsp_regions[i];
-		cs47l35->core.adsp[i].cs_dsp.num_mems =
+		cs47l35->core.adsp[i].base = wm_adsp2_control_bases[i];
+		cs47l35->core.adsp[i].mem = cs47l35_dsp_regions[i];
+		cs47l35->core.adsp[i].num_mems =
 			ARRAY_SIZE(cs47l35_dsp1_regions);
 
 		ret = wm_adsp2_init(&cs47l35->core.adsp[i]);
@@ -1748,7 +1745,7 @@ error_core:
 	return ret;
 }
 
-static void cs47l35_remove(struct platform_device *pdev)
+static int cs47l35_remove(struct platform_device *pdev)
 {
 	struct cs47l35 *cs47l35 = platform_get_drvdata(pdev);
 	int i;
@@ -1762,6 +1759,8 @@ static void cs47l35_remove(struct platform_device *pdev)
 	madera_free_irq(cs47l35->core.madera, MADERA_IRQ_DSP_IRQ1, cs47l35);
 	madera_free_overheat(&cs47l35->core);
 	madera_core_free(&cs47l35->core);
+
+	return 0;
 }
 
 static struct platform_driver cs47l35_codec_driver = {
@@ -1769,7 +1768,7 @@ static struct platform_driver cs47l35_codec_driver = {
 		.name = "cs47l35-codec",
 	},
 	.probe = &cs47l35_probe,
-	.remove_new = cs47l35_remove,
+	.remove = &cs47l35_remove,
 };
 
 module_platform_driver(cs47l35_codec_driver);

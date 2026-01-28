@@ -90,7 +90,6 @@ struct hci_xfer {
 		struct {
 			/* DMA specific */
 			dma_addr_t data_dma;
-			void *bounce_buf;
 			int ring_number;
 			int ring_entry;
 		};
@@ -99,7 +98,7 @@ struct hci_xfer {
 
 static inline struct hci_xfer *hci_alloc_xfer(unsigned int n)
 {
-	return kcalloc(n, sizeof(struct hci_xfer), GFP_KERNEL);
+	return kzalloc(sizeof(struct hci_xfer) * n, GFP_KERNEL);
 }
 
 static inline void hci_free_xfer(struct hci_xfer *xfer, unsigned int n)

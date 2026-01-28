@@ -1173,7 +1173,7 @@ static int owl_emac_ndo_set_mac_addr(struct net_device *netdev, void *addr)
 	if (netif_running(netdev))
 		return -EBUSY;
 
-	eth_hw_addr_set(netdev, skaddr->sa_data);
+	memcpy(netdev->dev_addr, skaddr->sa_data, netdev->addr_len);
 	owl_emac_set_hw_mac_addr(netdev);
 
 	return owl_emac_setup_frame_xmit(netdev_priv(netdev));
@@ -1275,6 +1275,9 @@ static int owl_emac_mdio_read(struct mii_bus *bus, int addr, int regnum)
 	u32 data, tmp;
 	int ret;
 
+	if (regnum & MII_ADDR_C45)
+		return -EOPNOTSUPP;
+
 	data = OWL_EMAC_BIT_MAC_CSR10_SB;
 	data |= OWL_EMAC_VAL_MAC_CSR10_OPCODE_RD << OWL_EMAC_OFF_MAC_CSR10_OPCODE;
 
@@ -1301,6 +1304,9 @@ owl_emac_mdio_write(struct mii_bus *bus, int addr, int regnum, u16 val)
 {
 	struct owl_emac_priv *priv = bus->priv;
 	u32 data, tmp;
+
+	if (regnum & MII_ADDR_C45)
+		return -EOPNOTSUPP;
 
 	data = OWL_EMAC_BIT_MAC_CSR10_SB;
 	data |= OWL_EMAC_VAL_MAC_CSR10_OPCODE_WR << OWL_EMAC_OFF_MAC_CSR10_OPCODE;
@@ -1379,7 +1385,7 @@ static void owl_emac_get_mac_addr(struct net_device *netdev)
 	struct device *dev = netdev->dev.parent;
 	int ret;
 
-	ret = platform_get_ethdev_address(dev, netdev);
+	ret = eth_platform_get_mac_address(dev, netdev->dev_addr);
 	if (!ret && is_valid_ether_addr(netdev->dev_addr))
 		return;
 
@@ -1570,7 +1576,7 @@ static int owl_emac_probe(struct platform_device *pdev)
 	netdev->watchdog_timeo = OWL_EMAC_TX_TIMEOUT;
 	netdev->netdev_ops = &owl_emac_netdev_ops;
 	netdev->ethtool_ops = &owl_emac_ethtool_ops;
-	netif_napi_add(netdev, &priv->napi, owl_emac_poll);
+	netif_napi_add(netdev, &priv->napi, owl_emac_poll, NAPI_POLL_WEIGHT);
 
 	ret = devm_register_netdev(dev, netdev);
 	if (ret) {
@@ -1582,13 +1588,15 @@ static int owl_emac_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void owl_emac_remove(struct platform_device *pdev)
+static int owl_emac_remove(struct platform_device *pdev)
 {
 	struct owl_emac_priv *priv = platform_get_drvdata(pdev);
 
 	netif_napi_del(&priv->napi);
 	phy_disconnect(priv->netdev->phydev);
 	cancel_work_sync(&priv->mac_reset_task);
+
+	return 0;
 }
 
 static const struct of_device_id owl_emac_of_match[] = {
@@ -1607,7 +1615,7 @@ static struct platform_driver owl_emac_driver = {
 		.pm = &owl_emac_pm_ops,
 	},
 	.probe = owl_emac_probe,
-	.remove_new = owl_emac_remove,
+	.remove = owl_emac_remove,
 };
 module_platform_driver(owl_emac_driver);
 

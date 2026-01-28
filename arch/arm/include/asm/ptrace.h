@@ -159,14 +159,17 @@ static inline unsigned long user_stack_pointer(struct pt_regs *regs)
 	return regs->ARM_sp;
 }
 
+#ifdef CONFIG_AMLOGIC_VMAP
+#define current_pt_regs(void)({ (struct pt_regs *)			\
+		((current_stack_pointer | (THREAD_SIZE - 1)) - 7 -	\
+		 THREAD_INFO_SIZE) - 1;					\
+})
+#else
 #define current_pt_regs(void) ({ (struct pt_regs *)			\
 		((current_stack_pointer | (THREAD_SIZE - 1)) - 7) - 1;	\
 })
+#endif
 
-static inline void regs_set_return_value(struct pt_regs *regs, unsigned long rc)
-{
-	regs->ARM_r0 = rc;
-}
 
 /*
  * Update ITSTATE after normal execution of an IT block instruction.
@@ -192,9 +195,6 @@ static inline unsigned long it_advance(unsigned long cpsr)
 	}
 	return cpsr;
 }
-
-int syscall_trace_enter(struct pt_regs *regs);
-void syscall_trace_exit(struct pt_regs *regs);
 
 #endif /* __ASSEMBLY__ */
 #endif

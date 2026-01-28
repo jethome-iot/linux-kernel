@@ -17,8 +17,6 @@
 #include <linux/atomic.h>
 #include <linux/static_key.h>
 
-extern unsigned long kfence_sample_interval;
-
 /*
  * We allocate an even number of pages, as it simplifies calculations to map
  * address to metadata indices; effectively, the very first page serves as an
@@ -59,16 +57,15 @@ static __always_inline bool is_kfence_address(const void *addr)
 }
 
 /**
- * kfence_alloc_pool_and_metadata() - allocate the KFENCE pool and KFENCE
- * metadata via memblock
+ * kfence_alloc_pool() - allocate the KFENCE pool via memblock
  */
-void __init kfence_alloc_pool_and_metadata(void);
+void __init kfence_alloc_pool(void);
 
 /**
  * kfence_init() - perform KFENCE initialization at boot time
  *
- * Requires that kfence_alloc_pool_and_metadata() was called before. This sets
- * up the allocation gate timer, and requires that workqueues are available.
+ * Requires that kfence_alloc_pool() was called before. This sets up the
+ * allocation gate timer, and requires that workqueues are available.
  */
 void __init kfence_init(void);
 
@@ -218,15 +215,13 @@ struct kmem_obj_info;
  *
  * Copies information to @kpp for KFENCE objects.
  */
-bool __kfence_obj_info(struct kmem_obj_info *kpp, void *object, struct slab *slab);
+bool __kfence_obj_info(struct kmem_obj_info *kpp, void *object, struct page *page);
 #endif
 
 #else /* CONFIG_KFENCE */
 
-#define kfence_sample_interval	(0)
-
 static inline bool is_kfence_address(const void *addr) { return false; }
-static inline void kfence_alloc_pool_and_metadata(void) { }
+static inline void kfence_alloc_pool(void) { }
 static inline void kfence_init(void) { }
 static inline void kfence_shutdown_cache(struct kmem_cache *s) { }
 static inline void *kfence_alloc(struct kmem_cache *s, size_t size, gfp_t flags) { return NULL; }
@@ -242,7 +237,7 @@ static inline bool __must_check kfence_handle_page_fault(unsigned long addr, boo
 
 #ifdef CONFIG_PRINTK
 struct kmem_obj_info;
-static inline bool __kfence_obj_info(struct kmem_obj_info *kpp, void *object, struct slab *slab)
+static inline bool __kfence_obj_info(struct kmem_obj_info *kpp, void *object, struct page *page)
 {
 	return false;
 }

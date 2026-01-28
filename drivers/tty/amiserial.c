@@ -12,7 +12,7 @@
  * (non hardware specific) changes to serial.c.
  *
  * The port is registered with the tty driver as minor device 64, and
- * therefore other ports should only use 65 upwards.
+ * therefore other ports should should only use 65 upwards.
  *
  * Richard Lucock 28/12/99
  *
@@ -51,7 +51,6 @@
 #include <linux/seq_file.h>
 #include <linux/serial.h>
 #include <linux/serial_reg.h>
-#include <linux/serial_core.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/slab.h>
@@ -81,7 +80,7 @@ struct serial_state {
 	int			quot;
 	int			IER; 	/* Interrupt Enable Register */
 	int			MCR; 	/* Modem control register */
-	u8			x_char;	/* xon/xoff character */
+	int			x_char;	/* xon/xoff character */
 };
 
 static struct tty_driver *serial_driver;
@@ -94,7 +93,7 @@ static struct tty_driver *serial_driver;
 static unsigned char current_ctl_bits;
 
 static void change_speed(struct tty_struct *tty, struct serial_state *info,
-			 const struct ktermios *old);
+		struct ktermios *old);
 static void rs_wait_until_sent(struct tty_struct *tty, int timeout);
 
 
@@ -178,9 +177,9 @@ static void receive_chars(struct serial_state *info)
 {
         int status;
 	int serdatr;
-	u8 ch, flag;
+	unsigned char ch, flag;
 	struct	async_icount *icount;
-	bool overrun = false;
+	int oe = 0;
 
 	icount = &info->icount;
 
@@ -230,7 +229,7 @@ static void receive_chars(struct serial_state *info)
 	   * should be ignored.
 	   */
 	  if (status & info->ignore_status_mask)
-		  return;
+	    goto out;
 
 	  status &= info->read_status_mask;
 
@@ -251,13 +250,15 @@ static void receive_chars(struct serial_state *info)
 	     * reported immediately, and doesn't
 	     * affect the current character
 	     */
-	     overrun = true;
+	     oe = 1;
 	  }
 	}
 	tty_insert_flip_char(&info->tport, ch, flag);
-	if (overrun)
+	if (oe == 1)
 		tty_insert_flip_char(&info->tport, 0, TTY_OVERRUN);
 	tty_flip_buffer_push(&info->tport);
+out:
+	return;
 }
 
 static void transmit_chars(struct serial_state *info)
@@ -282,12 +283,12 @@ static void transmit_chars(struct serial_state *info)
 
 	amiga_custom.serdat = info->xmit.buf[info->xmit.tail++] | 0x100;
 	mb();
-	info->xmit.tail = info->xmit.tail & (UART_XMIT_SIZE - 1);
+	info->xmit.tail = info->xmit.tail & (SERIAL_XMIT_SIZE-1);
 	info->icount.tx++;
 
 	if (CIRC_CNT(info->xmit.head,
 		     info->xmit.tail,
-		     UART_XMIT_SIZE) < WAKEUP_CHARS)
+		     SERIAL_XMIT_SIZE) < WAKEUP_CHARS)
 		tty_wakeup(info->tport.tty);
 
 #ifdef SERIAL_DEBUG_INTR
@@ -345,7 +346,7 @@ static void check_modem_status(struct serial_state *info)
 #if (defined(SERIAL_DEBUG_INTR) || defined(SERIAL_DEBUG_FLOW))
 				printk("CTS tx start...");
 #endif
-				port->tty->hw_stopped = false;
+				port->tty->hw_stopped = 0;
 				info->IER |= UART_IER_THRI;
 				amiga_custom.intena = IF_SETCLR | IF_TBE;
 				mb();
@@ -360,7 +361,7 @@ static void check_modem_status(struct serial_state *info)
 #if (defined(SERIAL_DEBUG_INTR) || defined(SERIAL_DEBUG_FLOW))
 				printk("CTS tx stop...");
 #endif
-				port->tty->hw_stopped = true;
+				port->tty->hw_stopped = 1;
 				info->IER &= ~UART_IER_THRI;
 				/* disable Tx interrupt and remove any pending interrupts */
 				amiga_custom.intena = IF_TBE;
@@ -500,7 +501,7 @@ static int startup(struct tty_struct *tty, struct serial_state *info)
 	 */
 	change_speed(tty, info, NULL);
 
-	tty_port_set_initialized(port, true);
+	tty_port_set_initialized(port, 1);
 	local_irq_restore(flags);
 	return 0;
 
@@ -537,8 +538,10 @@ static void shutdown(struct tty_struct *tty, struct serial_state *info)
 	 */
 	free_irq(IRQ_AMIGA_VERTB, info);
 
-	free_page((unsigned long)info->xmit.buf);
-	info->xmit.buf = NULL;
+	if (info->xmit.buf) {
+		free_page((unsigned long) info->xmit.buf);
+		info->xmit.buf = NULL;
+	}
 
 	info->IER = 0;
 	amiga_custom.intena = IF_RBF | IF_TBE;
@@ -554,7 +557,7 @@ static void shutdown(struct tty_struct *tty, struct serial_state *info)
 
 	set_bit(TTY_IO_ERROR, &tty->flags);
 
-	tty_port_set_initialized(&info->tport, false);
+	tty_port_set_initialized(&info->tport, 0);
 	local_irq_restore(flags);
 }
 
@@ -564,7 +567,7 @@ static void shutdown(struct tty_struct *tty, struct serial_state *info)
  * the specified baud rate for a serial port.
  */
 static void change_speed(struct tty_struct *tty, struct serial_state *info,
-			 const struct ktermios *old_termios)
+			 struct ktermios *old_termios)
 {
 	struct tty_port *port = &info->tport;
 	int	quot = 0, baud_base, baud;
@@ -587,8 +590,10 @@ static void change_speed(struct tty_struct *tty, struct serial_state *info,
 	}
 	if (!(cflag & PARODD))
 		cval |= UART_LCR_EPAR;
+#ifdef CMSPAR
 	if (cflag & CMSPAR)
 		cval |= UART_LCR_SPAR;
+#endif
 
 	/* Determine divisor based on baud rate */
 	baud = tty_get_baud_rate(tty);
@@ -694,7 +699,7 @@ static void change_speed(struct tty_struct *tty, struct serial_state *info,
 	local_irq_restore(flags);
 }
 
-static int rs_put_char(struct tty_struct *tty, u8 ch)
+static int rs_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	struct serial_state *info;
 	unsigned long flags;
@@ -707,13 +712,13 @@ static int rs_put_char(struct tty_struct *tty, u8 ch)
 	local_irq_save(flags);
 	if (CIRC_SPACE(info->xmit.head,
 		       info->xmit.tail,
-		       UART_XMIT_SIZE) == 0) {
+		       SERIAL_XMIT_SIZE) == 0) {
 		local_irq_restore(flags);
 		return 0;
 	}
 
 	info->xmit.buf[info->xmit.head++] = ch;
-	info->xmit.head &= UART_XMIT_SIZE - 1;
+	info->xmit.head &= SERIAL_XMIT_SIZE-1;
 	local_irq_restore(flags);
 	return 1;
 }
@@ -739,7 +744,7 @@ static void rs_flush_chars(struct tty_struct *tty)
 	local_irq_restore(flags);
 }
 
-static ssize_t rs_write(struct tty_struct * tty, const u8 *buf, size_t count)
+static int rs_write(struct tty_struct * tty, const unsigned char *buf, int count)
 {
 	int	c, ret = 0;
 	struct serial_state *info = tty->driver_data;
@@ -752,14 +757,15 @@ static ssize_t rs_write(struct tty_struct * tty, const u8 *buf, size_t count)
 	while (1) {
 		c = CIRC_SPACE_TO_END(info->xmit.head,
 				      info->xmit.tail,
-				      UART_XMIT_SIZE);
+				      SERIAL_XMIT_SIZE);
 		if (count < c)
 			c = count;
 		if (c <= 0) {
 			break;
 		}
 		memcpy(info->xmit.buf + info->xmit.head, buf, c);
-		info->xmit.head = (info->xmit.head + c) & (UART_XMIT_SIZE - 1);
+		info->xmit.head = ((info->xmit.head + c) &
+				   (SERIAL_XMIT_SIZE-1));
 		buf += c;
 		count -= c;
 		ret += c;
@@ -786,14 +792,14 @@ static unsigned int rs_write_room(struct tty_struct *tty)
 {
 	struct serial_state *info = tty->driver_data;
 
-	return CIRC_SPACE(info->xmit.head, info->xmit.tail, UART_XMIT_SIZE);
+	return CIRC_SPACE(info->xmit.head, info->xmit.tail, SERIAL_XMIT_SIZE);
 }
 
 static unsigned int rs_chars_in_buffer(struct tty_struct *tty)
 {
 	struct serial_state *info = tty->driver_data;
 
-	return CIRC_CNT(info->xmit.head, info->xmit.tail, UART_XMIT_SIZE);
+	return CIRC_CNT(info->xmit.head, info->xmit.tail, SERIAL_XMIT_SIZE);
 }
 
 static void rs_flush_buffer(struct tty_struct *tty)
@@ -811,7 +817,7 @@ static void rs_flush_buffer(struct tty_struct *tty)
  * This function is used to send a high-priority XON/XOFF character to
  * the device
  */
-static void rs_send_xchar(struct tty_struct *tty, u8 ch)
+static void rs_send_xchar(struct tty_struct *tty, char ch)
 {
 	struct serial_state *info = tty->driver_data;
         unsigned long flags;
@@ -1167,7 +1173,7 @@ static int rs_ioctl(struct tty_struct *tty,
 	return 0;
 }
 
-static void rs_set_termios(struct tty_struct *tty, const struct ktermios *old_termios)
+static void rs_set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 {
 	struct serial_state *info = tty->driver_data;
 	unsigned long flags;
@@ -1195,7 +1201,7 @@ static void rs_set_termios(struct tty_struct *tty, const struct ktermios *old_te
 
 	/* Handle turning off CRTSCTS */
 	if ((old_termios->c_cflag & CRTSCTS) && !C_CRTSCTS(tty)) {
-		tty->hw_stopped = false;
+		tty->hw_stopped = 0;
 		rs_start(tty);
 	}
 
@@ -1327,7 +1333,7 @@ static void rs_hangup(struct tty_struct *tty)
 	rs_flush_buffer(tty);
 	shutdown(tty, info);
 	info->tport.count = 0;
-	tty_port_set_active(&info->tport, false);
+	tty_port_set_active(&info->tport, 0);
 	info->tport.tty = NULL;
 	wake_up_interruptible(&info->tport.open_wait);
 }
@@ -1452,18 +1458,18 @@ static const struct tty_operations serial_ops = {
 	.proc_show = rs_proc_show,
 };
 
-static bool amiga_carrier_raised(struct tty_port *port)
+static int amiga_carrier_raised(struct tty_port *port)
 {
 	return !(ciab.pra & SER_DCD);
 }
 
-static void amiga_dtr_rts(struct tty_port *port, bool active)
+static void amiga_dtr_rts(struct tty_port *port, int raise)
 {
 	struct serial_state *info = container_of(port, struct serial_state,
 			tport);
 	unsigned long flags;
 
-	if (active)
+	if (raise)
 		info->MCR |= SER_DTR|SER_RTS;
 	else
 		info->MCR &= ~(SER_DTR|SER_RTS);

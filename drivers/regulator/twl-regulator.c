@@ -12,6 +12,7 @@
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
@@ -195,6 +196,7 @@ static int twl4030reg_enable(struct regulator_dev *rdev)
 {
 	struct twlreg_info	*info = rdev_get_drvdata(rdev);
 	int			grp;
+	int			ret;
 
 	grp = twlreg_grp(rdev);
 	if (grp < 0)
@@ -202,13 +204,16 @@ static int twl4030reg_enable(struct regulator_dev *rdev)
 
 	grp |= P1_GRP_4030;
 
-	return twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_GRP, grp);
+	ret = twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_GRP, grp);
+
+	return ret;
 }
 
 static int twl4030reg_disable(struct regulator_dev *rdev)
 {
 	struct twlreg_info	*info = rdev_get_drvdata(rdev);
 	int			grp;
+	int			ret;
 
 	grp = twlreg_grp(rdev);
 	if (grp < 0)
@@ -216,7 +221,9 @@ static int twl4030reg_disable(struct regulator_dev *rdev)
 
 	grp &= ~(P1_GRP_4030 | P2_GRP_4030 | P3_GRP_4030);
 
-	return twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_GRP, grp);
+	ret = twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_GRP, grp);
+
+	return ret;
 }
 
 static int twl4030reg_get_status(struct regulator_dev *rdev)
@@ -655,7 +662,6 @@ static struct platform_driver twlreg_driver = {
 	 */
 	.driver  = {
 		.name  = "twl4030_reg",
-		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(twl_of_match),
 	},
 };

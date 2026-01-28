@@ -12,51 +12,61 @@
 #include <linux/netfs.h>
 
 #ifdef CONFIG_CEPH_FSCACHE
-#include <linux/fscache.h>
+
+extern struct fscache_netfs ceph_cache_netfs;
+
+int ceph_fscache_register(void);
+void ceph_fscache_unregister(void);
 
 int ceph_fscache_register_fs(struct ceph_fs_client* fsc, struct fs_context *fc);
 void ceph_fscache_unregister_fs(struct ceph_fs_client* fsc);
 
 void ceph_fscache_register_inode_cookie(struct inode *inode);
 void ceph_fscache_unregister_inode_cookie(struct ceph_inode_info* ci);
+void ceph_fscache_file_set_cookie(struct inode *inode, struct file *filp);
+void ceph_fscache_revalidate_cookie(struct ceph_inode_info *ci);
 
-void ceph_fscache_use_cookie(struct inode *inode, bool will_modify);
-void ceph_fscache_unuse_cookie(struct inode *inode, bool update);
-
-void ceph_fscache_update(struct inode *inode);
-void ceph_fscache_invalidate(struct inode *inode, bool dio_write);
+static inline void ceph_fscache_inode_init(struct ceph_inode_info *ci)
+{
+	ci->fscache = NULL;
+}
 
 static inline struct fscache_cookie *ceph_fscache_cookie(struct ceph_inode_info *ci)
 {
-	return netfs_i_cookie(&ci->netfs);
+	return ci->fscache;
 }
 
-static inline void ceph_fscache_resize(struct inode *inode, loff_t to)
+static inline void ceph_fscache_invalidate(struct inode *inode)
 {
-	struct ceph_inode_info *ci = ceph_inode(inode);
-	struct fscache_cookie *cookie = ceph_fscache_cookie(ci);
-
-	if (cookie) {
-		ceph_fscache_use_cookie(inode, true);
-		fscache_resize_cookie(cookie, to);
-		ceph_fscache_unuse_cookie(inode, true);
-	}
+	fscache_invalidate(ceph_inode(inode)->fscache);
 }
-
-static inline int ceph_fscache_unpin_writeback(struct inode *inode,
-						struct writeback_control *wbc)
-{
-	return netfs_unpin_writeback(inode, wbc);
-}
-
-#define ceph_fscache_dirty_folio netfs_dirty_folio
 
 static inline bool ceph_is_cache_enabled(struct inode *inode)
 {
-	return fscache_cookie_enabled(ceph_fscache_cookie(ceph_inode(inode)));
+	struct fscache_cookie *cookie = ceph_fscache_cookie(ceph_inode(inode));
+
+	if (!cookie)
+		return false;
+	return fscache_cookie_enabled(cookie);
 }
 
-#else /* CONFIG_CEPH_FSCACHE */
+static inline int ceph_begin_cache_operation(struct netfs_read_request *rreq)
+{
+	struct fscache_cookie *cookie = ceph_fscache_cookie(ceph_inode(rreq->inode));
+
+	return fscache_begin_read_operation(rreq, cookie);
+}
+#else
+
+static inline int ceph_fscache_register(void)
+{
+	return 0;
+}
+
+static inline void ceph_fscache_unregister(void)
+{
+}
+
 static inline int ceph_fscache_register_fs(struct ceph_fs_client* fsc,
 					   struct fs_context *fc)
 {
@@ -67,27 +77,7 @@ static inline void ceph_fscache_unregister_fs(struct ceph_fs_client* fsc)
 {
 }
 
-static inline void ceph_fscache_register_inode_cookie(struct inode *inode)
-{
-}
-
-static inline void ceph_fscache_unregister_inode_cookie(struct ceph_inode_info* ci)
-{
-}
-
-static inline void ceph_fscache_use_cookie(struct inode *inode, bool will_modify)
-{
-}
-
-static inline void ceph_fscache_unuse_cookie(struct inode *inode, bool update)
-{
-}
-
-static inline void ceph_fscache_update(struct inode *inode)
-{
-}
-
-static inline void ceph_fscache_invalidate(struct inode *inode, bool dio_write)
+static inline void ceph_fscache_inode_init(struct ceph_inode_info *ci)
 {
 }
 
@@ -96,22 +86,32 @@ static inline struct fscache_cookie *ceph_fscache_cookie(struct ceph_inode_info 
 	return NULL;
 }
 
-static inline void ceph_fscache_resize(struct inode *inode, loff_t to)
+static inline void ceph_fscache_register_inode_cookie(struct inode *inode)
 {
 }
 
-static inline int ceph_fscache_unpin_writeback(struct inode *inode,
-					       struct writeback_control *wbc)
+static inline void ceph_fscache_unregister_inode_cookie(struct ceph_inode_info* ci)
 {
-	return 0;
 }
 
-#define ceph_fscache_dirty_folio filemap_dirty_folio
+static inline void ceph_fscache_file_set_cookie(struct inode *inode,
+						struct file *filp)
+{
+}
+
+static inline void ceph_fscache_invalidate(struct inode *inode)
+{
+}
 
 static inline bool ceph_is_cache_enabled(struct inode *inode)
 {
 	return false;
 }
-#endif /* CONFIG_CEPH_FSCACHE */
 
+static inline int ceph_begin_cache_operation(struct netfs_read_request *rreq)
+{
+	return -ENOBUFS;
+}
 #endif
+
+#endif /* _CEPH_CACHE_H */

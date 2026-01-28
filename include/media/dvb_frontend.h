@@ -43,7 +43,9 @@
 #include <linux/slab.h>
 #include <linux/bitops.h>
 
-#include <linux/dvb/frontend.h>
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+#include <linux/dvb/aml_fe_ext.h>
+#endif
 
 #include <media/dvbdev.h>
 
@@ -51,7 +53,11 @@
  * Maximum number of Delivery systems per frontend. It
  * should be smaller or equal to 32
  */
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+#define MAX_DELSYS	32
+#else
 #define MAX_DELSYS	8
+#endif
 
 /* Helper definitions to be used at frontend drivers */
 #define kHz 1000UL
@@ -266,6 +272,10 @@ struct dvb_tuner_ops {
 	 */
 	int (*set_frequency)(struct dvb_frontend *fe, u32 frequency);
 	int (*set_bandwidth)(struct dvb_frontend *fe, u32 bandwidth);
+
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	int (*get_strength)(struct dvb_frontend *fe, s16 *strength);
+#endif
 };
 
 /**
@@ -337,6 +347,11 @@ struct dtv_frontend_properties;
  */
 struct dvb_frontend_internal_info {
 	char	name[128];
+
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	enum fe_type type;
+#endif
+
 	u32	frequency_min_hz;
 	u32	frequency_max_hz;
 	u32	frequency_stepsize_hz;
@@ -364,10 +379,6 @@ struct dvb_frontend_internal_info {
  *			allocated by the driver.
  * @init:		callback function used to initialize the tuner device.
  * @sleep:		callback function used to put the tuner to sleep.
- * @suspend:		callback function used to inform that the Kernel will
- *			suspend.
- * @resume:		callback function used to inform that the Kernel is
- *			resuming from suspend.
  * @write:		callback function used by some demod legacy drivers to
  *			allow other drivers to write data into their registers.
  *			Should not be used on new drivers.
@@ -447,8 +458,6 @@ struct dvb_frontend_ops {
 
 	int (*init)(struct dvb_frontend* fe);
 	int (*sleep)(struct dvb_frontend* fe);
-	int (*suspend)(struct dvb_frontend *fe);
-	int (*resume)(struct dvb_frontend *fe);
 
 	int (*write)(struct dvb_frontend* fe, const u8 buf[], int len);
 
@@ -497,6 +506,11 @@ struct dvb_frontend_ops {
 
 	struct dvb_tuner_ops tuner_ops;
 	struct analog_demod_ops analog_ops;
+
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+	int (*set_property)(struct dvb_frontend *fe, struct dtv_property *tvp);
+	int (*get_property)(struct dvb_frontend *fe, struct dtv_property *tvp);
+#endif
 };
 
 #ifdef __DVB_CORE__
@@ -761,8 +775,7 @@ void dvb_frontend_detach(struct dvb_frontend *fe);
  * &dvb_frontend_ops.tuner_ops.suspend\(\) is available, it calls it. Otherwise,
  * it will call &dvb_frontend_ops.tuner_ops.sleep\(\), if available.
  *
- * It will also call &dvb_frontend_ops.suspend\(\) to put the demod to suspend,
- * if available. Otherwise it will call &dvb_frontend_ops.sleep\(\).
+ * It will also call &dvb_frontend_ops.sleep\(\) to put the demod to suspend.
  *
  * The drivers should also call dvb_frontend_suspend\(\) as part of their
  * handler for the &device_driver.suspend\(\).
@@ -776,9 +789,7 @@ int dvb_frontend_suspend(struct dvb_frontend *fe);
  *
  * This function resumes the usual operation of the tuner after resume.
  *
- * In order to resume the frontend, it calls the demod
- * &dvb_frontend_ops.resume\(\) if available. Otherwise it calls demod
- * &dvb_frontend_ops.init\(\).
+ * In order to resume the frontend, it calls the demod &dvb_frontend_ops.init\(\).
  *
  * If &dvb_frontend_ops.tuner_ops.resume\(\) is available, It, it calls it.
  * Otherwise,t will call &dvb_frontend_ops.tuner_ops.init\(\), if available.
@@ -830,5 +841,21 @@ void dvb_frontend_reinitialise(struct dvb_frontend *fe);
  * calling this function directly.
  */
 void dvb_frontend_sleep_until(ktime_t *waketime, u32 add_usec);
+#ifdef CONFIG_AMLOGIC_DVB_COMPAT
+/**
+ * dvb_frontend_add_event() - add event for the dvb frontend
+ */
+void dvb_frontend_add_event(struct dvb_frontend *fe, enum fe_status status);
 
+/**
+ * aml_dvb_get_adapter() - offer a common dvb adapter for demod, demux and CI
+ */
+struct dvb_adapter *aml_dvb_get_adapter(struct device *dev);
+/**
+ * aml_dvb_put_adapter() - when call this function, ref count will -1,
+ * if ref count is 0, adapter would be unregistered.
+ */
+int aml_dvb_put_adapter(struct dvb_adapter *adapter);
+
+#endif
 #endif

@@ -21,9 +21,6 @@ properties:
   reg:
     maxItems: 1
 
-  interrupts:
-    maxItems: 1
-
   vdd-supply: true
   vddio-supply: true
 
@@ -44,7 +41,7 @@ examples:
 
         accel@f {
             compatible = "kionix,kxtf9";
-            reg = <0xf>;
+            reg = <0x0F>;
             mount-matrix = "0", "1", "0",
                            "1", "0", "0",
                            "0", "0", "1";

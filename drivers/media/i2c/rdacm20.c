@@ -47,11 +47,11 @@
 #define OV10635_VTS			933
 
 /*
- * As the drivers supports a single MEDIA_BUS_FMT_UYVY8_1X16 format we
+ * As the drivers supports a single MEDIA_BUS_FMT_UYVY8_2X8 format we
  * can harcode the pixel rate.
  *
  * PCLK is fed through the system clock, programmed @88MHz.
- * MEDIA_BUS_FMT_UYVY8_1X16 format = 2 samples per pixel.
+ * MEDIA_BUS_FMT_UYVY8_2X8 format = 2 samples per pixel.
  *
  * Pixelrate = PCLK / 2
  * FPS = (OV10635_VTS * OV10635_HTS) / PixelRate
@@ -409,7 +409,7 @@ static int rdacm20_enum_mbus_code(struct v4l2_subdev *sd,
 	if (code->pad || code->index > 0)
 		return -EINVAL;
 
-	code->code = MEDIA_BUS_FMT_UYVY8_1X16;
+	code->code = MEDIA_BUS_FMT_UYVY8_2X8;
 
 	return 0;
 }
@@ -425,7 +425,7 @@ static int rdacm20_get_fmt(struct v4l2_subdev *sd,
 
 	mf->width		= OV10635_WIDTH;
 	mf->height		= OV10635_HEIGHT;
-	mf->code		= MEDIA_BUS_FMT_UYVY8_1X16;
+	mf->code		= MEDIA_BUS_FMT_UYVY8_2X8;
 	mf->colorspace		= V4L2_COLORSPACE_RAW;
 	mf->field		= V4L2_FIELD_NONE;
 	mf->ycbcr_enc		= V4L2_YCBCR_ENC_601;
@@ -567,6 +567,7 @@ again:
 static int rdacm20_probe(struct i2c_client *client)
 {
 	struct rdacm20_device *dev;
+	struct fwnode_handle *ep;
 	int ret;
 
 	dev = devm_kzalloc(&client->dev, sizeof(*dev), GFP_KERNEL);
@@ -615,31 +616,47 @@ static int rdacm20_probe(struct i2c_client *client)
 	if (ret < 0)
 		goto error_free_ctrls;
 
+	ep = fwnode_graph_get_next_endpoint(dev_fwnode(&client->dev), NULL);
+	if (!ep) {
+		dev_err(&client->dev,
+			"Unable to get endpoint in node %pOF\n",
+			client->dev.of_node);
+		ret = -ENOENT;
+		goto error_free_ctrls;
+	}
+	dev->sd.fwnode = ep;
+
 	ret = v4l2_async_register_subdev(&dev->sd);
 	if (ret)
-		goto error_free_ctrls;
+		goto error_put_node;
 
 	return 0;
 
+error_put_node:
+	fwnode_handle_put(ep);
 error_free_ctrls:
 	v4l2_ctrl_handler_free(&dev->ctrls);
 error:
 	media_entity_cleanup(&dev->sd.entity);
-	i2c_unregister_device(dev->sensor);
+	if (dev->sensor)
+		i2c_unregister_device(dev->sensor);
 
 	dev_err(&client->dev, "probe failed\n");
 
 	return ret;
 }
 
-static void rdacm20_remove(struct i2c_client *client)
+static int rdacm20_remove(struct i2c_client *client)
 {
 	struct rdacm20_device *dev = i2c_to_rdacm20(client);
 
+	fwnode_handle_put(dev->sd.fwnode);
 	v4l2_async_unregister_subdev(&dev->sd);
 	v4l2_ctrl_handler_free(&dev->ctrls);
 	media_entity_cleanup(&dev->sd.entity);
 	i2c_unregister_device(dev->sensor);
+
+	return 0;
 }
 
 static void rdacm20_shutdown(struct i2c_client *client)
@@ -661,7 +678,7 @@ static struct i2c_driver rdacm20_i2c_driver = {
 		.name	= "rdacm20",
 		.of_match_table = rdacm20_of_ids,
 	},
-	.probe		= rdacm20_probe,
+	.probe_new	= rdacm20_probe,
 	.remove		= rdacm20_remove,
 	.shutdown	= rdacm20_shutdown,
 };

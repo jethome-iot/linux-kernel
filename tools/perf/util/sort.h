@@ -15,7 +15,6 @@
 
 struct option;
 struct thread;
-struct annotated_data_type;
 
 extern regex_t parent_regex;
 extern const char *sort_order;
@@ -35,9 +34,8 @@ extern struct sort_entry sort_dso_to;
 extern struct sort_entry sort_sym_from;
 extern struct sort_entry sort_sym_to;
 extern struct sort_entry sort_srcline;
-extern struct sort_entry sort_type;
+extern enum sort_type sort__first_dimension;
 extern const char default_mem_sort_order[];
-extern bool chk_double_cl;
 
 struct res_sample {
 	u64 time;
@@ -113,8 +111,6 @@ struct hist_entry {
 	u64			p_stage_cyc;
 	u8			cpumode;
 	u8			depth;
-	int			mem_type_off;
-	struct simd_flags	simd_flags;
 
 	/* We are added by hists__add_dummy_entry. */
 	bool			dummy;
@@ -148,7 +144,6 @@ struct hist_entry {
 	struct hists		*hists;
 	struct mem_info		*mem_info;
 	struct block_info	*block_info;
-	struct kvm_info		*kvm_info;
 	void			*raw_data;
 	u32			raw_size;
 	int			num_res;
@@ -157,7 +152,6 @@ struct hist_entry {
 	struct perf_hpp_list	*hpp_list;
 	struct hist_entry	*parent_he;
 	struct hist_entry_ops	*ops;
-	struct annotated_data_type *mem_type;
 	union {
 		/* this is for hierarchical entry structure */
 		struct {
@@ -241,15 +235,7 @@ enum sort_type {
 	SORT_CODE_PAGE_SIZE,
 	SORT_LOCAL_INS_LAT,
 	SORT_GLOBAL_INS_LAT,
-	SORT_LOCAL_PIPELINE_STAGE_CYC,
-	SORT_GLOBAL_PIPELINE_STAGE_CYC,
-	SORT_ADDR,
-	SORT_LOCAL_RETIRE_LAT,
-	SORT_GLOBAL_RETIRE_LAT,
-	SORT_SIMD,
-	SORT_ANNOTATE_DATA_TYPE,
-	SORT_ANNOTATE_DATA_TYPE_OFFSET,
-	SORT_SYM_OFFSET,
+	SORT_PIPELINE_STAGE_CYC,
 
 	/* branch stack specific sort keys */
 	__SORT_BRANCH_STACK,
@@ -264,8 +250,6 @@ enum sort_type {
 	SORT_SRCLINE_FROM,
 	SORT_SRCLINE_TO,
 	SORT_SYM_IPC,
-	SORT_ADDR_FROM,
-	SORT_ADDR_TO,
 
 	/* memory mode specific sort keys */
 	__SORT_MEMORY_MODE,
@@ -295,7 +279,6 @@ struct sort_entry {
 	int	(*se_snprintf)(struct hist_entry *he, char *bf, size_t size,
 			       unsigned int width);
 	int	(*se_filter)(struct hist_entry *he, int type, const void *arg);
-	void	(*se_init)(struct hist_entry *he);
 	u8	se_width_idx;
 };
 
@@ -309,6 +292,7 @@ struct block_hist {
 };
 
 extern struct sort_entry sort_thread;
+extern struct list_head hist_entry__sort_list;
 
 struct evlist;
 struct tep_handle;

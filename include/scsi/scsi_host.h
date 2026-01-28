@@ -10,12 +10,14 @@
 #include <linux/seq_file.h>
 #include <linux/blk-mq.h>
 #include <scsi/scsi.h>
+#include <linux/android_kabi.h>
 
 struct block_device;
 struct completion;
 struct module;
 struct scsi_cmnd;
 struct scsi_device;
+struct scsi_host_cmd_pool;
 struct scsi_target;
 struct Scsi_Host;
 struct scsi_transport_template;
@@ -245,9 +247,6 @@ struct scsi_host_template {
 	 * midlayer calls this point so that the driver may deallocate
 	 * and terminate any references to the target.
 	 *
-	 * Note: This callback is called with the host lock held and hence
-	 * must not sleep.
-	 *
 	 * Status: OPTIONAL
 	 */
 	void (* target_destroy)(struct scsi_target *);
@@ -291,7 +290,7 @@ struct scsi_host_template {
 	 *
 	 * Status: OPTIONAL
 	 */
-	void (* map_queues)(struct Scsi_Host *shost);
+	int (* map_queues)(struct Scsi_Host *shost);
 
 	/*
 	 * SCSI interface of blk_poll - poll for IO completions.
@@ -373,6 +372,12 @@ struct scsi_host_template {
 	const char *proc_name;
 
 	/*
+	 * Used to store the procfs directory if a driver implements the
+	 * show_info method.
+	 */
+	struct proc_dir_entry *proc_dir;
+
+	/*
 	 * This determines if we will use a non-interrupt driven
 	 * or an interrupt driven scheme.  It is set to the maximum number
 	 * of simultaneous commands a single hw queue in HBA will accept.
@@ -432,6 +437,12 @@ struct scsi_host_template {
 	 */
 	short cmd_per_lun;
 
+	/*
+	 * present contains counter indicating how many boards of this
+	 * type were found when we did the scan.
+	 */
+	unsigned char present;
+
 	/* If use block layer to manage tags, this is tag allocation policy */
 	int tag_alloc_policy;
 
@@ -479,9 +490,14 @@ struct scsi_host_template {
 #define SCSI_DEFAULT_HOST_BLOCKED	7
 
 	/*
-	 * Pointer to the SCSI host sysfs attribute groups, NULL terminated.
+	 * Pointer to the sysfs class properties for this host, NULL terminated.
 	 */
-	const struct attribute_group **shost_groups;
+	struct device_attribute **shost_attrs;
+
+	/*
+	 * Pointer to the SCSI device properties for this host, NULL terminated.
+	 */
+	struct device_attribute **sdev_attrs;
 
 	/*
 	 * Pointer to the SCSI device attribute groups for this host,
@@ -498,8 +514,15 @@ struct scsi_host_template {
 	 */
 	u64 vendor_id;
 
+	struct scsi_host_cmd_pool *cmd_pool;
+
 	/* Delay for runtime autosuspend */
 	int rpm_autosuspend_delay;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /*
@@ -514,7 +537,7 @@ struct scsi_host_template {
 		unsigned long irq_flags;				\
 		int rc;							\
 		spin_lock_irqsave(shost->host_lock, irq_flags);		\
-		rc = func_name##_lck(cmd);				\
+		rc = func_name##_lck (cmd, cmd->scsi_done);			\
 		spin_unlock_irqrestore(shost->host_lock, irq_flags);	\
 		return rc;						\
 	}
@@ -560,11 +583,9 @@ struct Scsi_Host {
 	struct completion     * eh_action; /* Wait for specific actions on the
 					      host. */
 	wait_queue_head_t       host_wait;
-	const struct scsi_host_template *hostt;
+	struct scsi_host_template *hostt;
 	struct scsi_transport_template *transportt;
 
-	struct kref		tagset_refcnt;
-	struct completion	tagset_freed;
 	/* Area to keep a shared tag map */
 	struct blk_mq_tag_set	tag_set;
 
@@ -615,7 +636,6 @@ struct Scsi_Host {
 	short unsigned int sg_tablesize;
 	short unsigned int sg_prot_tablesize;
 	unsigned int max_sectors;
-	unsigned int opt_sectors;
 	unsigned int max_segment_size;
 	unsigned long dma_boundary;
 	unsigned long virt_boundary_mask;
@@ -713,6 +733,8 @@ struct Scsi_Host {
 	 */
 	struct device *dma_dev;
 
+	ANDROID_KABI_RESERVE(1);
+
 	/*
 	 * We should ensure that this is aligned, both for better performance
 	 * and also because some compilers (m68k) don't automatically force
@@ -756,18 +778,12 @@ static inline int scsi_host_in_recovery(struct Scsi_Host *shost)
 extern int scsi_queue_work(struct Scsi_Host *, struct work_struct *);
 extern void scsi_flush_work(struct Scsi_Host *);
 
-extern struct Scsi_Host *scsi_host_alloc(const struct scsi_host_template *, int);
+extern struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *, int);
 extern int __must_check scsi_add_host_with_dma(struct Scsi_Host *,
 					       struct device *,
 					       struct device *);
-#if defined(CONFIG_SCSI_PROC_FS)
-struct proc_dir_entry *
-scsi_template_proc_dir(const struct scsi_host_template *sht);
-#else
-#define scsi_template_proc_dir(sht) NULL
-#endif
 extern void scsi_scan_host(struct Scsi_Host *);
-extern int scsi_rescan_device(struct scsi_device *sdev);
+extern void scsi_rescan_device(struct device *);
 extern void scsi_remove_host(struct Scsi_Host *);
 extern struct Scsi_Host *scsi_host_get(struct Scsi_Host *);
 extern int scsi_host_busy(struct Scsi_Host *shost);
@@ -804,9 +820,19 @@ extern int scsi_host_block(struct Scsi_Host *shost);
 extern int scsi_host_unblock(struct Scsi_Host *shost, int new_state);
 
 void scsi_host_busy_iter(struct Scsi_Host *,
-			 bool (*fn)(struct scsi_cmnd *, void *), void *priv);
+			 bool (*fn)(struct scsi_cmnd *, void *, bool), void *priv);
 
 struct class_container;
+
+/*
+ * These two functions are used to allocate and free a pseudo device
+ * which will connect to the host adapter itself rather than any
+ * physical device.  You must deallocate when you are done with the
+ * thing.  This physical pseudo-device isn't real and won't be available
+ * from any high-level drivers.
+ */
+extern void scsi_free_host_dev(struct scsi_device *);
+extern struct scsi_device *scsi_get_host_dev(struct Scsi_Host *);
 
 /*
  * DIF defines the exchange of protection information between

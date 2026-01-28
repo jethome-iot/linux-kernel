@@ -12,7 +12,6 @@
 #define _LINUX_FSVERITY_H
 
 #include <linux/fs.h>
-#include <linux/mm.h>
 #include <crypto/hash_info.h>
 #include <crypto/sha2.h>
 #include <uapi/linux/fsverity.h>
@@ -22,9 +21,6 @@
  * Currently assumed to be <= size of fsverity_descriptor::root_hash.
  */
 #define FS_VERITY_MAX_DIGEST_SIZE	SHA512_DIGEST_SIZE
-
-/* Arbitrary limit to bound the kmalloc() size.  Can be changed. */
-#define FS_VERITY_MAX_DESCRIPTOR_SIZE	16384
 
 /* Verity operations for filesystems */
 struct fsverity_operations {
@@ -143,8 +139,8 @@ int fsverity_ioctl_enable(struct file *filp, const void __user *arg);
 
 int fsverity_ioctl_measure(struct file *filp, void __user *arg);
 int fsverity_get_digest(struct inode *inode,
-			u8 raw_digest[FS_VERITY_MAX_DIGEST_SIZE],
-			u8 *alg, enum hash_algo *halg);
+			u8 digest[FS_VERITY_MAX_DIGEST_SIZE],
+			enum hash_algo *alg);
 
 /* open.c */
 
@@ -170,7 +166,8 @@ int fsverity_ioctl_read_metadata(struct file *filp, const void __user *uarg);
 
 /* verify.c */
 
-bool fsverity_verify_blocks(struct folio *folio, size_t len, size_t offset);
+bool fsverity_verify_blocks(struct page *page, unsigned int len,
+			    unsigned int offset);
 void fsverity_verify_bio(struct bio *bio);
 void fsverity_enqueue_verify_work(struct work_struct *work);
 
@@ -197,14 +194,10 @@ static inline int fsverity_ioctl_measure(struct file *filp, void __user *arg)
 }
 
 static inline int fsverity_get_digest(struct inode *inode,
-				      u8 raw_digest[FS_VERITY_MAX_DIGEST_SIZE],
-				      u8 *alg, enum hash_algo *halg)
+				      u8 digest[FS_VERITY_MAX_DIGEST_SIZE],
+				      enum hash_algo *alg)
 {
-	/*
-	 * fsverity is not enabled in the kernel configuration, so always report
-	 * that the file doesn't have fsverity enabled (digest size 0).
-	 */
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 /* open.c */
@@ -234,33 +227,28 @@ static inline int fsverity_ioctl_read_metadata(struct file *filp,
 
 /* verify.c */
 
-static inline bool fsverity_verify_blocks(struct folio *folio, size_t len,
-					  size_t offset)
+static inline bool fsverity_verify_blocks(struct page *page, unsigned int len,
+					  unsigned int offset)
 {
-	WARN_ON_ONCE(1);
+	WARN_ON(1);
 	return false;
 }
 
 static inline void fsverity_verify_bio(struct bio *bio)
 {
-	WARN_ON_ONCE(1);
+	WARN_ON(1);
 }
 
 static inline void fsverity_enqueue_verify_work(struct work_struct *work)
 {
-	WARN_ON_ONCE(1);
+	WARN_ON(1);
 }
 
 #endif	/* !CONFIG_FS_VERITY */
 
-static inline bool fsverity_verify_folio(struct folio *folio)
-{
-	return fsverity_verify_blocks(folio, folio_size(folio), 0);
-}
-
 static inline bool fsverity_verify_page(struct page *page)
 {
-	return fsverity_verify_blocks(page_folio(page), PAGE_SIZE, 0);
+	return fsverity_verify_blocks(page, PAGE_SIZE, 0);
 }
 
 /**
@@ -269,7 +257,7 @@ static inline bool fsverity_verify_page(struct page *page)
  *
  * This checks whether ->i_verity_info has been set.
  *
- * Filesystems call this from ->readahead() to check whether the pages need to
+ * Filesystems call this from ->readpages() to check whether the pages need to
  * be verified or not.  Don't use IS_VERITY() for this purpose; it's subject to
  * a race condition where the file is being read concurrently with
  * FS_IOC_ENABLE_VERITY completing.  (S_VERITY is set before ->i_verity_info.)
@@ -280,6 +268,20 @@ static inline bool fsverity_active(const struct inode *inode)
 {
 	return fsverity_get_info(inode) != NULL;
 }
+
+#ifdef CONFIG_FS_VERITY_BUILTIN_SIGNATURES
+int __fsverity_verify_signature(const struct inode *inode, const u8 *signature,
+				size_t sig_size, const u8 *file_digest,
+				unsigned int digest_algorithm);
+#else /* !CONFIG_FS_VERITY_BUILTIN_SIGNATURES */
+static inline int __fsverity_verify_signature(const struct inode *inode,
+				const u8 *signature, size_t sig_size,
+				const u8 *file_digest,
+				unsigned int digest_algorithm)
+{
+	return 0;
+}
+#endif /* !CONFIG_FS_VERITY_BUILTIN_SIGNATURES */
 
 /**
  * fsverity_file_open() - prepare to open a verity file

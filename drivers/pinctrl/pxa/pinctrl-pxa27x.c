@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/pinctrl/pinctrl.h>
 
 #include "pinctrl-pxa2xx.h"
@@ -503,7 +504,7 @@ static const struct pxa_desc_pin pxa27x_pins[] = {
 
 static int pxa27x_pinctrl_probe(struct platform_device *pdev)
 {
-	int i;
+	int ret, i;
 	void __iomem *base_af[8];
 	void __iomem *base_dir[4];
 	void __iomem *base_sleep[4];
@@ -531,8 +532,9 @@ static int pxa27x_pinctrl_probe(struct platform_device *pdev)
 	for (i = 0; i < ARRAY_SIZE(base_sleep); i++)
 		base_sleep[i] = base_sleep[0] + sizeof(base_af[0]) * i;
 
-	return pxa2xx_pinctrl_init(pdev, pxa27x_pins, ARRAY_SIZE(pxa27x_pins),
+	ret = pxa2xx_pinctrl_init(pdev, pxa27x_pins, ARRAY_SIZE(pxa27x_pins),
 				  base_af, base_dir, base_sleep);
+	return ret;
 }
 
 static const struct of_device_id pxa27x_pinctrl_match[] = {

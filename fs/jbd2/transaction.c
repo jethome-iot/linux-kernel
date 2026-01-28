@@ -141,19 +141,20 @@ static void jbd2_get_transaction(journal_t *journal,
  * t_max_wait is carefully updated here with use of atomic compare exchange.
  * Note that there could be multiplre threads trying to do this simultaneously
  * hence using cmpxchg to avoid any use of locks in this case.
- * With this t_max_wait can be updated w/o enabling jbd2_journal_enable_debug.
  */
 static inline void update_t_max_wait(transaction_t *transaction,
 				     unsigned long ts)
 {
+#ifdef CONFIG_JBD2_DEBUG
 	unsigned long oldts, newts;
-
-	if (time_after(transaction->t_start, ts)) {
+	if (jbd2_journal_enable_debug &&
+	    time_after(transaction->t_start, ts)) {
 		newts = jbd2_time_diff(ts, transaction->t_start);
 		oldts = READ_ONCE(transaction->t_max_wait);
 		while (oldts < newts)
 			oldts = cmpxchg(&transaction->t_max_wait, oldts, newts);
 	}
+#endif
 }
 
 /*
@@ -935,15 +936,19 @@ static void warn_dirty_buffer(struct buffer_head *bh)
 /* Call t_frozen trigger and copy buffer data into jh->b_frozen_data. */
 static void jbd2_freeze_jh_data(struct journal_head *jh)
 {
+	struct page *page;
+	int offset;
 	char *source;
 	struct buffer_head *bh = jh2bh(jh);
 
 	J_EXPECT_JH(jh, buffer_uptodate(bh), "Possible IO failure.\n");
-	source = kmap_local_folio(bh->b_folio, bh_offset(bh));
+	page = bh->b_page;
+	offset = offset_in_page(bh->b_data);
+	source = kmap_atomic(page);
 	/* Fire data frozen trigger just before we copy the data */
-	jbd2_buffer_frozen_trigger(jh, source, jh->b_triggers);
-	memcpy(jh->b_frozen_data, source, bh->b_size);
-	kunmap_local(source);
+	jbd2_buffer_frozen_trigger(jh, source + offset, jh->b_triggers);
+	memcpy(jh->b_frozen_data, source + offset, bh->b_size);
+	kunmap_atomic(source);
 
 	/*
 	 * Now that the frozen data is saved off, we need to store any matching
@@ -1231,24 +1236,10 @@ out:
 int jbd2_journal_get_write_access(handle_t *handle, struct buffer_head *bh)
 {
 	struct journal_head *jh;
-	journal_t *journal;
 	int rc;
 
 	if (is_handle_aborted(handle))
 		return -EROFS;
-
-	journal = handle->h_transaction->t_journal;
-	if (jbd2_check_fs_dev_write_error(journal)) {
-		/*
-		 * If the fs dev has writeback errors, it may have failed
-		 * to async write out metadata buffers in the background.
-		 * In this case, we could read old data from disk and write
-		 * it out again, which may lead to on-disk filesystem
-		 * inconsistency. Aborting journal can avoid it happen.
-		 */
-		jbd2_journal_abort(journal, -EIO);
-		return -EIO;
-	}
 
 	if (jbd2_write_access_granted(handle, bh, false))
 		return 0;
@@ -2109,10 +2100,33 @@ void jbd2_journal_unfile_buffer(journal_t *journal, struct journal_head *jh)
 	__brelse(bh);
 }
 
+/*
+ * Called from jbd2_journal_try_to_free_buffers().
+ *
+ * Called under jh->b_state_lock
+ */
+static void
+__journal_try_to_free_buffer(journal_t *journal, struct buffer_head *bh)
+{
+	struct journal_head *jh;
+
+	jh = bh2jh(bh);
+
+	if (jh->b_next_transaction != NULL || jh->b_transaction != NULL)
+		return;
+
+	spin_lock(&journal->j_list_lock);
+	/* Remove written-back checkpointed metadata buffer */
+	if (jh->b_cp_transaction != NULL)
+		jbd2_journal_try_remove_checkpoint(jh);
+	spin_unlock(&journal->j_list_lock);
+	return;
+}
+
 /**
  * jbd2_journal_try_to_free_buffers() - try to free page buffers.
  * @journal: journal for operation
- * @folio: Folio to detach data from.
+ * @page: to try and free
  *
  * For all the buffers on this page,
  * if they are fully written out ordered data, move them onto BUF_CLEAN
@@ -2141,17 +2155,17 @@ void jbd2_journal_unfile_buffer(journal_t *journal, struct journal_head *jh)
  * cannot happen because we never reallocate freed data as metadata
  * while the data is part of a transaction.  Yes?
  *
- * Return false on failure, true on success
+ * Return 0 on failure, 1 on success
  */
-bool jbd2_journal_try_to_free_buffers(journal_t *journal, struct folio *folio)
+int jbd2_journal_try_to_free_buffers(journal_t *journal, struct page *page)
 {
 	struct buffer_head *head;
 	struct buffer_head *bh;
-	bool ret = false;
+	int ret = 0;
 
-	J_ASSERT(folio_test_locked(folio));
+	J_ASSERT(PageLocked(page));
 
-	head = folio_buffers(folio);
+	head = page_buffers(page);
 	bh = head;
 	do {
 		struct journal_head *jh;
@@ -2166,20 +2180,14 @@ bool jbd2_journal_try_to_free_buffers(journal_t *journal, struct folio *folio)
 			continue;
 
 		spin_lock(&jh->b_state_lock);
-		if (!jh->b_transaction && !jh->b_next_transaction) {
-			spin_lock(&journal->j_list_lock);
-			/* Remove written-back checkpointed metadata buffer */
-			if (jh->b_cp_transaction != NULL)
-				jbd2_journal_try_remove_checkpoint(jh);
-			spin_unlock(&journal->j_list_lock);
-		}
+		__journal_try_to_free_buffer(journal, bh);
 		spin_unlock(&jh->b_state_lock);
 		jbd2_journal_put_journal_head(jh);
 		if (buffer_jbd(bh))
 			goto busy;
 	} while ((bh = bh->b_this_page) != head);
 
-	ret = try_to_free_buffers(folio);
+	ret = try_to_free_buffers(page);
 busy:
 	return ret;
 }
@@ -2221,14 +2229,14 @@ static int __dispose_buffer(struct journal_head *jh, transaction_t *transaction)
 }
 
 /*
- * jbd2_journal_invalidate_folio
+ * jbd2_journal_invalidatepage
  *
  * This code is tricky.  It has a number of cases to deal with.
  *
  * There are two invariants which this code relies on:
  *
- * i_size must be updated on disk before we start calling invalidate_folio
- * on the data.
+ * i_size must be updated on disk before we start calling invalidatepage on the
+ * data.
  *
  *  This is done in ext3 by defining an ext3_setattr method which
  *  updates i_size before truncate gets going.  By maintaining this
@@ -2433,9 +2441,9 @@ zap_buffer_unlocked:
 }
 
 /**
- * jbd2_journal_invalidate_folio()
+ * jbd2_journal_invalidatepage()
  * @journal: journal to use for flush...
- * @folio:    folio to flush
+ * @page:    page to flush
  * @offset:  start of the range to invalidate
  * @length:  length of the range to invalidate
  *
@@ -2444,29 +2452,30 @@ zap_buffer_unlocked:
  * the page is straddling i_size. Caller then has to wait for current commit
  * and try again.
  */
-int jbd2_journal_invalidate_folio(journal_t *journal, struct folio *folio,
-				size_t offset, size_t length)
+int jbd2_journal_invalidatepage(journal_t *journal,
+				struct page *page,
+				unsigned int offset,
+				unsigned int length)
 {
 	struct buffer_head *head, *bh, *next;
 	unsigned int stop = offset + length;
 	unsigned int curr_off = 0;
-	int partial_page = (offset || length < folio_size(folio));
+	int partial_page = (offset || length < PAGE_SIZE);
 	int may_free = 1;
 	int ret = 0;
 
-	if (!folio_test_locked(folio))
+	if (!PageLocked(page))
 		BUG();
-	head = folio_buffers(folio);
-	if (!head)
+	if (!page_has_buffers(page))
 		return 0;
 
-	BUG_ON(stop > folio_size(folio) || stop < length);
+	BUG_ON(stop > PAGE_SIZE || stop < length);
 
 	/* We will potentially be playing with lists other than just the
 	 * data lists (especially for journaled data mode), so be
 	 * cautious in our locking. */
 
-	bh = head;
+	head = bh = page_buffers(page);
 	do {
 		unsigned int next_off = curr_off + bh->b_size;
 		next = bh->b_this_page;
@@ -2489,8 +2498,8 @@ int jbd2_journal_invalidate_folio(journal_t *journal, struct folio *folio,
 	} while (bh != head);
 
 	if (!partial_page) {
-		if (may_free && try_to_free_buffers(folio))
-			J_ASSERT(!folio_buffers(folio));
+		if (may_free && try_to_free_buffers(page))
+			J_ASSERT(!page_has_buffers(page));
 	}
 	return 0;
 }

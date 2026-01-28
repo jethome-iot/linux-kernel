@@ -1,0 +1,28 @@
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/meson-s7d-gpio.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	fragment@0 {
+		target = <&spicc0>;
+
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			num_chipselect = <1>;
+			pinctrl-names = "not-use-it", "default";
+			use-hw-cs;
+			cs-gpios = <0>;	// Only PIN24(GPIOX 10) available
+
+			spidev0: spidev@0 {
+				status = "okay";
+				compatible = "linux,spidev";
+				reg = <0>;
+				spi-max-frequency = <80000000>; // 80MHz
+			};
+		};
+	};
+};

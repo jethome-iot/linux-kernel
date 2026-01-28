@@ -19,6 +19,7 @@
 #include <asm/pci-bridge.h>
 #include <asm/ppc-pci.h>
 #include <mm/mmu_decl.h>
+#include <asm/prom.h>
 #include <asm/udbg.h>
 #include <asm/mpic.h>
 #include <asm/ehv_pic.h>
@@ -30,13 +31,13 @@
 #include "smp.h"
 #include "mpc85xx.h"
 
-static void __init corenet_gen_pic_init(void)
+void __init corenet_gen_pic_init(void)
 {
 	struct mpic *mpic;
 	unsigned int flags = MPIC_BIG_ENDIAN | MPIC_SINGLE_DEST_CPU |
 		MPIC_NO_RESET;
 
-	if (!IS_ENABLED(CONFIG_HOTPLUG_CPU) && !IS_ENABLED(CONFIG_KEXEC_CORE))
+	if (ppc_md.get_irq == mpic_get_coreint_irq)
 		flags |= MPIC_ENABLE_COREINT;
 
 	mpic = mpic_alloc(NULL, 0, flags, 0, 512, " OpenPIC  ");
@@ -48,7 +49,7 @@ static void __init corenet_gen_pic_init(void)
 /*
  * Setup the architecture
  */
-static void __init corenet_gen_setup_arch(void)
+void __init corenet_gen_setup_arch(void)
 {
 	mpc85xx_smp_init();
 
@@ -101,7 +102,7 @@ static const struct of_device_id of_device_ids[] = {
 	{}
 };
 
-static int __init corenet_gen_publish_devices(void)
+int __init corenet_gen_publish_devices(void)
 {
 	return of_platform_bus_probe(NULL, of_device_ids, NULL);
 }
@@ -198,6 +199,11 @@ define_machine(corenet_generic) {
 #else
 	.get_irq		= mpic_get_coreint_irq,
 #endif
+	.calibrate_decr		= generic_calibrate_decr,
 	.progress		= udbg_progress,
+#ifdef CONFIG_PPC64
+	.power_save		= book3e_idle,
+#else
 	.power_save		= e500_idle,
+#endif
 };

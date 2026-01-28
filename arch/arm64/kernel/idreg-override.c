@@ -19,31 +19,15 @@
 #define FTR_ALIAS_NAME_LEN	30
 #define FTR_ALIAS_OPTION_LEN	116
 
-static u64 __boot_status __initdata;
-
-// temporary __prel64 related definitions
-// to be removed when this code is moved under pi/
-
-#define __prel64_initconst	__initconst
-
-#define PREL64(type, name)	union { type *name; }
-
-#define prel64_pointer(__d)	(__d)
-
-typedef bool filter_t(u64 val);
-
 struct ftr_set_desc {
 	char 				name[FTR_DESC_NAME_LEN];
-	PREL64(struct arm64_ftr_override, override);
+	struct arm64_ftr_override	*override;
 	struct {
 		char			name[FTR_DESC_FIELD_LEN];
 		u8			shift;
-		u8			width;
-		PREL64(filter_t,	filter);
+		bool			(*filter)(u64 val);
 	} 				fields[];
 };
-
-#define FIELD(n, s, f)	{ .name = n, .shift = s, .width = 4, .filter = f }
 
 static bool __init mmfr1_vh_filter(u64 val)
 {
@@ -53,224 +37,134 @@ static bool __init mmfr1_vh_filter(u64 val)
 	 * the user was trying to force nVHE on us, proceed with
 	 * attitude adjustment.
 	 */
-	return !(__boot_status == (BOOT_CPU_FLAG_E2H | BOOT_CPU_MODE_EL2) &&
-		 val == 0);
+	return !(is_kernel_in_hyp_mode() && val == 0);
 }
 
-static const struct ftr_set_desc mmfr1 __prel64_initconst = {
+static const struct ftr_set_desc mmfr1 __initconst = {
 	.name		= "id_aa64mmfr1",
 	.override	= &id_aa64mmfr1_override,
 	.fields		= {
-		FIELD("vh", ID_AA64MMFR1_EL1_VH_SHIFT, mmfr1_vh_filter),
+		{ "vh", ID_AA64MMFR1_EL1_VH_SHIFT, mmfr1_vh_filter },
 		{}
 	},
 };
 
-static bool __init pfr0_sve_filter(u64 val)
-{
-	/*
-	 * Disabling SVE also means disabling all the features that
-	 * are associated with it. The easiest way to do it is just to
-	 * override id_aa64zfr0_el1 to be 0.
-	 */
-	if (!val) {
-		id_aa64zfr0_override.val = 0;
-		id_aa64zfr0_override.mask = GENMASK(63, 0);
-	}
-
-	return true;
-}
-
-static const struct ftr_set_desc pfr0 __prel64_initconst = {
-	.name		= "id_aa64pfr0",
-	.override	= &id_aa64pfr0_override,
-	.fields		= {
-	        FIELD("sve", ID_AA64PFR0_EL1_SVE_SHIFT, pfr0_sve_filter),
-		{}
-	},
-};
-
-static bool __init pfr1_sme_filter(u64 val)
-{
-	/*
-	 * Similarly to SVE, disabling SME also means disabling all
-	 * the features that are associated with it. Just set
-	 * id_aa64smfr0_el1 to 0 and don't look back.
-	 */
-	if (!val) {
-		id_aa64smfr0_override.val = 0;
-		id_aa64smfr0_override.mask = GENMASK(63, 0);
-	}
-
-	return true;
-}
-
-static const struct ftr_set_desc pfr1 __prel64_initconst = {
+static const struct ftr_set_desc pfr1 __initconst = {
 	.name		= "id_aa64pfr1",
 	.override	= &id_aa64pfr1_override,
 	.fields		= {
-		FIELD("bt", ID_AA64PFR1_EL1_BT_SHIFT, NULL ),
-		FIELD("mte", ID_AA64PFR1_EL1_MTE_SHIFT, NULL),
-		FIELD("sme", ID_AA64PFR1_EL1_SME_SHIFT, pfr1_sme_filter),
+		{ "bt", ID_AA64PFR1_EL1_BT_SHIFT },
+		{ "mte", ID_AA64PFR1_EL1_MTE_SHIFT },
 		{}
 	},
 };
 
-static const struct ftr_set_desc isar1 __prel64_initconst = {
+static const struct ftr_set_desc isar1 __initconst = {
 	.name		= "id_aa64isar1",
 	.override	= &id_aa64isar1_override,
 	.fields		= {
-		FIELD("gpi", ID_AA64ISAR1_EL1_GPI_SHIFT, NULL),
-		FIELD("gpa", ID_AA64ISAR1_EL1_GPA_SHIFT, NULL),
-		FIELD("api", ID_AA64ISAR1_EL1_API_SHIFT, NULL),
-		FIELD("apa", ID_AA64ISAR1_EL1_APA_SHIFT, NULL),
+		{ "gpi", ID_AA64ISAR1_EL1_GPI_SHIFT },
+		{ "gpa", ID_AA64ISAR1_EL1_GPA_SHIFT },
+		{ "api", ID_AA64ISAR1_EL1_API_SHIFT },
+		{ "apa", ID_AA64ISAR1_EL1_APA_SHIFT },
 		{}
 	},
 };
 
-static const struct ftr_set_desc isar2 __prel64_initconst = {
+static const struct ftr_set_desc isar2 __initconst = {
 	.name		= "id_aa64isar2",
 	.override	= &id_aa64isar2_override,
 	.fields		= {
-		FIELD("gpa3", ID_AA64ISAR2_EL1_GPA3_SHIFT, NULL),
-		FIELD("apa3", ID_AA64ISAR2_EL1_APA3_SHIFT, NULL),
-		FIELD("mops", ID_AA64ISAR2_EL1_MOPS_SHIFT, NULL),
+		{ "gpa3", ID_AA64ISAR2_EL1_GPA3_SHIFT },
+		{ "apa3", ID_AA64ISAR2_EL1_APA3_SHIFT },
 		{}
 	},
 };
 
-static const struct ftr_set_desc smfr0 __prel64_initconst = {
-	.name		= "id_aa64smfr0",
-	.override	= &id_aa64smfr0_override,
+extern struct arm64_ftr_override kaslr_feature_override;
+
+static const struct ftr_set_desc kaslr __initconst = {
+	.name		= "kaslr",
+#ifdef CONFIG_RANDOMIZE_BASE
+	.override	= &kaslr_feature_override,
+#endif
 	.fields		= {
-		FIELD("smever", ID_AA64SMFR0_EL1_SMEver_SHIFT, NULL),
-		/* FA64 is a one bit field... :-/ */
-		{ "fa64", ID_AA64SMFR0_EL1_FA64_SHIFT, 1, },
+		{ "disabled", 0 },
 		{}
 	},
 };
 
-static bool __init hvhe_filter(u64 val)
-{
-	u64 mmfr1 = read_sysreg(id_aa64mmfr1_el1);
-
-	return (val == 1 &&
-		lower_32_bits(__boot_status) == BOOT_CPU_MODE_EL2 &&
-		cpuid_feature_extract_unsigned_field(mmfr1,
-						     ID_AA64MMFR1_EL1_VH_SHIFT));
-}
-
-static const struct ftr_set_desc sw_features __prel64_initconst = {
-	.name		= "arm64_sw",
-	.override	= &arm64_sw_feature_override,
-	.fields		= {
-		FIELD("nokaslr", ARM64_SW_FEATURE_OVERRIDE_NOKASLR, NULL),
-		FIELD("hvhe", ARM64_SW_FEATURE_OVERRIDE_HVHE, hvhe_filter),
-		{}
-	},
-};
-
-static const
-PREL64(const struct ftr_set_desc, reg) regs[] __prel64_initconst = {
-	{ &mmfr1	},
-	{ &pfr0 	},
-	{ &pfr1 	},
-	{ &isar1	},
-	{ &isar2	},
-	{ &smfr0	},
-	{ &sw_features	},
+static const struct ftr_set_desc * const regs[] __initconst = {
+	&mmfr1,
+	&pfr1,
+	&isar1,
+	&isar2,
+	&kaslr,
 };
 
 static const struct {
 	char	alias[FTR_ALIAS_NAME_LEN];
 	char	feature[FTR_ALIAS_OPTION_LEN];
 } aliases[] __initconst = {
-	{ "kvm_arm.mode=nvhe",		"id_aa64mmfr1.vh=0" },
-	{ "kvm_arm.mode=protected",	"id_aa64mmfr1.vh=0" },
-	{ "arm64.nosve",		"id_aa64pfr0.sve=0" },
-	{ "arm64.nosme",		"id_aa64pfr1.sme=0" },
+	{ "kvm-arm.mode=nvhe",		"id_aa64mmfr1.vh=0" },
+	{ "kvm-arm.mode=protected",	"id_aa64mmfr1.vh=0" },
 	{ "arm64.nobti",		"id_aa64pfr1.bt=0" },
 	{ "arm64.nopauth",
 	  "id_aa64isar1.gpi=0 id_aa64isar1.gpa=0 "
 	  "id_aa64isar1.api=0 id_aa64isar1.apa=0 "
 	  "id_aa64isar2.gpa3=0 id_aa64isar2.apa3=0"	   },
-	{ "arm64.nomops",		"id_aa64isar2.mops=0" },
 	{ "arm64.nomte",		"id_aa64pfr1.mte=0" },
-	{ "nokaslr",			"arm64_sw.nokaslr=1" },
+	{ "nokaslr",			"kaslr.disabled=1" },
 };
 
-static int __init parse_hexdigit(const char *p, u64 *v)
-{
-	// skip "0x" if it comes next
-	if (p[0] == '0' && tolower(p[1]) == 'x')
-		p += 2;
-
-	// check whether the RHS is a single hex digit
-	if (!isxdigit(p[0]) || (p[1] && !isspace(p[1])))
-		return -EINVAL;
-
-	*v = tolower(*p) - (isdigit(*p) ? '0' : 'a' - 10);
-	return 0;
-}
-
-static int __init find_field(const char *cmdline, char *opt, int len,
+static int __init find_field(const char *cmdline,
 			     const struct ftr_set_desc *reg, int f, u64 *v)
 {
-	int flen = strlen(reg->fields[f].name);
+	char opt[FTR_DESC_NAME_LEN + FTR_DESC_FIELD_LEN + 2];
+	int len;
 
-	// append '<fieldname>=' to obtain '<name>.<fieldname>='
-	memcpy(opt + len, reg->fields[f].name, flen);
-	len += flen;
-	opt[len++] = '=';
+	len = snprintf(opt, ARRAY_SIZE(opt), "%s.%s=",
+		       reg->name, reg->fields[f].name);
 
-	if (memcmp(cmdline, opt, len))
+	if (!parameqn(cmdline, opt, len))
 		return -1;
 
-	return parse_hexdigit(cmdline + len, v);
+	return kstrtou64(cmdline + len, 0, v);
 }
 
 static void __init match_options(const char *cmdline)
 {
-	char opt[FTR_DESC_NAME_LEN + FTR_DESC_FIELD_LEN + 2];
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(regs); i++) {
-		const struct ftr_set_desc *reg = prel64_pointer(regs[i].reg);
-		struct arm64_ftr_override *override;
-		int len = strlen(reg->name);
 		int f;
 
-		override = prel64_pointer(reg->override);
+		if (!regs[i]->override)
+			continue;
 
-		// set opt[] to '<name>.'
-		memcpy(opt, reg->name, len);
-		opt[len++] = '.';
-
-		for (f = 0; reg->fields[f].name[0] != '\0'; f++) {
-			u64 shift = reg->fields[f].shift;
-			u64 width = reg->fields[f].width ?: 4;
-			u64 mask = GENMASK_ULL(shift + width - 1, shift);
-			bool (*filter)(u64 val);
+		for (f = 0; strlen(regs[i]->fields[f].name); f++) {
+			u64 shift = regs[i]->fields[f].shift;
+			u64 mask = 0xfUL << shift;
 			u64 v;
 
-			if (find_field(cmdline, opt, len, reg, f, &v))
+			if (find_field(cmdline, regs[i], f, &v))
 				continue;
 
 			/*
 			 * If an override gets filtered out, advertise
-			 * it by setting the value to the all-ones while
+			 * it by setting the value to 0xf, but
 			 * clearing the mask... Yes, this is fragile.
 			 */
-			filter = prel64_pointer(reg->fields[f].filter);
-			if (filter && !filter(v)) {
-				override->val  |= mask;
-				override->mask &= ~mask;
+			if (regs[i]->fields[f].filter &&
+			    !regs[i]->fields[f].filter(v)) {
+				regs[i]->override->val  |= mask;
+				regs[i]->override->mask &= ~mask;
 				continue;
 			}
 
-			override->val  &= ~mask;
-			override->val  |= (v << shift) & mask;
-			override->mask |= mask;
+			regs[i]->override->val  &= ~mask;
+			regs[i]->override->val  |= (v << shift) & mask;
+			regs[i]->override->mask |= mask;
 
 			return;
 		}
@@ -286,29 +180,23 @@ static __init void __parse_cmdline(const char *cmdline, bool parse_aliases)
 
 		cmdline = skip_spaces(cmdline);
 
-		/* terminate on "--" appearing on the command line by itself */
-		if (cmdline[0] == '-' && cmdline[1] == '-' && isspace(cmdline[2]))
-			return;
-
-		for (len = 0; cmdline[len] && !isspace(cmdline[len]); len++) {
-			if (len >= sizeof(buf) - 1)
-				break;
-			if (cmdline[len] == '-')
-				buf[len] = '_';
-			else
-				buf[len] = cmdline[len];
-		}
+		for (len = 0; cmdline[len] && !isspace(cmdline[len]); len++);
 		if (!len)
 			return;
 
+		len = min(len, ARRAY_SIZE(buf) - 1);
+		strncpy(buf, cmdline, len);
 		buf[len] = 0;
+
+		if (strcmp(buf, "--") == 0)
+			return;
 
 		cmdline += len;
 
 		match_options(buf);
 
 		for (i = 0; parse_aliases && i < ARRAY_SIZE(aliases); i++)
-			if (!memcmp(buf, aliases[i].alias, len + 1))
+			if (parameq(buf, aliases[i].alias))
 				__parse_cmdline(aliases[i].feature, false);
 	} while (1);
 }
@@ -338,38 +226,36 @@ static __init void parse_cmdline(void)
 {
 	const u8 *prop = get_bootargs_cmdline();
 
-	if (IS_ENABLED(CONFIG_CMDLINE_FORCE) || !prop)
+	if (IS_ENABLED(CONFIG_CMDLINE_EXTEND) ||
+	    IS_ENABLED(CONFIG_CMDLINE_FORCE) ||
+	    !prop) {
 		__parse_cmdline(CONFIG_CMDLINE, true);
+	}
 
 	if (!IS_ENABLED(CONFIG_CMDLINE_FORCE) && prop)
 		__parse_cmdline(prop, true);
 }
 
 /* Keep checkers quiet */
-void init_feature_override(u64 boot_status);
+void init_feature_override(void);
 
-asmlinkage void __init init_feature_override(u64 boot_status)
+asmlinkage void __init init_feature_override(void)
 {
-	struct arm64_ftr_override *override;
-	const struct ftr_set_desc *reg;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(regs); i++) {
-		reg = prel64_pointer(regs[i].reg);
-		override = prel64_pointer(reg->override);
-
-		override->val  = 0;
-		override->mask = 0;
+		if (regs[i]->override) {
+			regs[i]->override->val  = 0;
+			regs[i]->override->mask = 0;
+		}
 	}
-
-	__boot_status = boot_status;
 
 	parse_cmdline();
 
 	for (i = 0; i < ARRAY_SIZE(regs); i++) {
-		reg = prel64_pointer(regs[i].reg);
-		override = prel64_pointer(reg->override);
-		dcache_clean_inval_poc((unsigned long)override,
-				       (unsigned long)(override + 1));
+		if (regs[i]->override)
+			dcache_clean_inval_poc((unsigned long)regs[i]->override,
+					    (unsigned long)regs[i]->override +
+					    sizeof(*regs[i]->override));
 	}
 }

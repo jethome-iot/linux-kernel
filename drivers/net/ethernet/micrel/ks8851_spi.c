@@ -156,7 +156,7 @@ static void ks8851_rdreg(struct ks8851_net *ks, unsigned int op,
 
 	txb[0] = cpu_to_le16(op | KS_SPIOP_RD);
 
-	if (kss->spidev->master->flags & SPI_CONTROLLER_HALF_DUPLEX) {
+	if (kss->spidev->master->flags & SPI_MASTER_HALF_DUPLEX) {
 		msg = &kss->spi_msg2;
 		xfer = kss->spi_xfer2;
 
@@ -180,7 +180,7 @@ static void ks8851_rdreg(struct ks8851_net *ks, unsigned int op,
 	ret = spi_sync(kss->spidev, msg);
 	if (ret < 0)
 		netdev_err(ks->netdev, "read: spi_sync() failed\n");
-	else if (kss->spidev->master->flags & SPI_CONTROLLER_HALF_DUPLEX)
+	else if (kss->spidev->master->flags & SPI_MASTER_HALF_DUPLEX)
 		memcpy(rxb, trx, rxl);
 	else
 		memcpy(rxb, trx + 2, rxl);
@@ -305,7 +305,7 @@ static unsigned int calc_txlen(unsigned int len)
  */
 static void ks8851_rx_skb_spi(struct ks8851_net *ks, struct sk_buff *skb)
 {
-	netif_rx(skb);
+	netif_rx_ni(skb);
 }
 
 /**
@@ -425,8 +425,7 @@ static int ks8851_probe_spi(struct spi_device *spi)
 
 	spi->bits_per_word = 8;
 
-	kss = netdev_priv(netdev);
-	ks = &kss->ks8851;
+	ks = netdev_priv(netdev);
 
 	ks->lock = ks8851_lock_spi;
 	ks->unlock = ks8851_unlock_spi;
@@ -446,6 +445,8 @@ static int ks8851_probe_spi(struct spi_device *spi)
 		 IRQ_RXPSI)	/* RX process stop */
 	ks->rc_ier = STD_IRQ;
 
+	kss = to_ks8851_spi(ks);
+
 	kss->spidev = spi;
 	mutex_init(&kss->lock);
 	INIT_WORK(&kss->tx_work, ks8851_tx_work);
@@ -463,9 +464,9 @@ static int ks8851_probe_spi(struct spi_device *spi)
 	return ks8851_probe_common(netdev, dev, msg_enable);
 }
 
-static void ks8851_remove_spi(struct spi_device *spi)
+static int ks8851_remove_spi(struct spi_device *spi)
 {
-	ks8851_remove_common(&spi->dev);
+	return ks8851_remove_common(&spi->dev);
 }
 
 static const struct of_device_id ks8851_match_table[] = {

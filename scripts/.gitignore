@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-only
 /asn1_compiler
-/generate_rust_target
+/bin2c
+/extract-cert
 /insert-sys-cert
 /kallsyms
 /module.lds
 /recordmcount
-/rustdoc_test_builder
-/rustdoc_test_gen
 /sign-file
 /sorttable
-/target.json
 /unifdef

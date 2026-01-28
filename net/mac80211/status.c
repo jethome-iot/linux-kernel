@@ -5,7 +5,6 @@
  * Copyright 2006-2007	Jiri Benc <jbenc@suse.cz>
  * Copyright 2008-2010	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
- * Copyright 2021-2023  Intel Corporation
  */
 
 #include <linux/export.h>
@@ -184,6 +183,8 @@ static void ieee80211_check_pending_bar(struct sta_info *sta, u8 *addr, u8 tid)
 static void ieee80211_frame_acked(struct sta_info *sta, struct sk_buff *skb)
 {
 	struct ieee80211_mgmt *mgmt = (void *) skb->data;
+	struct ieee80211_local *local = sta->local;
+	struct ieee80211_sub_if_data *sdata = sta->sdata;
 
 	if (ieee80211_is_data_qos(mgmt->frame_control)) {
 		struct ieee80211_hdr *hdr = (void *) skb->data;
@@ -191,6 +192,42 @@ static void ieee80211_frame_acked(struct sta_info *sta, struct sk_buff *skb)
 		u16 tid = qc[0] & 0xf;
 
 		ieee80211_check_pending_bar(sta, hdr->addr1, tid);
+	}
+
+	if (ieee80211_is_action(mgmt->frame_control) &&
+	    !ieee80211_has_protected(mgmt->frame_control) &&
+	    mgmt->u.action.category == WLAN_CATEGORY_HT &&
+	    mgmt->u.action.u.ht_smps.action == WLAN_HT_ACTION_SMPS &&
+	    ieee80211_sdata_running(sdata)) {
+		enum ieee80211_smps_mode smps_mode;
+
+		switch (mgmt->u.action.u.ht_smps.smps_control) {
+		case WLAN_HT_SMPS_CONTROL_DYNAMIC:
+			smps_mode = IEEE80211_SMPS_DYNAMIC;
+			break;
+		case WLAN_HT_SMPS_CONTROL_STATIC:
+			smps_mode = IEEE80211_SMPS_STATIC;
+			break;
+		case WLAN_HT_SMPS_CONTROL_DISABLED:
+		default: /* shouldn't happen since we don't send that */
+			smps_mode = IEEE80211_SMPS_OFF;
+			break;
+		}
+
+		if (sdata->vif.type == NL80211_IFTYPE_STATION) {
+			/*
+			 * This update looks racy, but isn't -- if we come
+			 * here we've definitely got a station that we're
+			 * talking to, and on a managed interface that can
+			 * only be the AP. And the only other place updating
+			 * this variable in managed mode is before association.
+			 */
+			sdata->smps_mode = smps_mode;
+			ieee80211_queue_work(&local->hw, &sdata->recalc_smps);
+		} else if (sdata->vif.type == NL80211_IFTYPE_AP ||
+			   sdata->vif.type == NL80211_IFTYPE_AP_VLAN) {
+			sta->known_smps_mode = smps_mode;
+		}
 	}
 }
 
@@ -209,19 +246,15 @@ static void ieee80211_set_bar_pending(struct sta_info *sta, u8 tid, u16 ssn)
 static int ieee80211_tx_radiotap_len(struct ieee80211_tx_info *info,
 				     struct ieee80211_tx_status *status)
 {
-	struct ieee80211_rate_status *status_rate = NULL;
 	int len = sizeof(struct ieee80211_radiotap_header);
 
-	if (status && status->n_rates)
-		status_rate = &status->rates[status->n_rates - 1];
-
 	/* IEEE80211_RADIOTAP_RATE rate */
-	if (status_rate && !(status_rate->rate_idx.flags &
-						(RATE_INFO_FLAGS_MCS |
-						 RATE_INFO_FLAGS_DMG |
-						 RATE_INFO_FLAGS_EDMG |
-						 RATE_INFO_FLAGS_VHT_MCS |
-						 RATE_INFO_FLAGS_HE_MCS)))
+	if (status && status->rate && !(status->rate->flags &
+					(RATE_INFO_FLAGS_MCS |
+					 RATE_INFO_FLAGS_DMG |
+					 RATE_INFO_FLAGS_EDMG |
+					 RATE_INFO_FLAGS_VHT_MCS |
+					 RATE_INFO_FLAGS_HE_MCS)))
 		len += 2;
 	else if (info->status.rates[0].idx >= 0 &&
 		 !(info->status.rates[0].flags &
@@ -236,12 +269,12 @@ static int ieee80211_tx_radiotap_len(struct ieee80211_tx_info *info,
 
 	/* IEEE80211_RADIOTAP_MCS
 	 * IEEE80211_RADIOTAP_VHT */
-	if (status_rate) {
-		if (status_rate->rate_idx.flags & RATE_INFO_FLAGS_MCS)
+	if (status && status->rate) {
+		if (status->rate->flags & RATE_INFO_FLAGS_MCS)
 			len += 3;
-		else if (status_rate->rate_idx.flags & RATE_INFO_FLAGS_VHT_MCS)
+		else if (status->rate->flags & RATE_INFO_FLAGS_VHT_MCS)
 			len = ALIGN(len, 2) + 12;
-		else if (status_rate->rate_idx.flags & RATE_INFO_FLAGS_HE_MCS)
+		else if (status->rate->flags & RATE_INFO_FLAGS_HE_MCS)
 			len = ALIGN(len, 2) + 12;
 	} else if (info->status.rates[0].idx >= 0) {
 		if (info->status.rates[0].flags & IEEE80211_TX_RC_MCS)
@@ -255,20 +288,17 @@ static int ieee80211_tx_radiotap_len(struct ieee80211_tx_info *info,
 
 static void
 ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
+				 struct ieee80211_supported_band *sband,
 				 struct sk_buff *skb, int retry_count,
-				 int rtap_len,
+				 int rtap_len, int shift,
 				 struct ieee80211_tx_status *status)
 {
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
 	struct ieee80211_radiotap_header *rthdr;
-	struct ieee80211_rate_status *status_rate = NULL;
 	unsigned char *pos;
 	u16 legacy_rate = 0;
 	u16 txflags;
-
-	if (status && status->n_rates)
-		status_rate = &status->rates[status->n_rates - 1];
 
 	rthdr = skb_push(skb, rtap_len);
 
@@ -287,27 +317,22 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 
 	/* IEEE80211_RADIOTAP_RATE */
 
-	if (status_rate) {
-		if (!(status_rate->rate_idx.flags &
-						(RATE_INFO_FLAGS_MCS |
-						 RATE_INFO_FLAGS_DMG |
-						 RATE_INFO_FLAGS_EDMG |
-						 RATE_INFO_FLAGS_VHT_MCS |
-						 RATE_INFO_FLAGS_HE_MCS)))
-			legacy_rate = status_rate->rate_idx.legacy;
+	if (status && status->rate) {
+		if (!(status->rate->flags & (RATE_INFO_FLAGS_MCS |
+					     RATE_INFO_FLAGS_DMG |
+					     RATE_INFO_FLAGS_EDMG |
+					     RATE_INFO_FLAGS_VHT_MCS |
+					     RATE_INFO_FLAGS_HE_MCS)))
+			legacy_rate = status->rate->legacy;
 	} else if (info->status.rates[0].idx >= 0 &&
 		 !(info->status.rates[0].flags & (IEEE80211_TX_RC_MCS |
-						  IEEE80211_TX_RC_VHT_MCS))) {
-		struct ieee80211_supported_band *sband;
-
-		sband = local->hw.wiphy->bands[info->band];
+						  IEEE80211_TX_RC_VHT_MCS)))
 		legacy_rate =
 			sband->bitrates[info->status.rates[0].idx].bitrate;
-	}
 
 	if (legacy_rate) {
 		rthdr->it_present |= cpu_to_le32(BIT(IEEE80211_RADIOTAP_RATE));
-		*pos = DIV_ROUND_UP(legacy_rate, 5);
+		*pos = DIV_ROUND_UP(legacy_rate, 5 * (1 << shift));
 		/* padding for tx flags */
 		pos += 2;
 	}
@@ -331,21 +356,20 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 	*pos = retry_count;
 	pos++;
 
-	if (status_rate && (status_rate->rate_idx.flags & RATE_INFO_FLAGS_MCS))
-	{
+	if (status && status->rate &&
+	    (status->rate->flags & RATE_INFO_FLAGS_MCS)) {
 		rthdr->it_present |= cpu_to_le32(BIT(IEEE80211_RADIOTAP_MCS));
 		pos[0] = IEEE80211_RADIOTAP_MCS_HAVE_MCS |
 			 IEEE80211_RADIOTAP_MCS_HAVE_GI |
 			 IEEE80211_RADIOTAP_MCS_HAVE_BW;
-		if (status_rate->rate_idx.flags & RATE_INFO_FLAGS_SHORT_GI)
+		if (status->rate->flags & RATE_INFO_FLAGS_SHORT_GI)
 			pos[1] |= IEEE80211_RADIOTAP_MCS_SGI;
-		if (status_rate->rate_idx.bw == RATE_INFO_BW_40)
+		if (status->rate->bw == RATE_INFO_BW_40)
 			pos[1] |= IEEE80211_RADIOTAP_MCS_BW_40;
-		pos[2] = status_rate->rate_idx.mcs;
+		pos[2] = status->rate->mcs;
 		pos += 3;
-	} else if (status_rate && (status_rate->rate_idx.flags &
-					RATE_INFO_FLAGS_VHT_MCS))
-	{
+	} else if (status && status->rate &&
+		   (status->rate->flags & RATE_INFO_FLAGS_VHT_MCS)) {
 		u16 known = local->hw.radiotap_vht_details &
 			(IEEE80211_RADIOTAP_VHT_KNOWN_GI |
 			 IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH);
@@ -360,12 +384,12 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 		pos += 2;
 
 		/* u8 flags - IEEE80211_RADIOTAP_VHT_FLAG_* */
-		if (status_rate->rate_idx.flags & RATE_INFO_FLAGS_SHORT_GI)
+		if (status->rate->flags & RATE_INFO_FLAGS_SHORT_GI)
 			*pos |= IEEE80211_RADIOTAP_VHT_FLAG_SGI;
 		pos++;
 
 		/* u8 bandwidth */
-		switch (status_rate->rate_idx.bw) {
+		switch (status->rate->bw) {
 		case RATE_INFO_BW_160:
 			*pos = 11;
 			break;
@@ -382,8 +406,7 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 		pos++;
 
 		/* u8 mcs_nss[4] */
-		*pos = (status_rate->rate_idx.mcs << 4) |
-				status_rate->rate_idx.nss;
+		*pos = (status->rate->mcs << 4) | status->rate->nss;
 		pos += 4;
 
 		/* u8 coding */
@@ -392,9 +415,8 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 		pos++;
 		/* u16 partial_aid */
 		pos += 2;
-	} else if (status_rate && (status_rate->rate_idx.flags &
-					RATE_INFO_FLAGS_HE_MCS))
-	{
+	} else if (status && status->rate &&
+		   (status->rate->flags & RATE_INFO_FLAGS_HE_MCS)) {
 		struct ieee80211_radiotap_he *he;
 
 		rthdr->it_present |= cpu_to_le32(BIT(IEEE80211_RADIOTAP_HE));
@@ -412,7 +434,7 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 
 #define HE_PREP(f, val) le16_encode_bits(val, IEEE80211_RADIOTAP_HE_##f)
 
-		he->data6 |= HE_PREP(DATA6_NSTS, status_rate->rate_idx.nss);
+		he->data6 |= HE_PREP(DATA6_NSTS, status->rate->nss);
 
 #define CHECK_GI(s) \
 	BUILD_BUG_ON(IEEE80211_RADIOTAP_HE_DATA5_GI_##s != \
@@ -422,12 +444,12 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 		CHECK_GI(1_6);
 		CHECK_GI(3_2);
 
-		he->data3 |= HE_PREP(DATA3_DATA_MCS, status_rate->rate_idx.mcs);
-		he->data3 |= HE_PREP(DATA3_DATA_DCM, status_rate->rate_idx.he_dcm);
+		he->data3 |= HE_PREP(DATA3_DATA_MCS, status->rate->mcs);
+		he->data3 |= HE_PREP(DATA3_DATA_DCM, status->rate->he_dcm);
 
-		he->data5 |= HE_PREP(DATA5_GI, status_rate->rate_idx.he_gi);
+		he->data5 |= HE_PREP(DATA5_GI, status->rate->he_gi);
 
-		switch (status_rate->rate_idx.bw) {
+		switch (status->rate->bw) {
 		case RATE_INFO_BW_20:
 			he->data5 |= HE_PREP(DATA5_DATA_BW_RU_ALLOC,
 					     IEEE80211_RADIOTAP_HE_DATA5_DATA_BW_RU_ALLOC_20MHZ);
@@ -458,16 +480,16 @@ ieee80211_add_tx_radiotap_header(struct ieee80211_local *local,
 			CHECK_RU_ALLOC(2x996);
 
 			he->data5 |= HE_PREP(DATA5_DATA_BW_RU_ALLOC,
-					     status_rate->rate_idx.he_ru_alloc + 4);
+					     status->rate->he_ru_alloc + 4);
 			break;
 		default:
-			WARN_ONCE(1, "Invalid SU BW %d\n", status_rate->rate_idx.bw);
+			WARN_ONCE(1, "Invalid SU BW %d\n", status->rate->bw);
 		}
 
 		pos += sizeof(struct ieee80211_radiotap_he);
 	}
 
-	if (status_rate || info->status.rates[0].idx < 0)
+	if ((status && status->rate) || info->status.rates[0].idx < 0)
 		return;
 
 	/* IEEE80211_RADIOTAP_MCS
@@ -589,16 +611,14 @@ ieee80211_sdata_from_skb(struct ieee80211_local *local, struct sk_buff *skb)
 }
 
 static void ieee80211_report_ack_skb(struct ieee80211_local *local,
-				     struct sk_buff *orig_skb,
-				     bool acked, bool dropped,
-				     ktime_t ack_hwtstamp)
+				     struct ieee80211_tx_info *info,
+				     bool acked, bool dropped)
 {
-	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(orig_skb);
 	struct sk_buff *skb;
 	unsigned long flags;
 
 	spin_lock_irqsave(&local->ack_status_lock, flags);
-	skb = idr_remove(&local->ack_status_frames, info->status_data);
+	skb = idr_remove(&local->ack_status_frames, info->ack_frame_id);
 	spin_unlock_irqrestore(&local->ack_status_lock, flags);
 
 	if (!skb)
@@ -608,21 +628,6 @@ static void ieee80211_report_ack_skb(struct ieee80211_local *local,
 		u64 cookie = IEEE80211_SKB_CB(skb)->ack.cookie;
 		struct ieee80211_sub_if_data *sdata;
 		struct ieee80211_hdr *hdr = (void *)skb->data;
-		bool is_valid_ack_signal =
-			!!(info->status.flags & IEEE80211_TX_STATUS_ACK_SIGNAL_VALID);
-		struct cfg80211_tx_status status = {
-			.cookie = cookie,
-			.buf = skb->data,
-			.len = skb->len,
-			.ack = acked,
-		};
-
-		if (ieee80211_is_timing_measurement(orig_skb) ||
-		    ieee80211_is_ftm(orig_skb)) {
-			status.tx_tstamp =
-				ktime_to_ns(skb_hwtstamps(orig_skb)->hwtstamp);
-			status.ack_tstamp = ktime_to_ns(ack_hwtstamp);
-		}
 
 		rcu_read_lock();
 		sdata = ieee80211_sdata_from_skb(local, skb);
@@ -639,12 +644,12 @@ static void ieee80211_report_ack_skb(struct ieee80211_local *local,
 				cfg80211_probe_status(sdata->dev, hdr->addr1,
 						      cookie, acked,
 						      info->status.ack_signal,
-						      is_valid_ack_signal,
+						      info->status.is_valid_ack_signal,
 						      GFP_ATOMIC);
 			else if (ieee80211_is_mgmt(hdr->frame_control))
-				cfg80211_mgmt_tx_status_ext(&sdata->wdev,
-							    &status,
-							    GFP_ATOMIC);
+				cfg80211_mgmt_tx_status(&sdata->wdev, cookie,
+							skb->data, skb->len,
+							acked, GFP_ATOMIC);
 			else
 				pr_warn("Unknown status report in ack skb\n");
 
@@ -660,45 +665,8 @@ static void ieee80211_report_ack_skb(struct ieee80211_local *local,
 	}
 }
 
-static void ieee80211_handle_smps_status(struct ieee80211_sub_if_data *sdata,
-					 bool acked, u16 status_data)
-{
-	u16 sub_data = u16_get_bits(status_data, IEEE80211_STATUS_SUBDATA_MASK);
-	enum ieee80211_smps_mode smps_mode = sub_data & 3;
-	int link_id = (sub_data >> 2);
-	struct ieee80211_link_data *link;
-
-	if (!sdata || !ieee80211_sdata_running(sdata))
-		return;
-
-	if (!acked)
-		return;
-
-	if (sdata->vif.type != NL80211_IFTYPE_STATION)
-		return;
-
-	if (WARN(link_id >= ARRAY_SIZE(sdata->link),
-		 "bad SMPS status link: %d\n", link_id))
-		return;
-
-	link = rcu_dereference(sdata->link[link_id]);
-	if (!link)
-		return;
-
-	/*
-	 * This update looks racy, but isn't, the only other place
-	 * updating this variable is in managed mode before assoc,
-	 * and we have to be associated to have a status from the
-	 * action frame TX, since we cannot send it while we're not
-	 * associated yet.
-	 */
-	link->smps_mode = smps_mode;
-	wiphy_work_queue(sdata->local->hw.wiphy, &link->u.mgd.recalc_smps);
-}
-
 static void ieee80211_report_used_skb(struct ieee80211_local *local,
-				      struct sk_buff *skb, bool dropped,
-				      ktime_t ack_hwtstamp)
+				      struct sk_buff *skb, bool dropped)
 {
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	u16 tx_time_est = ieee80211_info_get_tx_time_est(info);
@@ -730,10 +698,13 @@ static void ieee80211_report_used_skb(struct ieee80211_local *local,
 
 		if (!sdata) {
 			skb->dev = NULL;
-		} else if (!dropped) {
+		} else {
+			unsigned int hdr_size =
+				ieee80211_hdrlen(hdr->frame_control);
+
 			/* Check to see if packet is a TDLS teardown packet */
 			if (ieee80211_is_data(hdr->frame_control) &&
-			    (ieee80211_get_tdls_action(skb) ==
+			    (ieee80211_get_tdls_action(skb, hdr_size) ==
 			     WLAN_TDLS_TEARDOWN)) {
 				ieee80211_tdls_td_tx_handle(local, sdata, skb,
 							    info->flags);
@@ -745,8 +716,8 @@ static void ieee80211_report_used_skb(struct ieee80211_local *local,
 					if (qskb) {
 						skb_queue_tail(&sdata->status_queue,
 							       qskb);
-						wiphy_work_queue(local->hw.wiphy,
-								 &sdata->work);
+						ieee80211_queue_work(&local->hw,
+								     &sdata->work);
 					}
 				}
 			} else {
@@ -757,24 +728,8 @@ static void ieee80211_report_used_skb(struct ieee80211_local *local,
 		}
 
 		rcu_read_unlock();
-	} else if (info->status_data_idr) {
-		ieee80211_report_ack_skb(local, skb, acked, dropped,
-					 ack_hwtstamp);
-	} else if (info->status_data) {
-		struct ieee80211_sub_if_data *sdata;
-
-		rcu_read_lock();
-
-		sdata = ieee80211_sdata_from_skb(local, skb);
-
-		switch (u16_get_bits(info->status_data,
-				     IEEE80211_STATUS_TYPE_MASK)) {
-		case IEEE80211_STATUS_TYPE_SMPS:
-			ieee80211_handle_smps_status(sdata, acked,
-						     info->status_data);
-			break;
-		}
-		rcu_read_unlock();
+	} else if (info->ack_frame_id) {
+		ieee80211_report_ack_skb(local, info, acked, dropped);
 	}
 
 	if (!dropped && skb->destructor) {
@@ -799,6 +754,7 @@ static void ieee80211_report_used_skb(struct ieee80211_local *local,
  */
 #define STA_LOST_PKT_THRESHOLD	50
 #define STA_LOST_PKT_TIME	HZ		/* 1 sec since last ACK */
+#define STA_LOST_TDLS_PKT_THRESHOLD	10
 #define STA_LOST_TDLS_PKT_TIME		(10*HZ) /* 10secs since last ACK */
 
 static void ieee80211_lost_packet(struct sta_info *sta,
@@ -825,7 +781,7 @@ static void ieee80211_lost_packet(struct sta_info *sta,
 	}
 
 	/*
-	 * If we're in TDLS mode, make sure that all STA_LOST_PKT_THRESHOLD
+	 * If we're in TDLS mode, make sure that all STA_LOST_TDLS_PKT_THRESHOLD
 	 * of the last packets were lost, and that no ACK was received in the
 	 * last STA_LOST_TDLS_PKT_TIME ms, before triggering the CQM packet-loss
 	 * mechanism.
@@ -875,7 +831,8 @@ static int ieee80211_tx_get_rates(struct ieee80211_hw *hw,
 }
 
 void ieee80211_tx_monitor(struct ieee80211_local *local, struct sk_buff *skb,
-			  int retry_count, bool send_to_cooked,
+			  struct ieee80211_supported_band *sband,
+			  int retry_count, int shift, bool send_to_cooked,
 			  struct ieee80211_tx_status *status)
 {
 	struct sk_buff *skb2;
@@ -891,8 +848,8 @@ void ieee80211_tx_monitor(struct ieee80211_local *local, struct sk_buff *skb,
 		dev_kfree_skb(skb);
 		return;
 	}
-	ieee80211_add_tx_radiotap_header(local, skb, retry_count,
-					 rtap_len, status);
+	ieee80211_add_tx_radiotap_header(local, sband, skb, retry_count,
+					 rtap_len, shift, status);
 
 	/* XXX: is this sufficient for BPF? */
 	skb_reset_mac_header(skb);
@@ -941,16 +898,20 @@ static void __ieee80211_tx_status(struct ieee80211_hw *hw,
 	struct ieee80211_tx_info *info = status->info;
 	struct sta_info *sta;
 	__le16 fc;
+	struct ieee80211_supported_band *sband;
 	bool send_to_cooked;
 	bool acked;
 	bool noack_success;
 	struct ieee80211_bar *bar;
+	int shift = 0;
 	int tid = IEEE80211_NUM_TIDS;
 
+	sband = local->hw.wiphy->bands[info->band];
 	fc = hdr->frame_control;
 
 	if (status->sta) {
 		sta = container_of(status->sta, struct sta_info, sta);
+		shift = ieee80211_vif_get_shift(&sta->sdata->vif);
 
 		if (info->flags & IEEE80211_TX_STATUS_EOSP)
 			clear_sta_flag(sta, WLAN_STA_SP);
@@ -1023,6 +984,25 @@ static void __ieee80211_tx_status(struct ieee80211_hw *hw,
 		if (!(info->flags & IEEE80211_TX_CTL_INJECTED) && acked)
 			ieee80211_frame_acked(sta, skb);
 
+	} else if (wiphy_ext_feature_isset(local->hw.wiphy,
+					   NL80211_EXT_FEATURE_AIRTIME_FAIRNESS)) {
+		struct ieee80211_sub_if_data *sdata;
+		struct ieee80211_txq *txq;
+		u32 airtime;
+
+		/* Account airtime to multicast queue */
+		sdata = ieee80211_sdata_from_skb(local, skb);
+
+		if (sdata && (txq = sdata->vif.txq)) {
+			airtime = info->status.tx_time ?:
+				ieee80211_calc_expected_tx_airtime(hw,
+								   &sdata->vif,
+								   NULL,
+								   skb->len,
+								   false);
+
+			ieee80211_register_airtime(txq, airtime, 0);
+		}
 	}
 
 	/* SNMP counters
@@ -1066,7 +1046,7 @@ static void __ieee80211_tx_status(struct ieee80211_hw *hw,
 			  jiffies + msecs_to_jiffies(10));
 	}
 
-	ieee80211_report_used_skb(local, skb, false, status->ack_hwtstamp);
+	ieee80211_report_used_skb(local, skb, false);
 
 	/* this was a transmitted frame, but now we want to reuse it */
 	skb_orphan(skb);
@@ -1088,11 +1068,11 @@ static void __ieee80211_tx_status(struct ieee80211_hw *hw,
 	}
 
 	/* send to monitor interfaces */
-	ieee80211_tx_monitor(local, skb, retry_count,
+	ieee80211_tx_monitor(local, skb, sband, retry_count, shift,
 			     send_to_cooked, status);
 }
 
-void ieee80211_tx_status_skb(struct ieee80211_hw *hw, struct sk_buff *skb)
+void ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
 {
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
 	struct ieee80211_local *local = hw_to_local(hw);
@@ -1111,7 +1091,7 @@ void ieee80211_tx_status_skb(struct ieee80211_hw *hw, struct sk_buff *skb)
 	ieee80211_tx_status_ext(hw, &status);
 	rcu_read_unlock();
 }
-EXPORT_SYMBOL(ieee80211_tx_status_skb);
+EXPORT_SYMBOL(ieee80211_tx_status);
 
 void ieee80211_tx_status_ext(struct ieee80211_hw *hw,
 			     struct ieee80211_tx_status *status)
@@ -1120,17 +1100,17 @@ void ieee80211_tx_status_ext(struct ieee80211_hw *hw,
 	struct ieee80211_tx_info *info = status->info;
 	struct ieee80211_sta *pubsta = status->sta;
 	struct sk_buff *skb = status->skb;
+	struct ieee80211_supported_band *sband;
 	struct sta_info *sta = NULL;
 	int rates_idx, retry_count;
-	bool acked, noack_success, ack_signal_valid;
+	bool acked, noack_success;
 	u16 tx_time_est;
 
 	if (pubsta) {
 		sta = container_of(pubsta, struct sta_info, sta);
 
-		if (status->n_rates)
-			sta->deflink.tx_stats.last_rate_info =
-				status->rates[status->n_rates - 1].rate_idx;
+		if (status->rate)
+			sta->deflink.tx_stats.last_rate_info = *status->rate;
 	}
 
 	if (skb && (tx_time_est =
@@ -1150,10 +1130,10 @@ void ieee80211_tx_status_ext(struct ieee80211_hw *hw,
 
 	rates_idx = ieee80211_tx_get_rates(hw, info, &retry_count);
 
+	sband = hw->wiphy->bands[info->band];
+
 	acked = !!(info->flags & IEEE80211_TX_STAT_ACK);
 	noack_success = !!(info->flags & IEEE80211_TX_STAT_NOACK_TRANSMITTED);
-	ack_signal_valid =
-		!!(info->status.flags & IEEE80211_TX_STATUS_ACK_SIGNAL_VALID);
 
 	if (pubsta) {
 		struct ieee80211_sub_if_data *sdata = sta->sdata;
@@ -1182,7 +1162,7 @@ void ieee80211_tx_status_ext(struct ieee80211_hw *hw,
 				    unlikely(sdata->u.mgd.probe_send_count > 0))
 					sdata->u.mgd.probe_send_count = 0;
 
-				if (ack_signal_valid) {
+				if (info->status.is_valid_ack_signal) {
 					sta->deflink.status_stats.last_ack_signal =
 							 (s8)info->status.ack_signal;
 					sta->deflink.status_stats.ack_signal_filled = true;
@@ -1204,7 +1184,7 @@ void ieee80211_tx_status_ext(struct ieee80211_hw *hw,
 			}
 		}
 
-		rate_control_tx_status(local, status);
+		rate_control_tx_status(local, sband, status);
 		if (ieee80211_vif_is_mesh(&sta->sdata->vif))
 			ieee80211s_update_metric(local, sta, status);
 	}
@@ -1229,7 +1209,7 @@ free:
 	if (!skb)
 		return;
 
-	ieee80211_report_used_skb(local, skb, false, status->ack_hwtstamp);
+	ieee80211_report_used_skb(local, skb, false);
 	if (status->free_list)
 		list_add_tail(&skb->list, status->free_list);
 	else
@@ -1242,18 +1222,43 @@ void ieee80211_tx_rate_update(struct ieee80211_hw *hw,
 			      struct ieee80211_tx_info *info)
 {
 	struct ieee80211_local *local = hw_to_local(hw);
+	struct ieee80211_supported_band *sband = hw->wiphy->bands[info->band];
 	struct sta_info *sta = container_of(pubsta, struct sta_info, sta);
 	struct ieee80211_tx_status status = {
 		.info = info,
 		.sta = pubsta,
 	};
 
-	rate_control_tx_status(local, &status);
+	rate_control_tx_status(local, sband, &status);
 
 	if (ieee80211_hw_check(&local->hw, HAS_RATE_CONTROL))
 		sta->deflink.tx_stats.last_rate = info->status.rates[0];
 }
 EXPORT_SYMBOL(ieee80211_tx_rate_update);
+
+void ieee80211_tx_status_8023(struct ieee80211_hw *hw,
+			      struct ieee80211_vif *vif,
+			      struct sk_buff *skb)
+{
+	struct ieee80211_sub_if_data *sdata;
+	struct ieee80211_tx_status status = {
+		.skb = skb,
+		.info = IEEE80211_SKB_CB(skb),
+	};
+	struct sta_info *sta;
+
+	sdata = vif_to_sdata(vif);
+
+	rcu_read_lock();
+
+	if (!ieee80211_lookup_ra_sta(sdata, skb, &sta) && !IS_ERR(sta))
+		status.sta = &sta->sta;
+
+	ieee80211_tx_status_ext(hw, &status);
+
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL(ieee80211_tx_status_8023);
 
 void ieee80211_report_low_ack(struct ieee80211_sta *pubsta, u32 num_packets)
 {
@@ -1266,9 +1271,8 @@ EXPORT_SYMBOL(ieee80211_report_low_ack);
 void ieee80211_free_txskb(struct ieee80211_hw *hw, struct sk_buff *skb)
 {
 	struct ieee80211_local *local = hw_to_local(hw);
-	ktime_t kt = ktime_set(0, 0);
 
-	ieee80211_report_used_skb(local, skb, true, kt);
+	ieee80211_report_used_skb(local, skb, true);
 	dev_kfree_skb_any(skb);
 }
 EXPORT_SYMBOL(ieee80211_free_txskb);

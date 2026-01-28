@@ -1,0 +1,197 @@
+config AMLOGIC_DEBUG
+	tristate "AMLOGIC kernel debug"
+	default n
+	help
+	  This option is set up for Amlogic kernel debug,
+	  Modifying the source code, we will use the AMLOGIC_
+	  prefix.If you want to add debug code to the kernel,please
+	  use this option switch it.
+
+config AMLOGIC_BGKI_DEBUG_MISC
+	bool "Amlogic Debug Builtin Code"
+	depends on AMLOGIC_DEBUG
+	depends on AMLOGIC_BREAK_GKI_20
+	default n
+	help
+	  Amlogic debug code must builtin
+	  Enable if doubt
+
+config AMLOGIC_DEBUG_ATRACE
+	bool "Amlogic Kernel ATrace"
+	depends on AMLOGIC_DEBUG
+	depends on TRACING
+	default n
+	help
+	  Add android atrace compatible function.
+	  Support Tags
+
+config AMLOGIC_BOOT_TIME
+	bool "AMLOGIC boot time optimization"
+	depends on AMLOGIC_BREAK_GKI
+	default n
+	help
+	  This option is set up for Amlogic boot time optimization,
+	  if you want to optimize boot time, please set this config to y.
+
+config AMLOGIC_DEBUG_PRINTK
+	tristate "Amlogic printk support"
+	depends on PRINTK_CALLER
+	default n
+	help
+	  if you want to print information such as cpu irq,
+	  please use this option switch it.
+
+config AMLOGIC_DEBUG_FILE
+	bool "Amlogic dump log to debug file"
+	default n
+	help
+	  Provide some interfaces for dumping log to debug file
+
+config AMLOGIC_DEBUG_TEST
+	tristate "Amlogic debug test on init"
+	depends on AMLOGIC_DEBUG
+	default n
+	help
+	  auto test on debug init
+
+config AMLOGIC_DEBUG_HLD
+	bool "Amlogic hardlockup detector support"
+	depends on AMLOGIC_DEBUG
+	default n
+	help
+	  if you want to hardlockup detector support,
+	  please use this option switch it.
+
+
+config AMLOGIC_DEBUG_MHZ
+	bool "Amlogic debug mhz"
+	depends on AMLOGIC_DEBUG
+	default y if (AMLOGIC_DEBUG=y || AMLOGIC_DEBUG=m)
+	help
+	  if you want to get cpu frequency in Mhz,
+
+config AMLOGIC_HOTPLUG_ARM_CPU0
+	bool "Support VTS thermal 1.0 test on arm"
+	default n
+	help
+	  if build with arm set this config to y for vts thermal 1.0 test,
+	  set config to n for arm64
+
+config AMLOGIC_AUDIO_UTILS
+	tristate "Amlogic audio utils"
+	default n
+	help
+	  add some debug tools
+
+config AMLOGIC_GKI_CONFIG
+	bool "Meson gki config"
+	depends on AMLOGIC_DEBUG
+	default n
+	help
+	  support GKI config enable or not
+
+config AMLOGIC_ENV_DEBUG
+	bool "AMLOGIC env debug"
+	depends on AMLOGIC_BREAK_GKI_20
+	depends on AMLOGIC_DEBUG
+	default n
+	help
+	  support amlogic env debug function
+
+config AMLOGIC_ZAPPER_NET_CUT
+	bool "zapper cut network"
+	depends on AMLOGIC_DEBUG
+	depends on AMLOGIC_BREAK_GKI
+	default n
+	help
+	  remove more for zapper network
+
+config AMLOGIC_ZAPPER_CUT
+	bool "zapper cut"
+	depends on AMLOGIC_DEBUG
+	depends on AMLOGIC_BREAK_GKI
+	default n
+	help
+	  remove more for zapper
+
+config AMLOGIC_ZAPPER_CUT_C1A
+	bool "zapper C1A"
+	depends on AMLOGIC_DEBUG
+	default n
+	help
+	  remove more for zapper c1a
+
+config AMLOGIC_REMOVE_OLD
+	bool "zapper cut"
+	depends on AMLOGIC_DEBUG
+	default n
+	help
+	  remove more for zapper
+
+config AMLOGIC_C3_REMOVE
+	bool "c3 project cut"
+	default n
+	help
+	  remove more for c3 project
+
+config AMLOGIC_DEBUG_IOTRACE
+	tristate "amlogic debug iotrace config"
+	default n
+	help
+	  support io/sched/irq/smc/misc trace
+
+config AMLOGIC_DEBUG_IOTM
+	bool "amlogic iotm config"
+	depends on AMLOGIC_DEBUG_IOTRACE
+	default n
+	help
+	  support for hw iotrace function
+
+config AMLOGIC_ARMV8_AARCH32
+	bool "AARCH32 kernel support for Amlogic ARMv8 Soc"
+	depends on AMLOGIC_BREAK_GKI_20
+	default n
+	help
+	  32 bit kernel support for amlogic armv8 SoC.
+	  choose y if you wanna kerenl working in ARMv8 AARCH32 mode
+
+config AMLOGIC_APU
+	bool "Amlogic APU enable"
+	default n
+	depends on AMLOGIC_BREAK_GKI_20
+	help
+	  this option is provide for AMLOGIC APU support, eg t3x/t5m
+	  has dedicated core for APU and should not used by other
+	  modules, and should enable
+
+config AMLOGIC_BGKI_SCHED_SYSCTL
+	bool "Amlogic sched sysctl"
+	default n
+	depends on AMLOGIC_BREAK_GKI
+	help
+	  this is for vts vts_kernel_proc_file_api_test support in
+	  android S.
+
+config AMLOGIC_ARM_UNWIND
+	bool "Amlogic modify in arm unwind"
+	depends on ARM_UNWIND
+	default n
+	help
+	 This option enable Amlogic arm unwind function
+	 If in doubt, say "Y"
+
+config AMLOGIC_DEBUG_ISOLCPUS
+	bool "Amlogic isolate APU"
+	default n
+	depends on AMLOGIC_DEBUG
+	help
+	  this option is provided for AMLOGIC isolate CPU5 modifications.
+
+config AMLOGIC_F2FS_OPTIMIZATION
+	bool "AMLOGIC f2fs optimization"
+	depends on AMLOGIC_BREAK_GKI_20
+	default y
+	help
+	  This option is set up for Amlogic f2fs optimization,
+	  if you want to optimize f2fs, please set this config to y.
+

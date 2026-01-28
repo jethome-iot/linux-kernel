@@ -39,7 +39,6 @@
 #include <linux/in.h>
 #include <net/ip.h>
 #include <linux/bitmap.h>
-#include <linux/mii.h>
 
 #include "mlx4_en.h"
 #include "en_port.h"
@@ -89,15 +88,15 @@ mlx4_en_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *drvinfo)
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	struct mlx4_en_dev *mdev = priv->mdev;
 
-	strscpy(drvinfo->driver, DRV_NAME, sizeof(drvinfo->driver));
-	strscpy(drvinfo->version, DRV_VERSION,
+	strlcpy(drvinfo->driver, DRV_NAME, sizeof(drvinfo->driver));
+	strlcpy(drvinfo->version, DRV_VERSION,
 		sizeof(drvinfo->version));
 	snprintf(drvinfo->fw_version, sizeof(drvinfo->fw_version),
 		"%d.%d.%d",
 		(u16) (mdev->dev->caps.fw_ver >> 32),
 		(u16) ((mdev->dev->caps.fw_ver >> 16) & 0xffff),
 		(u16) (mdev->dev->caps.fw_ver & 0xffff));
-	strscpy(drvinfo->bus_info, pci_name(mdev->dev->persist->pdev),
+	strlcpy(drvinfo->bus_info, pci_name(mdev->dev->persist->pdev),
 		sizeof(drvinfo->bus_info));
 }
 
@@ -198,8 +197,6 @@ static const char main_strings[][ETH_GSTRING_LEN] = {
 
 	/* xdp statistics */
 	"rx_xdp_drop",
-	"rx_xdp_redirect",
-	"rx_xdp_redirect_fail",
 	"rx_xdp_tx",
 	"rx_xdp_tx_full",
 
@@ -431,8 +428,6 @@ static void mlx4_en_get_ethtool_stats(struct net_device *dev,
 		data[index++] = priv->rx_ring[i]->bytes;
 		data[index++] = priv->rx_ring[i]->dropped;
 		data[index++] = priv->rx_ring[i]->xdp_drop;
-		data[index++] = priv->rx_ring[i]->xdp_redirect;
-		data[index++] = priv->rx_ring[i]->xdp_redirect_fail;
 		data[index++] = priv->rx_ring[i]->xdp_tx;
 		data[index++] = priv->rx_ring[i]->xdp_tx_full;
 	}
@@ -524,10 +519,6 @@ static void mlx4_en_get_strings(struct net_device *dev,
 				"rx%d_dropped", i);
 			sprintf(data + (index++) * ETH_GSTRING_LEN,
 				"rx%d_xdp_drop", i);
-			sprintf(data + (index++) * ETH_GSTRING_LEN,
-				"rx%d_xdp_redirect", i);
-			sprintf(data + (index++) * ETH_GSTRING_LEN,
-				"rx%d_xdp_redirect_fail", i);
 			sprintf(data + (index++) * ETH_GSTRING_LEN,
 				"rx%d_xdp_tx", i);
 			sprintf(data + (index++) * ETH_GSTRING_LEN,
@@ -652,8 +643,10 @@ static unsigned long *ptys2ethtool_link_mode(struct ptys2ethtool_config *cfg,
 		unsigned int i;						\
 		cfg = &ptys2ethtool_map[reg_];				\
 		cfg->speed = speed_;					\
-		linkmode_zero(cfg->supported);				\
-		linkmode_zero(cfg->advertised);				\
+		bitmap_zero(cfg->supported,				\
+			    __ETHTOOL_LINK_MODE_MASK_NBITS);		\
+		bitmap_zero(cfg->advertised,				\
+			    __ETHTOOL_LINK_MODE_MASK_NBITS);		\
 		for (i = 0 ; i < ARRAY_SIZE(modes) ; ++i) {		\
 			__set_bit(modes[i], cfg->supported);		\
 			__set_bit(modes[i], cfg->advertised);		\
@@ -709,8 +702,10 @@ static void ptys2ethtool_update_link_modes(unsigned long *link_modes,
 	int i;
 	for (i = 0; i < MLX4_LINK_MODES_SZ; i++) {
 		if (eth_proto & MLX4_PROT_MASK(i))
-			linkmode_or(link_modes, link_modes,
-				    ptys2ethtool_link_mode(&ptys2ethtool_map[i], report));
+			bitmap_or(link_modes, link_modes,
+				  ptys2ethtool_link_mode(&ptys2ethtool_map[i],
+							 report),
+				  __ETHTOOL_LINK_MODE_MASK_NBITS);
 	}
 }
 
@@ -721,9 +716,11 @@ static u32 ethtool2ptys_link_modes(const unsigned long *link_modes,
 	u32 ptys_modes = 0;
 
 	for (i = 0; i < MLX4_LINK_MODES_SZ; i++) {
-		ulong *map_mode = ptys2ethtool_link_mode(&ptys2ethtool_map[i],
-							 report);
-		if (linkmode_intersects(map_mode, link_modes))
+		if (bitmap_intersects(
+			    ptys2ethtool_link_mode(&ptys2ethtool_map[i],
+						   report),
+			    link_modes,
+			    __ETHTOOL_LINK_MODE_MASK_NBITS))
 			ptys_modes |= 1 << i;
 	}
 	return ptys_modes;
@@ -1141,9 +1138,7 @@ static void mlx4_en_get_pauseparam(struct net_device *dev,
 }
 
 static int mlx4_en_set_ringparam(struct net_device *dev,
-				 struct ethtool_ringparam *param,
-				 struct kernel_ethtool_ringparam *kernel_param,
-				 struct netlink_ext_ack *extack)
+				 struct ethtool_ringparam *param)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	struct mlx4_en_dev *mdev = priv->mdev;
@@ -1210,9 +1205,7 @@ out:
 }
 
 static void mlx4_en_get_ringparam(struct net_device *dev,
-				  struct ethtool_ringparam *param,
-				  struct kernel_ethtool_ringparam *kernel_param,
-				  struct netlink_ext_ack *extack)
+				  struct ethtool_ringparam *param)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 
@@ -1258,8 +1251,8 @@ static int mlx4_en_check_rxfh_func(struct net_device *dev, u8 hfunc)
 	return -EINVAL;
 }
 
-static int mlx4_en_get_rxfh(struct net_device *dev,
-			    struct ethtool_rxfh_param *rxfh)
+static int mlx4_en_get_rxfh(struct net_device *dev, u32 *ring_index, u8 *key,
+			    u8 *hfunc)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	u32 n = mlx4_en_get_rxfh_indir_size(dev);
@@ -1269,19 +1262,19 @@ static int mlx4_en_get_rxfh(struct net_device *dev,
 	rss_rings = rounddown_pow_of_two(rss_rings);
 
 	for (i = 0; i < n; i++) {
-		if (!rxfh->indir)
+		if (!ring_index)
 			break;
-		rxfh->indir[i] = i % rss_rings;
+		ring_index[i] = i % rss_rings;
 	}
-	if (rxfh->key)
-		memcpy(rxfh->key, priv->rss_key, MLX4_EN_RSS_KEY_SIZE);
-	rxfh->hfunc = priv->rss_hash_fn;
+	if (key)
+		memcpy(key, priv->rss_key, MLX4_EN_RSS_KEY_SIZE);
+	if (hfunc)
+		*hfunc = priv->rss_hash_fn;
 	return 0;
 }
 
-static int mlx4_en_set_rxfh(struct net_device *dev,
-			    struct ethtool_rxfh_param *rxfh,
-			    struct netlink_ext_ack *extack)
+static int mlx4_en_set_rxfh(struct net_device *dev, const u32 *ring_index,
+			    const u8 *key, const u8 hfunc)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	u32 n = mlx4_en_get_rxfh_indir_size(dev);
@@ -1295,12 +1288,12 @@ static int mlx4_en_set_rxfh(struct net_device *dev,
 	 * between rings
 	 */
 	for (i = 0; i < n; i++) {
-		if (!rxfh->indir)
+		if (!ring_index)
 			break;
-		if (i > 0 && !rxfh->indir[i] && !rss_rings)
+		if (i > 0 && !ring_index[i] && !rss_rings)
 			rss_rings = i;
 
-		if (rxfh->indir[i] != (i % (rss_rings ?: n)))
+		if (ring_index[i] != (i % (rss_rings ?: n)))
 			return -EINVAL;
 	}
 
@@ -1311,8 +1304,8 @@ static int mlx4_en_set_rxfh(struct net_device *dev,
 	if (!is_power_of_2(rss_rings))
 		return -EINVAL;
 
-	if (rxfh->hfunc != ETH_RSS_HASH_NO_CHANGE) {
-		err = mlx4_en_check_rxfh_func(dev, rxfh->hfunc);
+	if (hfunc != ETH_RSS_HASH_NO_CHANGE) {
+		err = mlx4_en_check_rxfh_func(dev, hfunc);
 		if (err)
 			return err;
 	}
@@ -1323,12 +1316,12 @@ static int mlx4_en_set_rxfh(struct net_device *dev,
 		mlx4_en_stop_port(dev, 1);
 	}
 
-	if (rxfh->indir)
+	if (ring_index)
 		priv->prof->rss_rings = rss_rings;
-	if (rxfh->key)
-		memcpy(priv->rss_key, rxfh->key, MLX4_EN_RSS_KEY_SIZE);
-	if (rxfh->hfunc !=  ETH_RSS_HASH_NO_CHANGE)
-		priv->rss_hash_fn = rxfh->hfunc;
+	if (key)
+		memcpy(priv->rss_key, key, MLX4_EN_RSS_KEY_SIZE);
+	if (hfunc !=  ETH_RSS_HASH_NO_CHANGE)
+		priv->rss_hash_fn = hfunc;
 
 	if (port_up) {
 		err = mlx4_en_start_port(dev);
@@ -1467,8 +1460,8 @@ static int add_ip_rule(struct mlx4_en_priv *priv,
 		       struct list_head *list_h)
 {
 	int err;
-	struct mlx4_spec_list *spec_l2;
-	struct mlx4_spec_list *spec_l3;
+	struct mlx4_spec_list *spec_l2 = NULL;
+	struct mlx4_spec_list *spec_l3 = NULL;
 	struct ethtool_usrip4_spec *l3_mask = &cmd->fs.m_u.usr_ip4_spec;
 
 	spec_l3 = kzalloc(sizeof(*spec_l3), GFP_KERNEL);
@@ -1505,9 +1498,9 @@ static int add_tcp_udp_rule(struct mlx4_en_priv *priv,
 			     struct list_head *list_h, int proto)
 {
 	int err;
-	struct mlx4_spec_list *spec_l2;
-	struct mlx4_spec_list *spec_l3;
-	struct mlx4_spec_list *spec_l4;
+	struct mlx4_spec_list *spec_l2 = NULL;
+	struct mlx4_spec_list *spec_l3 = NULL;
+	struct mlx4_spec_list *spec_l4 = NULL;
 	struct ethtool_tcpip4_spec *l4_mask = &cmd->fs.m_u.tcp_ip4_spec;
 
 	spec_l2 = kzalloc(sizeof(*spec_l2), GFP_KERNEL);

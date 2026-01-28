@@ -39,28 +39,22 @@ flow_offload_fill_dir(struct flow_offload *flow,
 
 	ft->l3proto = ctt->src.l3num;
 	ft->l4proto = ctt->dst.protonum;
-
-	switch (ctt->dst.protonum) {
-	case IPPROTO_TCP:
-	case IPPROTO_UDP:
-		ft->src_port = ctt->src.u.tcp.port;
-		ft->dst_port = ctt->dst.u.tcp.port;
-		break;
-	}
+	ft->src_port = ctt->src.u.tcp.port;
+	ft->dst_port = ctt->dst.u.tcp.port;
 }
 
 struct flow_offload *flow_offload_alloc(struct nf_conn *ct)
 {
 	struct flow_offload *flow;
 
-	if (unlikely(nf_ct_is_dying(ct)))
+	if (unlikely(nf_ct_is_dying(ct) ||
+	    !refcount_inc_not_zero(&ct->ct_general.use)))
 		return NULL;
 
 	flow = kzalloc(sizeof(*flow), GFP_ATOMIC);
 	if (!flow)
-		return NULL;
+		goto err_ct_refcnt;
 
-	refcount_inc(&ct->ct_general.use);
 	flow->ct = ct;
 
 	flow_offload_fill_dir(flow, FLOW_OFFLOAD_DIR_ORIGINAL);
@@ -72,6 +66,11 @@ struct flow_offload *flow_offload_alloc(struct nf_conn *ct)
 		__set_bit(NF_FLOW_DNAT, &flow->flags);
 
 	return flow;
+
+err_ct_refcnt:
+	nf_ct_put(ct);
+
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(flow_offload_alloc);
 
@@ -87,12 +86,22 @@ static u32 flow_offload_dst_cookie(struct flow_offload_tuple *flow_tuple)
 	return 0;
 }
 
+static struct dst_entry *nft_route_dst_fetch(struct nf_flow_route *route,
+					     enum flow_offload_tuple_dir dir)
+{
+	struct dst_entry *dst = route->tuple[dir].dst;
+
+	route->tuple[dir].dst = NULL;
+
+	return dst;
+}
+
 static int flow_offload_fill_route(struct flow_offload *flow,
-				   const struct nf_flow_route *route,
+				   struct nf_flow_route *route,
 				   enum flow_offload_tuple_dir dir)
 {
 	struct flow_offload_tuple *flow_tuple = &flow->tuplehash[dir].tuple;
-	struct dst_entry *dst = route->tuple[dir].dst;
+	struct dst_entry *dst = nft_route_dst_fetch(route, dir);
 	int i, j = 0;
 
 	switch (flow_tuple->l3proto) {
@@ -122,6 +131,7 @@ static int flow_offload_fill_route(struct flow_offload *flow,
 		       ETH_ALEN);
 		flow_tuple->out.ifidx = route->tuple[dir].out.ifindex;
 		flow_tuple->out.hw_ifidx = route->tuple[dir].out.hw_ifindex;
+		dst_release(dst);
 		break;
 	case FLOW_OFFLOAD_XMIT_XFRM:
 	case FLOW_OFFLOAD_XMIT_NEIGH:
@@ -146,7 +156,7 @@ static void nft_flow_dst_release(struct flow_offload *flow,
 }
 
 void flow_offload_route_init(struct flow_offload *flow,
-			    const struct nf_flow_route *route)
+			     struct nf_flow_route *route)
 {
 	flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_ORIGINAL);
 	flow_offload_fill_route(flow, route, FLOW_OFFLOAD_DIR_REPLY);
@@ -175,11 +185,8 @@ static void flow_offload_fixup_ct(struct nf_conn *ct)
 		timeout -= tn->offload_timeout;
 	} else if (l4num == IPPROTO_UDP) {
 		struct nf_udp_net *tn = nf_udp_pernet(net);
-		enum udp_conntrack state =
-			test_bit(IPS_SEEN_REPLY_BIT, &ct->status) ?
-			UDP_CT_REPLIED : UDP_CT_UNREPLIED;
 
-		timeout = tn->timeouts[state];
+		timeout = tn->timeouts[UDP_CT_REPLIED];
 		timeout -= tn->offload_timeout;
 	} else {
 		return;
@@ -299,12 +306,12 @@ int flow_offload_add(struct nf_flowtable *flow_table, struct flow_offload *flow)
 EXPORT_SYMBOL_GPL(flow_offload_add);
 
 void flow_offload_refresh(struct nf_flowtable *flow_table,
-			  struct flow_offload *flow, bool force)
+			  struct flow_offload *flow)
 {
 	u32 timeout;
 
 	timeout = nf_flowtable_time_stamp + flow_offload_get_timeout(flow);
-	if (force || timeout - READ_ONCE(flow->timeout) > HZ)
+	if (timeout - READ_ONCE(flow->timeout) > HZ)
 		WRITE_ONCE(flow->timeout, timeout);
 	else
 		return;
@@ -401,18 +408,11 @@ nf_flow_table_iterate(struct nf_flowtable *flow_table,
 	return err;
 }
 
-static bool nf_flow_custom_gc(struct nf_flowtable *flow_table,
-			      const struct flow_offload *flow)
-{
-	return flow_table->type->gc && flow_table->type->gc(flow);
-}
-
 static void nf_flow_offload_gc_step(struct nf_flowtable *flow_table,
 				    struct flow_offload *flow, void *data)
 {
 	if (nf_flow_has_expired(flow) ||
-	    nf_ct_is_dying(flow->ct) ||
-	    nf_flow_custom_gc(flow_table, flow))
+	    nf_ct_is_dying(flow->ct))
 		flow_offload_teardown(flow);
 
 	if (test_bit(NF_FLOW_TEARDOWN, &flow->flags)) {
@@ -606,74 +606,14 @@ void nf_flow_table_free(struct nf_flowtable *flow_table)
 }
 EXPORT_SYMBOL_GPL(nf_flow_table_free);
 
-static int nf_flow_table_init_net(struct net *net)
-{
-	net->ft.stat = alloc_percpu(struct nf_flow_table_stat);
-	return net->ft.stat ? 0 : -ENOMEM;
-}
-
-static void nf_flow_table_fini_net(struct net *net)
-{
-	free_percpu(net->ft.stat);
-}
-
-static int nf_flow_table_pernet_init(struct net *net)
-{
-	int ret;
-
-	ret = nf_flow_table_init_net(net);
-	if (ret < 0)
-		return ret;
-
-	ret = nf_flow_table_init_proc(net);
-	if (ret < 0)
-		goto out_proc;
-
-	return 0;
-
-out_proc:
-	nf_flow_table_fini_net(net);
-	return ret;
-}
-
-static void nf_flow_table_pernet_exit(struct list_head *net_exit_list)
-{
-	struct net *net;
-
-	list_for_each_entry(net, net_exit_list, exit_list) {
-		nf_flow_table_fini_proc(net);
-		nf_flow_table_fini_net(net);
-	}
-}
-
-static struct pernet_operations nf_flow_table_net_ops = {
-	.init = nf_flow_table_pernet_init,
-	.exit_batch = nf_flow_table_pernet_exit,
-};
-
 static int __init nf_flow_table_module_init(void)
 {
-	int ret;
-
-	ret = register_pernet_subsys(&nf_flow_table_net_ops);
-	if (ret < 0)
-		return ret;
-
-	ret = nf_flow_table_offload_init();
-	if (ret)
-		goto out_offload;
-
-	return 0;
-
-out_offload:
-	unregister_pernet_subsys(&nf_flow_table_net_ops);
-	return ret;
+	return nf_flow_table_offload_init();
 }
 
 static void __exit nf_flow_table_module_exit(void)
 {
 	nf_flow_table_offload_exit();
-	unregister_pernet_subsys(&nf_flow_table_net_ops);
 }
 
 module_init(nf_flow_table_module_init);

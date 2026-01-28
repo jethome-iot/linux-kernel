@@ -637,10 +637,11 @@ int parse_options_subcommand(int argc, const char **argv, const struct option *o
 	/* build usage string if it's not provided */
 	if (subcommands && !usagestr[0]) {
 		char *buf = NULL;
+		int i;
 
 		astrcatf(&buf, "%s %s [<options>] {", subcmd_config.exec_name, argv[0]);
 
-		for (int i = 0; subcommands[i]; i++) {
+		for (i = 0; subcommands[i]; i++) {
 			if (i)
 				astrcat(&buf, "|");
 			astrcat(&buf, subcommands[i]);
@@ -666,7 +667,9 @@ int parse_options_subcommand(int argc, const char **argv, const struct option *o
 		exit(130);
 	case PARSE_OPT_LIST_SUBCMDS:
 		if (subcommands) {
-			for (int i = 0; subcommands[i]; i++)
+			int i;
+
+			for (i = 0; subcommands[i]; i++)
 				printf("%s ", subcommands[i]);
 		}
 		putchar('\n');
@@ -806,9 +809,9 @@ static int option__cmp(const void *va, const void *vb)
 
 static struct option *options__order(const struct option *opts)
 {
-	int nr_opts = 0, nr_group = 0, len;
+	int nr_opts = 0, len;
 	const struct option *o = opts;
-	struct option *opt, *ordered, *group;
+	struct option *ordered;
 
 	for (o = opts; o->type != OPTION_END; o++)
 		++nr_opts;
@@ -819,18 +822,7 @@ static struct option *options__order(const struct option *opts)
 		goto out;
 	memcpy(ordered, opts, len);
 
-	/* sort each option group individually */
-	for (opt = group = ordered; opt->type != OPTION_END; opt++) {
-		if (opt->type == OPTION_GROUP) {
-			qsort(group, nr_group, sizeof(*opt), option__cmp);
-			group = opt + 1;
-			nr_group = 0;
-			continue;
-		}
-		nr_group++;
-	}
-	qsort(group, nr_group, sizeof(*opt), option__cmp);
-
+	qsort(ordered, nr_opts, sizeof(*o), option__cmp);
 out:
 	return ordered;
 }
