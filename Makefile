@@ -1549,6 +1549,15 @@ dtbs_check: dtbs
 dtbs_install:
 	$(Q)$(MAKE) $(dtbinst)=$(dtstree) dst=$(INSTALL_DTBS_PATH)
 
+PHONY += dtbs_copy
+dtbs_copy: dtbs
+	$(Q)mkdir -p $(srctree)/arch/$(SRCARCH)/boot/dts/amlogic/
+	$(Q)cp -v $(srctree)/common_drivers/arch/$(SRCARCH)/boot/dts/amlogic/s7d_jethub_j300_linux.dtb \
+		$(srctree)/arch/$(SRCARCH)/boot/dts/amlogic/ 2>/dev/null || true
+	$(Q)cp -v $(srctree)/common_drivers/arch/$(SRCARCH)/boot/dts/amlogic/s7d_s905x5m_odroidc5.dtb \
+		$(srctree)/arch/$(SRCARCH)/boot/dts/amlogic/ 2>/dev/null || true
+	@echo "DTBs copied to arch/$(SRCARCH)/boot/dts/amlogic/"
+
 ifdef CONFIG_OF_EARLY_FLATTREE
 all: dtbs
 endif

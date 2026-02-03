@@ -137,6 +137,7 @@ dtb-y += s7d_s905x5m_bm202.dtb
 dtb-y += s7d_s905x5m_bm202_linux.dtb
 dtb-y += s7d_s905x5m_bm209.dtb
 dtb-y += s7d_s905x5m_odroidc5.dtb
+dtb-y += s7d_jethub_j300_linux.dtb
 dtb-y += s6_pxp.dtb
 dtb-y += s6_s905d5_bq201.dtb
 dtb-y += s6_s905d5_bq201_16g.dtb
