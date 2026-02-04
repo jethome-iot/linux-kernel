@@ -25,8 +25,8 @@
 	aliases {
 		serial0 = &uart_B;
 		ethernet0 = &ethmac;
-		mmc0 = &sd_emmc_c;  /* eMMC */
-		mmc1 = &sd_emmc_b;  /* SD card */
+		mmc0 = &sd_emmc_b;  /* SD card */
+        mmc1 = &sd_emmc_c;  /* eMMC */
 	};
 
 	chosen {
@@ -163,9 +163,9 @@
 	status = "okay";
 };
 
-/* eMMC - disabled to allow SPI NOR access (shared pins) */
+/* eMMC */
 &sd_emmc_c {
-	status = "disabled";
+	status = "okay";
 	pinctrl-0 = <&emmc_pins>;
 	pinctrl-names = "default";
 
@@ -211,41 +211,6 @@
 	disable-wp;
 
 	cd-gpios = <&gpio GPIOC_6 GPIO_ACTIVE_HIGH>;
-};
-
-&spi_nfc {
-	status = "okay";
-
-	flash@0 {
-		status = "okay";
-		compatible = "jedec,spi-nor";
-		reg = <0>;
-		spi-max-frequency = <10000000>;
-		spi-tx-bus-width = <1>;
-		spi-rx-bus-width = <1>;
-
-		partitions {
-			compatible = "fixed-partitions";
-			#address-cells = <1>;
-			#size-cells = <1>;
-
-			partition@0 {
-				label = "bootloader";
-				reg = <0x00000000 0x00200000>;
-				read-only;
-			};
-
-			partition@200000 {
-				label = "env";
-				reg = <0x00200000 0x00010000>;
-			};
-
-			partition@210000 {
-				label = "data";
-				reg = <0x00210000 0x03DF0000>;
-			};
-		};
-	};
 };
 
 &ethmac {
