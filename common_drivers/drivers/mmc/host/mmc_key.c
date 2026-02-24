@@ -455,8 +455,16 @@ void emmc_key_init(struct mmc_card *card, int *retp)
 	int bit = 0;
 	struct unifykey_type *uk_type = NULL;
 	struct unifykey_storage_ops ops;
+	struct mmc_host *mmc_host_ptr;
 
-	mmc_claim_host(card->host);
+	if (!card || !card->host) {
+		pr_err("%s: invalid card or host\n", __func__);
+		*retp = -EINVAL;
+		return;
+	}
+
+	mmc_host_ptr = card->host;
+	mmc_claim_host(mmc_host_ptr);
 	bit = card->csd.read_blkbits;
 	pr_debug("card key: card_blk_probe.\n");
 	emmckey_info = kmalloc(sizeof(*emmckey_info), GFP_KERNEL);
@@ -528,7 +536,7 @@ exit_err1:
 exit_err:
 		kfree(emmckey_info);
 exit:
-		mmc_release_host(card->host);
+		mmc_release_host(mmc_host_ptr);
 }
 
 int32_t emmc_key_read(u8 *buffer,
