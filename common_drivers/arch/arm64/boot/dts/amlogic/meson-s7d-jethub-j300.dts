@@ -178,7 +178,6 @@
 	disable-wp;
 	card_type = <1>;
 
-	vmmc-supply = <&vcc_3v3>;
 	vqmmc-supply = <&vddio_boot>;
 	mmc-pwrseq = <&emmc_pwrseq>;
 
