@@ -4146,7 +4146,6 @@ void add_dtbkey(struct work_struct *work)
 	struct mmc_host *mmc = mmc_from_priv(host);
 	struct mmc_card *card;
 
-	mmc_claim_host(mmc);
 	card = mmc->card;
 	if (card) {
 		emmc_key_init(card, &ret);
@@ -4157,9 +4156,7 @@ void add_dtbkey(struct work_struct *work)
 		if (ret)
 			pr_err("%s:%d,amlmmc_dtb_init fail\n", __func__, __LINE__);
 		amlmmc_write_tuning_para(card, MMC_TUNING_OFFSET);
-		mmc_release_host(mmc);
 	} else {
-		mmc_release_host(mmc);
 		schedule_delayed_work(&host->dtbkey, 50);
 	}
 }
