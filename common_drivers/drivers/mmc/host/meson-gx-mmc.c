@@ -2755,7 +2755,7 @@ static void aml_save_tuning_para(struct mmc_host *mmc)
 }
 
 /*write tuning para on emmc, the offset is 0x14400*/
-static int amlmmc_write_tuning_para(struct mmc_card *card,
+static int __maybe_unused amlmmc_write_tuning_para(struct mmc_card *card,
 					unsigned int dev_addr)
 {
 	unsigned int size;
