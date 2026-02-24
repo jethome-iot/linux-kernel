@@ -4140,25 +4140,6 @@ DEFINE_SHOW_ATTRIBUTE(erase_count);
 
 void add_dtbkey(struct work_struct *work)
 {
-	int ret;
-	struct meson_host *host =
-		container_of(work, struct meson_host, dtbkey.work);
-	struct mmc_host *mmc = mmc_from_priv(host);
-	struct mmc_card *card;
-
-	card = mmc->card;
-	if (card) {
-		emmc_key_init(card, &ret);
-		if (ret)
-			pr_err("%s:%d,emmc_key_init fail\n", __func__, __LINE__);
-
-		amlmmc_dtb_init(card, &ret);
-		if (ret)
-			pr_err("%s:%d,amlmmc_dtb_init fail\n", __func__, __LINE__);
-		amlmmc_write_tuning_para(card, MMC_TUNING_OFFSET);
-	} else {
-		schedule_delayed_work(&host->dtbkey, 50);
-	}
 }
 
 static int meson_mmc_probe(struct platform_device *pdev)
