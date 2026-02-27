@@ -212,7 +212,27 @@
 
 &ethmac {
 	status = "okay";
+	pinctrl-0 = <&eth_led_pins>;
+	pinctrl-names = "default";
+	phy-handle = <&internal_ephy>;
+	phy-mode = "rmii";
 	internal_phy = <1>;
+	keep-alive = <1>;
+};
+
+/* USB controller 0 (DRD) - handles both OTG_A and HOST_B ports */
+&usb_phy20 {
+	status = "okay";
+	portnum = <1>;
+};
+
+&crg_otg {
+	status = "okay";
+	controller-type = <1>; /* host mode */
+};
+
+&crg_drd {
+	status = "okay";
 };
 
 /* I2C for modules - identical to U-Boot */
