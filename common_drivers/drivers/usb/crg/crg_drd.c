@@ -177,8 +177,20 @@ static int crg_core_get_phy(struct crg_drd *crg)
 	struct device *dev = crg->dev;
 
 	crg->usb2_phy = devm_usb_get_phy_by_phandle(dev, "usb-phy", 0);
+	if (IS_ERR(crg->usb2_phy)) {
+		if (PTR_ERR(crg->usb2_phy) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_warn(dev, "no usb2 phy configured\n");
+		crg->usb2_phy = NULL;
+	}
 
 	crg->usb3_phy = devm_usb_get_phy_by_phandle(dev, "usb-phy", 1);
+	if (IS_ERR(crg->usb3_phy)) {
+		if (PTR_ERR(crg->usb3_phy) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_warn(dev, "no usb3 phy configured\n");
+		crg->usb3_phy = NULL;
+	}
 
 	return 0;
 }
