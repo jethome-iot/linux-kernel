@@ -226,6 +226,10 @@
 	portnum = <1>;
 };
 
+&usb_phy30 {
+	status = "okay";
+};
+
 &crg_otg {
 	status = "okay";
 	controller-type = <1>; /* host mode */
