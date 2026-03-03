@@ -216,7 +216,6 @@
 	pinctrl-names = "default";
 	phy-handle = <&internal_ephy>;
 	phy-mode = "rmii";
-	internal_phy = <1>;
 };
 
 /* USB controller */
