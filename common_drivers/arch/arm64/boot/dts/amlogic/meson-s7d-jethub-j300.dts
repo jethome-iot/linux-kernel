@@ -217,10 +217,9 @@
 	phy-handle = <&internal_ephy>;
 	phy-mode = "rmii";
 	internal_phy = <1>;
-	keep-alive = <1>;
 };
 
-/* USB controller 0 (DRD) - handles both OTG_A and HOST_B ports */
+/* USB controller */
 &usb_phy20 {
 	status = "okay";
 	portnum = <1>;
@@ -236,6 +235,20 @@
 };
 
 &crg_drd {
+	status = "okay";
+};
+
+/* USB controller 1 (Host) */
+&usb_phy21 {
+	status = "okay";
+	portnum = <1>;
+};
+
+&usb_phy31 {
+	status = "okay";
+};
+
+&crg {
 	status = "okay";
 };
 
