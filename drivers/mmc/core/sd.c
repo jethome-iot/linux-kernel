@@ -1256,8 +1256,9 @@ static int sd_read_ext_regs(struct mmc_card *card)
 	 */
 	err = sd_read_ext_reg(card, 0, 0, 0, 512, gen_info_buf);
 	if (err) {
-		pr_err("%s: error %d reading general info of SD ext reg\n",
+		pr_warn("%s: error %d reading general info of SD ext reg, skipping ext regs\n",
 			mmc_hostname(card->host), err);
+		err = 0;
 		goto out;
 	}
 
