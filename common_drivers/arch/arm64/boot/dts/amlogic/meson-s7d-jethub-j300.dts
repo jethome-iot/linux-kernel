@@ -208,14 +208,17 @@
 	disable-wp;
 
 	cd-gpios = <&gpio GPIOC_6 GPIO_ACTIVE_HIGH>;
+	vmmc-supply = <&vddao_3v3>;
+	vqmmc-supply = <&vddao_3v3>;
 };
 
 &ethmac {
-	status = "okay";
 	pinctrl-0 = <&eth_led_pins>;
 	pinctrl-names = "default";
+	status = "okay";
 	phy-handle = <&internal_ephy>;
 	phy-mode = "rmii";
+	keep-alive = <1>;
 };
 
 /* USB controller */
@@ -261,7 +264,7 @@
 
 &i2c2 {
 	status = "okay";
-	pinctrl-0 = <&i2c2_pins2>;
+	pinctrl-0 = <&i2c2_pins3>;
 	pinctrl-names = "default";
 	clock-frequency = <400000>;
 
@@ -299,4 +302,81 @@
 	pinctrl-0 = <&i2c3_pins1>;
 	pinctrl-names = "default";
 	clock-frequency = <400000>;
+};
+
+&vddcpu0 {
+	status = "okay";
+};
+
+&CPU0 {
+	#cooling-cells = <2>;
+	operating-points-v2 = <&cpu_opp_table0>,
+				<&cpu_opp_table1>,
+				<&cpu_opp_table2>,
+				<&cpu_opp_table3>;
+};
+
+/ {
+	thermal-zones {
+		soc_thermal: soc_thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <100>;
+			sustainable-power = <1160>;
+			thermal-sensors = <&p_tsensor 0>;
+
+			trips {
+				pswitch_on: trip-point@0 {
+					temperature = <75000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				pcontrol: trip-point@1 {
+					temperature = <80000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				pcritical: trip-point@2 {
+					temperature = <100000>;
+					hysteresis = <1000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				cpufreq_cooling_map {
+					trip = <&pcontrol>;
+					cooling-device = <&CPU0 0 8>;
+					contribution = <1024>;
+				};
+			};
+		};
+
+		dmc_thermal: dmc_thermal {
+			polling-delay = <500>;
+			polling-delay-passive = <500>;
+			thermal-sensors = <&dmc_tsensor 2>;
+
+			trips {
+				dmc_hot: trip-point@0 {
+					temperature = <15000>;
+					hysteresis = <5000>;
+					type = "hot";
+				};
+			};
+
+			cooling-maps {
+				dmc_cooling_map {
+					trip = <&dmc_hot>;
+					cooling-device = <&dmc_tsensor 0 0>;
+					contribution = <1024>;
+				};
+			};
+		};
+	};/*thermal zone end*/
+
+	meson-cpufreq {
+		cluster0 {
+			/delete-property/ pdvfs_enabled;
+		};
+	};
 };
