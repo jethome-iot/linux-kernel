@@ -172,7 +172,7 @@
 	bus-width = <8>;
 	cap-mmc-highspeed;
 	mmc-hs200-1_8v;
-	max-frequency = <50000000>;
+	max-frequency = <200000000>;
 	non-removable;
 	disable-wp;
 	card_type = <1>;
