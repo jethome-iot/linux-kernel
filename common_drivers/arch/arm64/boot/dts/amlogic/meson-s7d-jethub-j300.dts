@@ -305,15 +305,15 @@
 	pinctrl-names = "default";
 	clock-frequency = <400000>;
 
-	eeprom@50 {
+	eeprom@56 {
 		compatible = "atmel,24c64";
-		reg = <0x50>;
+		reg = <0x56>;
 		pagesize = <32>;
 	};
 
-	gpio_exp: gpio@20 {
+	gpio_exp: gpio@21 {
 		compatible = "ti,tca6408";
-		reg = <0x20>;
+		reg = <0x21>;
 		gpio-controller;
 		#gpio-cells = <2>;
 	};
