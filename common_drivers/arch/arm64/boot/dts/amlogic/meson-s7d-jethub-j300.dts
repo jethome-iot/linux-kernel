@@ -266,7 +266,7 @@
 	status = "okay";
 	pinctrl-0 = <&i2c2_pins3>;
 	pinctrl-names = "default";
-	clock-frequency = <400000>;
+	clock-frequency = <100000>;
 
 	atecc608a: crypto@60 {
 		compatible = "atmel,atecc508a";
