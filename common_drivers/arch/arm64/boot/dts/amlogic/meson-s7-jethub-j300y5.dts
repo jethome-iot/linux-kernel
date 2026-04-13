@@ -37,7 +37,7 @@
 
 	memory@00000000 {
 		device_type = "memory";
-		linux,usable-memory = <0x0 0x0 0x0 0x80000000>;
+		linux,usable-memory = <0x0 0x0 0x0 0x3F800000>; /* 1016 MiB (matches u-boot DRAM) */
 	};
 
 	reserved-memory {
@@ -50,7 +50,6 @@
 			status = "disabled";
 		};
 
-		/* global autoconfigured region for contiguous allocations */
 		ramoops@0x07400000 {
 			compatible = "ramoops";
 			reg = <0x0 0x07400000 0x0 0x00100000>;
@@ -73,7 +72,6 @@
 
 		secmon_reserved:linux,secmon {
 			compatible = "shared-dma-pool";
-			/*reusable;*/
 			no-map;
 			alignment = <0x0 0x100000>;
 			reg = <0x0 0x05000000 0x0 0x2300000>;
@@ -85,107 +83,61 @@
 			alignment = <0x0 0x400000>;
 			reg = <0x0 0x1f800000 0x0 0x800000>;
 		};
-
 		ion_cma_reserved:linux,ion-dev {
 			compatible = "shared-dma-pool";
 			reusable;
 			size = <0x0 0x0>;
-			alignment = <0x0 0x400000>;
 		};
 		ion_fb_reserved:linux,ion-fb {
 			compatible = "shared-dma-pool";
 			reusable;
 			size = <0x0 0x0>;
-			alignment = <0x0 0x400000>;
 		};
 		dmaheap_cma_reserved:heap-gfx {
 			compatible = "shared-dma-pool";
 			reusable;
-			/* maximum size of fbdev and wayland-drm backend
-			 * fbdev: 2 * (number of /dev/fbx device) buffers
-			 * wayland-drm: 4 buffers for westeros or 2 buffers for weston,
-			 *   3 buffers for direct display(enabled on weston)
-			 */
-			size = <0x0 0x3000000>;
-			alignment = <0x0 0x400000>;
+			size = <0x0 0x0>;
 		};
 		dmaheap_fb_reserved:heap-fb {
 			compatible = "shared-dma-pool";
 			reusable;
-			/* 1080p STB androidU size 56M */
 			size = <0x0 0x0>;
-			alignment = <0x0 0x400000>;
 		};
-		/*di CMA pool */
 		di_cma_reserved:linux,di_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			/* buffer_size = 3621952(yuv422 8bit)
-			 *  | 4736064(yuv422 10bit)
-			 *  | 4074560(yuv422 10bit full pack mode)
-			 * 10x3621952=34.6M(0x23) support 8bit
-			 * 10x4736064=45.2M(0x2e) support 12bit
-			 * 10x4074560=40M(0x28) support 10bit
-			 */
-			//size = <0x0 0x0B000000>;
-			//size = <0x0 0x0>;
-			alignment = <0x0 0x400000>;
+			size = <0x0 0x0>;
 		};
-
-		/*  POST PROCESS MANAGER */
 		ppmgr_reserved:linux,ppmgr {
 			compatible = "shared-dma-pool";
 			size = <0x0 0x0>;
 		};
-
 		codec_mm_cma:linux,codec_mm_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			/* ion_codec_mm max can alloc size 80M*/
-			size = <0x0 0xd000000>;
-			alignment = <0x0 0x400000>;
-			linux,contiguous-region;
+			size = <0x0 0x0>;
 		};
-
-		/* codec shared reserved */
 		codec_mm_reserved:linux,codec_mm_reserved {
 			compatible = "amlogic, codec-mm-reserved";
 			size = <0x0 0x0>;
-			alignment = <0x0 0x100000>;
-			//no-map;
 		};
-
 		secure_vdec_reserved:linux,secure_vdec_reserved {
 			compatible = "amlogic, secure-vdec-reserved";
-			no-map;
-			size = <0x0 0x1000000>;
-			alignment = <0x0 0x100000>;
+			size = <0x0 0x0>;
 		};
-		/*  vdin0 CMA pool */
-		//vdin0_cma_reserved:linux,vdin0_cma {
-		//	compatible = "shared-dma-pool";
-		//	reusable;
-			/* up to 1920x1080 yuv422 8bit and 5 buffers
-			 * 1920x1080x2x5 = 20 M
-			 */
-		//	size = <0x0 0x01400000>;
-		//	alignment = <0x0 0x400000>;
-		//};
-		/*  vdin1 CMA pool */
 		vdin1_cma_reserved:linux,vdin1_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x00c00000>;
-			alignment = <0x0 0x400000>;
+			size = <0x0 0x0>;
 		};
-		/* global autoconfigured region for contiguous allocations */
+
 		linux,cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x800000>;
+			size = <0x0 0x2000000>;
 			alignment = <0x0 0x400000>;
 			linux,cma-default;
-			alloc-ranges = <0x0 0x0 0x0 0x30000000>;
+			alloc-ranges = <0x0 0x08000000 0x0 0x16000000>;
 		};
 	};
 
