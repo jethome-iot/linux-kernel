@@ -37,7 +37,7 @@
 
 	memory@00000000 {
 		device_type = "memory";
-		linux,usable-memory = <0x0 0x0 0x0 0x3F800000>; /* 1016 MiB (matches u-boot DRAM) */
+		linux,usable-memory = <0x0 0x0 0x0 0x80000000>; /* 2 GB */
 	};
 
 	reserved-memory {
@@ -83,61 +83,76 @@
 			alignment = <0x0 0x400000>;
 			reg = <0x0 0x1f800000 0x0 0x800000>;
 		};
+
 		ion_cma_reserved:linux,ion-dev {
 			compatible = "shared-dma-pool";
 			reusable;
 			size = <0x0 0x0>;
+			alignment = <0x0 0x400000>;
 		};
 		ion_fb_reserved:linux,ion-fb {
 			compatible = "shared-dma-pool";
 			reusable;
 			size = <0x0 0x0>;
+			alignment = <0x0 0x400000>;
 		};
 		dmaheap_cma_reserved:heap-gfx {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x0>;
+			size = <0x0 0x3000000>;
+			alignment = <0x0 0x400000>;
 		};
 		dmaheap_fb_reserved:heap-fb {
 			compatible = "shared-dma-pool";
 			reusable;
 			size = <0x0 0x0>;
+			alignment = <0x0 0x400000>;
 		};
 		di_cma_reserved:linux,di_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x0>;
+			alignment = <0x0 0x400000>;
 		};
+
 		ppmgr_reserved:linux,ppmgr {
 			compatible = "shared-dma-pool";
 			size = <0x0 0x0>;
 		};
+
 		codec_mm_cma:linux,codec_mm_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x0>;
+			size = <0x0 0xd000000>;
+			alignment = <0x0 0x400000>;
+			linux,contiguous-region;
 		};
+
 		codec_mm_reserved:linux,codec_mm_reserved {
 			compatible = "amlogic, codec-mm-reserved";
 			size = <0x0 0x0>;
+			alignment = <0x0 0x100000>;
 		};
+
 		secure_vdec_reserved:linux,secure_vdec_reserved {
 			compatible = "amlogic, secure-vdec-reserved";
-			size = <0x0 0x0>;
+			no-map;
+			size = <0x0 0x1000000>;
+			alignment = <0x0 0x100000>;
 		};
+
 		vdin1_cma_reserved:linux,vdin1_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x0>;
+			size = <0x0 0x00c00000>;
+			alignment = <0x0 0x400000>;
 		};
-
 		linux,cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x2000000>;
+			size = <0x0 0x800000>;
 			alignment = <0x0 0x400000>;
 			linux,cma-default;
-			alloc-ranges = <0x0 0x08000000 0x0 0x16000000>;
+			alloc-ranges = <0x0 0x0 0x0 0x30000000>;
 		};
 	};
 
