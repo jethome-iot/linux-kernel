@@ -5,6 +5,9 @@
 
 /dts-v1/;
 
+/* Reserve firmware scratch area — BL31/AOCPU write state at 0x07FFA000-0x07FFC000 */
+/memreserve/ 0x07400000 0x00C00000;
+
 #include "meson-s7.dtsi"
 #include "hdr10plus.dtsi"
 #include "mesons7_drm.dtsi"
