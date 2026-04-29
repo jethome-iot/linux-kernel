@@ -73,11 +73,6 @@
 			reg = <0x0 0x05000000 0x0 0x2300000>;
 		};
 
-		fw_cushion: firmware-cushion@7500000 {
-			no-map;
-			reg = <0x0 0x07500000 0x0 0x00d00000>;
-		};
-
 		logo_reserved:linux,meson-fb {
 			compatible = "shared-dma-pool";
 			reusable;
@@ -232,10 +227,6 @@
 		regulator-name = "VCC5V";
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
-		pinctrl-names = "default";
-		gpio = <&gpio GPIOC_7 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		startup-delay-us = <70000>;
-		enable-active-high;
 		regulator-boot-on;
 		regulator-always-on;
 	};
