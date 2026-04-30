@@ -73,6 +73,18 @@
 			reg = <0x0 0x05000000 0x0 0x2300000>;
 		};
 
+		/*
+		 * fw_cushion: protects 0x07500000+13MB from kernel allocator.
+		 * BL31/BL32/AOCPU on this SoC writes here despite SDK reference
+		 * not declaring it as no-map. Without this, kernel pages at this
+		 * address get silently corrupted, manifesting as buddy allocator
+		 * list crashes early in boot.
+		 */
+		fw_cushion: firmware-cushion@7500000 {
+			no-map;
+			reg = <0x0 0x07500000 0x0 0x00d00000>;
+		};
+
 		logo_reserved:linux,meson-fb {
 			compatible = "shared-dma-pool";
 			reusable;
@@ -146,7 +158,13 @@
 		linux,cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x800000>;
+			/*
+			 * 32MB instead of SDK reference 8MB.
+			 * On this board MMC/USB drivers exhaust 8MB pool at ~0.3s
+			 * with -ENOMEM (verified in boot log), which leads to
+			 * downstream allocator corruption. Keep larger pool.
+			 */
+			size = <0x0 0x2000000>;
 			alignment = <0x0 0x400000>;
 			linux,cma-default;
 			alloc-ranges = <0x0 0x0 0x0 0x30000000>;
@@ -471,6 +489,10 @@
 };
 
 &fb {
+	status = "disabled";
+};
+
+&gpu {
 	status = "disabled";
 };
 
