@@ -9,8 +9,8 @@
 #include "partition_normal_linux.dtsi"
 
 / {
-	amlogic-dt-id = "s7_s905y5_j300y5";
-	compatible = "s7_s905y5_j300y5";
+	amlogic-dt-id = "s7_s905y5_j310";
+	compatible = "s7_s905y5_j310";
 	interrupt-parent = <&gic>;
 	#address-cells = <2>;
 	#size-cells = <2>;
