@@ -91,13 +91,6 @@
 			alloc-ranges = <0x0 0x0 0x0 0x30000000>;
 		};
 
-		/*
-		 * Stub reserved-memory labels referenced from meson-s7.dtsi
-		 * consumer nodes (ion_dev, fb, codec_mm, ppmgr). Their drivers
-		 * are disabled in Kconfig (AMLOGIC_ION/FB/CODEC_MM/PPMGR=n) or
-		 * nodes are marked status="disabled", but DTC still resolves
-		 * phandles. size=0 means no memory is actually reserved.
-		 */
 		ion_cma_reserved:linux,ion-dev {
 			compatible = "shared-dma-pool";
 			reusable;
@@ -140,17 +133,12 @@
 			thermal-sensors = <&p_tsensor 0>;
 
 			trips {
-				pswitch_on: trip-point@0 {
+				pcontrol: trip-point@0 {
 					temperature = <75000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
-				pcontrol: trip-point@1 {
-					temperature = <80000>;
-					hysteresis = <5000>;
-					type = "passive";
-				};
-				pcritical: trip-point@2 {
+				pcritical: trip-point@1 {
 					temperature = <100000>;
 					hysteresis = <1000>;
 					type = "critical";
@@ -254,6 +242,22 @@
 			gpios = <&exp24 14 GPIO_ACTIVE_HIGH>;
 			linux,code = <KEY_BACK>;
 			debounce-interval = <10>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_red: led-red {
+			label = "jethub:red:fault";
+			gpios = <&gpio GPIOZ_5 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_green: led-green {
+			label = "jethub:green:heartbeat";
+			gpios = <&gpio GPIOZ_4 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
 		};
 	};
 };
