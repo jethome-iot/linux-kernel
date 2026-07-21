@@ -18,16 +18,11 @@
 	aliases {
 		serial0 = &uart_B;
 		serial1 = &uart_A;
-		serial2 = &uart_C;
-		serial3 = &uart_D;
-		serial4 = &uart_E;
 		i2c0 = &i2c0;
 		i2c1 = &i2c1;
 		i2c2 = &i2c2;
 		i2c3 = &i2c3;
 		i2c4 = &i2c4;
-		spi0 = &spifc;
-		spi1 = &spicc0;
 		tsensor0 = &p_tsensor;
 	};
 
@@ -174,7 +169,6 @@
 	};
 
 	/*
-	 * SD card IO voltage, switched via TPS2116 power mux:
 	 *   PR1 = HIGH -> 3.3V (default speed / init)
 	 *   PR1 = LOW  -> 1.8V (UHS-I signaling)
 	 * PR1 is driven by GPIOH_6
@@ -349,8 +343,6 @@
 		vcc-supply = <&vddao_3v3>;
 	};
 
-
-
 	exp21: gpio@21 {
 		compatible = "ti,tca6408";
 		reg = <0x21>;
@@ -359,6 +351,18 @@
 
 		//Add later
 		//gpio-line-names =
+	};
+
+	/*
+	 * DS2482 I2C-to-1-Wire bridge: acts as a 1-Wire master.
+	 * Driver ds2482.c binds via i2c_device_id "ds2482" (no of_match_table),
+	 * so compatible must be "maxim,ds2482" (I2C core strips the vendor prefix).
+	 * reg address is set by the AD0/AD1 strap pins: 0x18 (both low) .. 0x1b.
+	 * VERIFY this matches the board strapping.
+	 */
+	onewire: ds2482@18 {
+		compatible = "maxim,ds2482";
+		reg = <0x18>;
 	};
 };
 
