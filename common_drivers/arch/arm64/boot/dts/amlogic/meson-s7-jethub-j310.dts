@@ -282,7 +282,9 @@
 
 &crg_otg {
 	status = "okay";
-	controller-type = <1>; /* 0~3: normal, host, device, otg */
+	controller-type = <1>;
+	gpio-vbus-power = "GPIOZ_2";
+	gpios = <&gpio GPIOZ_2 GPIO_ACTIVE_HIGH>;
 };
 
 &crg_drd {
@@ -353,13 +355,6 @@
 		//gpio-line-names =
 	};
 
-	/*
-	 * DS2482 I2C-to-1-Wire bridge: acts as a 1-Wire master.
-	 * Driver ds2482.c binds via i2c_device_id "ds2482" (no of_match_table),
-	 * so compatible must be "maxim,ds2482" (I2C core strips the vendor prefix).
-	 * reg address is set by the AD0/AD1 strap pins: 0x18 (both low) .. 0x1b.
-	 * VERIFY this matches the board strapping.
-	 */
 	onewire: ds2482@18 {
 		compatible = "maxim,ds2482";
 		reg = <0x18>;
