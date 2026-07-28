@@ -283,8 +283,15 @@
 &crg_otg {
 	status = "okay";
 	controller-type = <1>;
-	gpio-vbus-power = "GPIOZ_2";
-	gpios = <&gpio GPIOZ_2 GPIO_ACTIVE_HIGH>;
+};
+
+&gpio {
+	usb_vbus_hog {
+		gpio-hog;
+		gpios = <GPIOZ_2 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "USB_PWR_ON_PD";
+	};
 };
 
 &crg_drd {
