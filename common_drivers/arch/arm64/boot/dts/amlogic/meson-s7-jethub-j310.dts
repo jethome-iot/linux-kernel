@@ -358,8 +358,11 @@
 		gpio-controller;
 		#gpio-cells = <2>;
 
-		//Add later
-		//gpio-line-names =
+		gpio-line-names =
+			"UXM1_RESET", "UXM1_MODE",
+			"UXM2_RESET", "UXM2_MODE",
+			"UXM3_RESET", "UXM3_MODE",
+			"UXM4_RESET", "UXM4_MODE";
 	};
 
 	onewire: ds2482@18 {
