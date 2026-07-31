@@ -288,9 +288,9 @@
 &gpio {
 	usb_vbus_hog {
 		gpio-hog;
-		gpios = <GPIOZ_2 GPIO_ACTIVE_HIGH>;
+		gpios = <GPIOZ_3 GPIO_ACTIVE_LOW>;
 		output-high;
-		line-name = "USB_PWR_ON_PD";
+		line-name = "USB_PWR_ON_PU";
 	};
 };
 
