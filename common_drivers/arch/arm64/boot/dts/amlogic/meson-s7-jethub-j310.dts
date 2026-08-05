@@ -176,12 +176,16 @@
 	vqmmc_sd: regulator-vqmmc-sd {
 		compatible = "regulator-gpio";
 		regulator-name = "VQMMC_SD";
+		vin-supply = <&vddao_3v3>;
 		regulator-min-microvolt = <1800000>;
 		regulator-max-microvolt = <3300000>;
 
 		gpios = <&gpio GPIOH_6 GPIO_ACTIVE_HIGH>;
+		gpios-states = <1>;	/* boots high -> 3.3V, matches the R11 pull-up */
 		states = <3300000 1>,	/* GPIOH_6 HIGH -> PR1 HIGH -> 3.3V */
 			 <1800000 0>;	/* GPIOH_6 LOW  -> PR1 LOW  -> 1.8V */
+
+		regulator-settling-time-us = <10000>;
 
 		regulator-boot-on;
 	};
@@ -316,10 +320,17 @@
 
 	bus-width = <4>;
 	cap-sd-highspeed;
-	max-frequency = <50000000>;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	max-frequency = <200000000>;
 	disable-wp;
 
 	cd-gpios = <&gpio GPIOC_6 GPIO_ACTIVE_HIGH>;
+
+	vmmc-supply = <&vddao_3v3>;
+	vqmmc-supply = <&vqmmc_sd>;
 };
 
 &sd_emmc_c {
