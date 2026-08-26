@@ -6,6 +6,7 @@
 /dts-v1/;
 
 #include "meson-s7.dtsi"
+#include "mesons7_drm.dtsi"
 #include "partition_normal_linux.dtsi"
 
 / {
@@ -42,14 +43,13 @@
 		ranges;
 
 		ramdump_bl33z@00000000 {
-			reg = <0x0 0x0 0x0 0x1800000>; /* 0 ~ 24M */
+			reg = <0x0 0x0 0x0 0x1800000>;
 			status = "disabled";
 		};
 
-		/* global autoconfigured region for contiguous allocations */
 		ramoops@0x07400000 {
 			compatible = "ramoops";
-			reg = <0x0 0x07400000 0x0 0x00080000>;	/* addr set in uboot */
+			reg = <0x0 0x07400000 0x0 0x00080000>;
 			record-size = <0x30000>;
 			console-size = <0x40000>;
 			ftrace-size = <0x0>;
@@ -66,20 +66,20 @@
 		dmaheap_cma_reserved:heap-gfx {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x3000000>;	/* 48 MB for DRM/Mali GPU buffers */
+			size = <0x0 0x4000000>;	/* 64 MB - compositor/DRM buffers */
+			alignment = <0x0 0x400000>;
+		};
+
+		dmaheap_fb_reserved:heap-fb {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x0 0x2000000>;	/* 32 MB - 1080p x 4B x 3 buffers */
 			alignment = <0x0 0x400000>;
 		};
 
 		linux,cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			/*
-			 * 64MB default CMA. 32MB worked for USB/MMC alone but
-			 * Mali GPU + DRM need more contiguous memory. SDK
-			 * reference 8MB is too small even without GPU - MMC/USB
-			 * exhausted it at ~0.3s with -ENOMEM, causing downstream
-			 * allocator corruption.
-			 */
 			size = <0x0 0x4000000>;
 			alignment = <0x0 0x400000>;
 			linux,cma-default;
@@ -96,6 +96,11 @@
 			reusable;
 			size = <0x0 0x0>;
 		};
+		/*
+		 * Boot-logo handover region. We skip the logo (logo_skip in
+		 * &drm_subsystem), so no memory is reserved here - the node
+		 * only exists to satisfy the memory-region phandle.
+		 */
 		logo_reserved:linux,meson-fb {
 			compatible = "shared-dma-pool";
 			reusable;
@@ -104,7 +109,9 @@
 		codec_mm_cma:linux,codec_mm_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x0>;
+			size = <0x0 0x4000000>;	/* 64 MB - reference uses 364 MB for 4K CTS decode, not needed here */
+			alignment = <0x0 0x400000>;
+			linux,contiguous-region;
 		};
 		codec_mm_reserved:linux,codec_mm_reserved {
 			compatible = "amlogic, codec-mm-reserved";
@@ -468,4 +475,26 @@
 &uart_A {
 	status = "okay";
 	uart-has-rtscts;
+};
+
+&drm_vpu {
+	status = "okay";
+	logo_addr = "0x1f800000";
+};
+
+&amhdmitx {
+	status = "okay";
+};
+
+&drm_subsystem {
+	fbdev_sizes = <1920 1080 1920 2160 32>;
+	logo_skip = <1>;	/* no u-boot splash handover */
+};
+
+&drm_amcvbsout {
+	status = "disabled";
+};
+
+&cvbsout {
+	status = "disabled";
 };
