@@ -411,7 +411,7 @@
 	/* EEPROM on cpu carrier board */
 	eeprom_carrier: eeprom@56 {
 		compatible = "atmel,24c64";
-		reg = <0x56>;
+		reg = <0x54>;
 		pagesize = <0x20>;
 		label = "eeprom_carrier";
 		address-width = <0x10>;
@@ -488,7 +488,7 @@
 
 &drm_subsystem {
 	fbdev_sizes = <1920 1080 1920 2160 32>;
-	logo_skip = <1>;	/* no u-boot splash handover */
+	logo_skip = <1>;
 };
 
 &drm_amcvbsout {
