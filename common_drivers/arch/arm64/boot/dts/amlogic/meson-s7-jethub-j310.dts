@@ -25,6 +25,8 @@
 		i2c3 = &i2c3;
 		i2c4 = &i2c4;
 		tsensor0 = &p_tsensor;
+		mmc0 = &sd_emmc_b;	/* SD card */
+		mmc1 = &sd_emmc_c;	/* eMMC */
 	};
 
 	chosen {
