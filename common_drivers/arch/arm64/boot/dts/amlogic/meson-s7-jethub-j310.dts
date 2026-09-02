@@ -257,6 +257,12 @@
 
 		led_red: led-red {
 			label = "jethub:red:fault";
+			gpios = <&gpio GPIOZ_6 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		led_blue: led-blue {
+			label = "jethub:red:fault";
 			gpios = <&gpio GPIOZ_5 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
