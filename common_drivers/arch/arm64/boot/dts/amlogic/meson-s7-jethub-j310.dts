@@ -262,7 +262,7 @@
 		};
 
 		led_blue: led-blue {
-			label = "jethub:red:fault";
+			label = "jethub:blue:recovery";
 			gpios = <&gpio GPIOZ_5 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
