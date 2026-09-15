@@ -434,8 +434,6 @@
 		solomon,dclk-frq = <15>;
 		solomon,prechargep1 = <1>;
 		solomon,prechargep2 = <15>;
-		/* U-Boot draws the boot logo; keep it until jethub-oled starts */
-		solomon,keep-contents;
 	};
 
 	exp24: gpio@24 {

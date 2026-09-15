@@ -727,6 +727,14 @@ static int ssd1307fb_probe(struct i2c_client *client)
 		goto fb_alloc_error;
 	}
 
+	ret = device_property_count_u8(dev, "solomon,splash");
+	if (ret == vmem_size)
+		device_property_read_u8_array(dev, "solomon,splash", vmem,
+					      vmem_size);
+	else if (ret > 0)
+		dev_warn(dev, "solomon,splash has %d bytes, expected %u, ignored\n",
+			 ret, vmem_size);
+
 	ssd1307fb_defio = devm_kzalloc(dev, sizeof(*ssd1307fb_defio),
 				       GFP_KERNEL);
 	if (!ssd1307fb_defio) {
