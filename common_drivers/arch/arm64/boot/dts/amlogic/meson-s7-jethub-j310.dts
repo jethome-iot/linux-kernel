@@ -68,14 +68,7 @@
 		dmaheap_cma_reserved:heap-gfx {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x4000000>;	/* 64 MB - compositor/DRM buffers */
-			alignment = <0x0 0x400000>;
-		};
-
-		dmaheap_fb_reserved:heap-fb {
-			compatible = "shared-dma-pool";
-			reusable;
-			size = <0x0 0x2000000>;	/* 32 MB - 1080p x 4B x 3 buffers */
+			size = <0x0 0x3000000>;	/* 48 MB, HDMI overlay raises to 64 MB */
 			alignment = <0x0 0x400000>;
 		};
 
@@ -99,9 +92,9 @@
 			size = <0x0 0x0>;
 		};
 		/*
-		 * Boot-logo handover region. We skip the logo (logo_skip in
-		 * &drm_subsystem), so no memory is reserved here - the node
-		 * only exists to satisfy the memory-region phandle.
+		 * Boot-logo handover region. The HDMI overlay skips the logo
+		 * (logo_skip in &drm_subsystem), so no memory is reserved here -
+		 * the node only exists to satisfy the memory-region phandle.
 		 */
 		logo_reserved:linux,meson-fb {
 			compatible = "shared-dma-pool";
@@ -111,9 +104,7 @@
 		codec_mm_cma:linux,codec_mm_cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x4000000>;	/* 64 MB - reference uses 364 MB for 4K CTS decode, not needed here */
-			alignment = <0x0 0x400000>;
-			linux,contiguous-region;
+			size = <0x0 0x0>;	/* sized by HDMI overlay */
 		};
 		codec_mm_reserved:linux,codec_mm_reserved {
 			compatible = "amlogic, codec-mm-reserved";
@@ -443,6 +434,8 @@
 		solomon,dclk-frq = <15>;
 		solomon,prechargep1 = <1>;
 		solomon,prechargep2 = <15>;
+		/* U-Boot draws the boot logo; keep it until jethub-oled starts */
+		solomon,keep-contents;
 	};
 
 	exp24: gpio@24 {
@@ -485,18 +478,9 @@
 	uart-has-rtscts;
 };
 
-&drm_vpu {
-	status = "okay";
-	logo_addr = "0x1f800000";
-};
-
-&amhdmitx {
-	status = "okay";
-};
-
+/* HDMI is enabled by meson-s7-jethub-j310-hdmi.dtbo */
 &drm_subsystem {
-	fbdev_sizes = <1920 1080 1920 2160 32>;
-	logo_skip = <1>;
+	status = "disabled";
 };
 
 &drm_amcvbsout {

@@ -139,6 +139,7 @@ dtb-y += s7d_s905x5m_bm209.dtb
 dtb-y += s7d_s905x5m_odroidc5.dtb
 dtb-y += meson-s7d-jethub-j300.dtb
 dtb-y += meson-s7-jethub-j310.dtb
+dtb-y += meson-s7-jethub-j310-hdmi.dtbo
 dtb-y += s6_pxp.dtb
 dtb-y += s6_s905d5_bq201.dtb
 dtb-y += s6_s905d5_bq201_16g.dtb

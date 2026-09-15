@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2026 JetHome
+ *
+ * HDMI output for JetHub J310. Apply on top of meson-s7-jethub-j310.dtb
+ * from the bootloader: reserved-memory changes take effect only if the
+ * overlay is merged before the kernel starts.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&{/reserved-memory} {
+	dmaheap_fb_reserved: heap-fb {
+		compatible = "shared-dma-pool";
+		reusable;
+		size = <0x0 0x2000000>;	/* 32 MB - 1080p x 4B x 3 buffers */
+		alignment = <0x0 0x400000>;
+	};
+};
+
+&dmaheap_cma_reserved {
+	size = <0x0 0x4000000>;	/* 64 MB - compositor/DRM buffers */
+};
+
+&codec_mm_cma {
+	size = <0x0 0x4000000>;	/* 64 MB - reference uses 364 MB for 4K CTS decode, not needed here */
+	alignment = <0x0 0x400000>;
+	linux,contiguous-region;
+};
+
+&drm_vpu {
+	status = "okay";
+	logo_addr = "0x1f800000";
+};
+
+&amhdmitx {
+	status = "okay";
+};
+
+&drm_subsystem {
+	status = "okay";
+	logo_skip = <1>;	/* no u-boot splash handover */
+};
