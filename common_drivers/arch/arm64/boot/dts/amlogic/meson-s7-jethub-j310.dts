@@ -307,6 +307,14 @@
 		output-high;
 		line-name = "USB_PWR_ON_PU";
 	};
+	/*
+	usb_vbus_hog {
+		gpio-hog;
+		gpios = <GPIOZ_2 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "USB_PWR_ON_PD";
+	};
+	*/
 };
 
 &crg_drd {
@@ -467,6 +475,10 @@
 	status = "okay";
 	phy-handle = <&internal_ephy>;
 	phy-mode = "rmii";
+};
+
+&eth_phy {
+	led_setting = <0x112>;
 };
 
 &pwm_e {
