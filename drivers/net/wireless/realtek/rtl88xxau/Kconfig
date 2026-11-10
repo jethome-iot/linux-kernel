@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0
+config 88XXAU
+	tristate "Realtek RTL8811AU/RTL8821AU/RTL8812AU/RTL8814AU USB Wi-Fi"
+	depends on USB && CFG80211
+	help
+	  Support Realtek AU USB Wi-Fi adapters, including USB ID 0bda:a811.
+	  The module is named 88XXau. Firmware is embedded in the driver.
+
+config 88XXAU_J310_CFG80211
+	bool "J310 vendor cfg80211 API compatibility"
+	depends on 88XXAU && AMLOGIC_IN_KERNEL_MODULES
+	help
+	  Use the cfg80211 API backported to the J310 vendor 5.15 kernel.
+	  Leave disabled for upstream kernels.
